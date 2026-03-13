@@ -130,6 +130,11 @@ if "homeassistant.helpers.entity_registry" not in sys.modules:
     ha_entity_reg.async_get = MagicMock()
     sys.modules["homeassistant.helpers.entity_registry"] = ha_entity_reg
 
+if "homeassistant.helpers.device_registry" not in sys.modules:
+    ha_device_reg = types.ModuleType("homeassistant.helpers.device_registry")
+    ha_device_reg.async_get = MagicMock()
+    sys.modules["homeassistant.helpers.device_registry"] = ha_device_reg
+
 
 # ── Load actual modules via importlib ───────────────────────────────
 

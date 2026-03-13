@@ -457,6 +457,11 @@ class ScheduleSensor(OptimizerBaseSensor):
         forecast = self.coordinator.data.get("forecast_detail")
         if forecast:
             attrs["forecast"] = forecast[:24]
+        else:
+            # During learning, provide weather-only forecast for the panel chart
+            weather = self.coordinator.data.get("weather_forecast")
+            if weather:
+                attrs["weather_forecast"] = weather[:24]
         attrs["mode"] = self.coordinator.data.get("mode")
         attrs["last_optimization"] = self.coordinator.data.get("last_optimization")
         attrs["savings_pct"] = self.coordinator.data.get("savings_pct")
@@ -492,12 +497,26 @@ class OutdoorTempSourceSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return {}
         info = self.coordinator.data.get("outdoor_temp_info", {})
-        return {
+        attrs = {
             "source": info.get("source", "unknown"),
             "stale": info.get("stale", False),
             "entity_count": info.get("entity_count", 0),
             "entities": info.get("entities", []),
         }
+        # Environment context for panel
+        rate = self.coordinator.data.get("electricity_rate")
+        if rate is not None:
+            attrs["electricity_rate"] = round(rate, 4)
+        co2 = self.coordinator.data.get("co2_intensity")
+        if co2 is not None:
+            attrs["co2_intensity"] = round(co2, 0)
+        wind = self.coordinator.data.get("wind_speed_mph")
+        if wind is not None:
+            attrs["wind_speed_mph"] = round(wind, 1)
+        solar = self.coordinator.data.get("solar_irradiance")
+        if solar is not None:
+            attrs["solar_irradiance"] = round(solar, 0)
+        return attrs
 
 
 class IndoorTempSourceSensor(OptimizerBaseSensor):

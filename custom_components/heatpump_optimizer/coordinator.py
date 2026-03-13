@@ -2019,6 +2019,21 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             result.append(entry)
         return result
 
+    def _build_weather_forecast(self) -> list[dict] | None:
+        """Build simplified weather forecast for the panel (outdoor temps only)."""
+        forecast = self._last_good_forecast
+        if not forecast:
+            return None
+        result = []
+        for pt in forecast[:24]:
+            result.append({
+                "time": pt.time.isoformat(),
+                "outdoor": round(pt.outdoor_temp, 1),
+                "humidity": round(pt.humidity, 0) if pt.humidity else None,
+                "cloud_cover": round(pt.cloud_cover, 2) if pt.cloud_cover else None,
+            })
+        return result or None
+
     # ── Data for sensor entities ────────────────────────────────────
 
     def _build_data(self, thermo_state=None) -> dict[str, Any]:
@@ -2221,6 +2236,22 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
             # Source health diagnostics
             "source_health": self._build_source_health(thermo_state),
+
+            # Environment context for panel
+            "electricity_rate": self.sensor_hub.read_electricity_rate(),
+            "co2_intensity": self.sensor_hub.read_co2_intensity(),
+            "wind_speed_mph": (
+                r.value if (r := self.sensor_hub.read_wind_speed(
+                    self.strategic.forecast_snapshot
+                )) else None
+            ),
+            "solar_irradiance": (
+                r.value if (r := self.sensor_hub.read_solar_irradiance())
+                else None
+            ),
+
+            # Weather forecast for panel (enables chart during learning)
+            "weather_forecast": self._build_weather_forecast(),
         }
 
     def _next_transition_info(self) -> dict[str, str] | None:

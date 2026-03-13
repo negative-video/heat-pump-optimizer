@@ -130,6 +130,7 @@ def _register_stubs():
 
     ha_device_reg = types.ModuleType("homeassistant.helpers.device_registry")
     ha_device_reg.DeviceInfo = dict
+    ha_device_reg.async_get = MagicMock()
     sys.modules.setdefault("homeassistant.helpers.device_registry", ha_device_reg)
 
     ha_entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")

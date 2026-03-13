@@ -120,21 +120,32 @@ class AreaOccupancyManager:
         Returns a list of AreaSensorGroup with entities populated but no
         occupancy state (that's set at runtime via update_occupancy).
         """
-        from homeassistant.helpers import area_registry, entity_registry
+        from homeassistant.helpers import (
+            area_registry,
+            device_registry,
+            entity_registry,
+        )
 
         area_reg = area_registry.async_get(hass)
         entity_reg = entity_registry.async_get(hass)
+        device_reg = device_registry.async_get(hass)
 
         temp_set = set(indoor_temp_entities or [])
         humidity_set = set(indoor_humidity_entities or [])
 
         # Group entities by area
+        # Entities can have a direct area_id, or inherit from their parent device
         area_entities: dict[str, dict[str, list[str]]] = {}
         for entry in entity_reg.entities.values():
-            if entry.area_id is None:
+            area_id = entry.area_id
+            if area_id is None and entry.device_id:
+                device = device_reg.async_get(entry.device_id)
+                if device is not None:
+                    area_id = device.area_id
+            if area_id is None:
                 continue
-            if entry.area_id not in area_entities:
-                area_entities[entry.area_id] = {
+            if area_id not in area_entities:
+                area_entities[area_id] = {
                     "temp": [],
                     "humidity": [],
                     "motion": [],
@@ -148,7 +159,7 @@ class AreaOccupancyManager:
                 and entry.original_device_class == "temperature"
                 and (not temp_set or eid in temp_set)
             ):
-                area_entities[entry.area_id]["temp"].append(eid)
+                area_entities[area_id]["temp"].append(eid)
 
             # Humidity sensors
             elif (
@@ -156,14 +167,14 @@ class AreaOccupancyManager:
                 and entry.original_device_class == "humidity"
                 and (not humidity_set or eid in humidity_set)
             ):
-                area_entities[entry.area_id]["humidity"].append(eid)
+                area_entities[area_id]["humidity"].append(eid)
 
             # Motion/occupancy sensors
             elif entry.domain == "binary_sensor" and entry.original_device_class in (
                 "motion",
                 "occupancy",
             ):
-                area_entities[entry.area_id]["motion"].append(eid)
+                area_entities[area_id]["motion"].append(eid)
 
         # Build AreaSensorGroups for areas that have at least a temp sensor
         result: list[AreaSensorGroup] = []

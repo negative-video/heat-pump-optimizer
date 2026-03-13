@@ -197,13 +197,14 @@ from test_area_occupancy import (
 )
 
 
-def _make_entity_entry(entity_id, area_id, domain, device_class=None):
+def _make_entity_entry(entity_id, area_id, domain, device_class=None, device_id=None):
     """Create a mock entity registry entry."""
     entry = MagicMock()
     entry.entity_id = entity_id
     entry.area_id = area_id
     entry.domain = domain
     entry.original_device_class = device_class
+    entry.device_id = device_id
     return entry
 
 
@@ -215,9 +216,17 @@ def _make_area(area_id, name):
     return area
 
 
-def _setup_discovery_mocks(hass, entities, areas):
-    """Wire up entity and area registry mocks for async_discover_areas."""
-    from homeassistant.helpers import area_registry, entity_registry
+def _make_device(device_id, area_id):
+    """Create a mock device registry device."""
+    device = MagicMock()
+    device.id = device_id
+    device.area_id = area_id
+    return device
+
+
+def _setup_discovery_mocks(hass, entities, areas, devices=None):
+    """Wire up entity, area, and device registry mocks for async_discover_areas."""
+    from homeassistant.helpers import area_registry, device_registry, entity_registry
 
     # Entity registry
     ent_reg = MagicMock()
@@ -230,6 +239,12 @@ def _setup_discovery_mocks(hass, entities, areas):
     area_map = {a.id: a for a in areas}
     area_reg.async_get_area = MagicMock(side_effect=lambda aid: area_map.get(aid))
     area_registry.async_get = MagicMock(return_value=area_reg)
+
+    # Device registry
+    dev_reg = MagicMock()
+    device_map = {d.id: d for d in (devices or [])}
+    dev_reg.async_get = MagicMock(side_effect=lambda did: device_map.get(did))
+    device_registry.async_get = MagicMock(return_value=dev_reg)
 
 
 class TestAreaDiscoveryFiltering:
@@ -321,6 +336,68 @@ class TestAreaDiscoveryFiltering:
 
         result = asyncio.run(AreaOccupancyManager.async_discover_areas(hass))
         assert result == []
+
+    def test_device_inherited_area_discovered(self):
+        """Entities inherit area from their parent device when not set directly."""
+        hass = _make_hass()
+        # Entity has no direct area_id but belongs to a device in "sitting_room"
+        entities = [
+            _make_entity_entry(
+                "sensor.ecobee_temp", None, "sensor", "temperature",
+                device_id="device_ecobee",
+            ),
+            _make_entity_entry(
+                "binary_sensor.ecobee_occupancy", None, "binary_sensor", "occupancy",
+                device_id="device_ecobee",
+            ),
+        ]
+        areas = [_make_area("sitting_room", "Sitting Room")]
+        devices = [_make_device("device_ecobee", "sitting_room")]
+        _setup_discovery_mocks(hass, entities, areas, devices)
+
+        result = asyncio.run(AreaOccupancyManager.async_discover_areas(hass))
+        assert len(result) == 1
+        assert result[0].area_name == "Sitting Room"
+        assert result[0].temp_entities == ["sensor.ecobee_temp"]
+        assert result[0].motion_entities == ["binary_sensor.ecobee_occupancy"]
+
+    def test_device_area_mixed_with_direct_area(self):
+        """Mix of direct entity area and device-inherited area works."""
+        hass = _make_hass()
+        entities = [
+            # Direct area assignment
+            _make_entity_entry("sensor.lr_temp", "lr", "sensor", "temperature"),
+            # Device-inherited area
+            _make_entity_entry(
+                "sensor.ep1_temp", None, "sensor", "temperature",
+                device_id="device_ep1",
+            ),
+        ]
+        areas = [
+            _make_area("lr", "Living Room"),
+            _make_area("media", "Media Room"),
+        ]
+        devices = [_make_device("device_ep1", "media")]
+        _setup_discovery_mocks(hass, entities, areas, devices)
+
+        result = asyncio.run(AreaOccupancyManager.async_discover_areas(hass))
+        assert len(result) == 2
+        names = {a.area_name for a in result}
+        assert names == {"Living Room", "Media Room"}
+
+    def test_entity_without_area_or_device_ignored(self):
+        """Entity with no area and no device is still skipped."""
+        hass = _make_hass()
+        entities = [
+            _make_entity_entry("sensor.orphan_temp", None, "sensor", "temperature"),
+            _make_entity_entry("sensor.lr_temp", "lr", "sensor", "temperature"),
+        ]
+        areas = [_make_area("lr", "Living Room")]
+        _setup_discovery_mocks(hass, entities, areas)
+
+        result = asyncio.run(AreaOccupancyManager.async_discover_areas(hass))
+        assert len(result) == 1
+        assert result[0].area_name == "Living Room"
 
 
 # ═══════════════════════════════════════════════════════════════════
