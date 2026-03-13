@@ -973,6 +973,7 @@ const PANEL_CSS = `
   .hero-temp-item {
     display: flex;
     flex-direction: column;
+    min-width: 0;
   }
   .hero-label {
     font-size: 11px;
@@ -989,6 +990,10 @@ const PANEL_CSS = `
     font-size: 11px;
     color: var(--text-secondary);
     margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
   }
   .tactical-delta {
     font-size: 12px;

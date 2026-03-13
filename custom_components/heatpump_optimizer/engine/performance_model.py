@@ -58,9 +58,20 @@ class PerformanceModel:
 
     @classmethod
     def from_file(cls, path: str | Path) -> PerformanceModel:
-        """Load from a Beestat Temperature Profile JSON file."""
+        """Load from a Beestat Temperature Profile JSON file.
+
+        NOTE: This performs blocking I/O.  When called from an async
+        context (e.g. HA event loop), use ``from_file_data`` with data
+        pre-read via ``hass.async_add_executor_job``.
+        """
         with open(path) as f:
             data = json.load(f)
+        return cls(data)
+
+    @classmethod
+    def from_file_data(cls, raw_json: str) -> PerformanceModel:
+        """Construct from already-read JSON string (no blocking I/O)."""
+        data = json.loads(raw_json)
         return cls(data)
 
     @classmethod

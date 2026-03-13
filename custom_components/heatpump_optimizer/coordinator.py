@@ -161,6 +161,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         initialization_mode: str = "beestat",
         model_import_data: str | None = None,
         behavior: dict[str, Any] | None = None,
+        profile_json: str | None = None,
     ):
         super().__init__(
             hass,
@@ -277,7 +278,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         elif profile_path:
             # Beestat mode (default, backward compatible)
             try:
-                self.model = PerformanceModel.from_file(profile_path)
+                if profile_json:
+                    self.model = PerformanceModel.from_file_data(profile_json)
+                else:
+                    self.model = PerformanceModel.from_file(profile_path)
                 self.estimator = ThermalEstimator.from_beestat(self.model._raw)
             except (FileNotFoundError, OSError, KeyError, ValueError) as err:
                 _LOGGER.error(

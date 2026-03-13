@@ -119,10 +119,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "away_comfort_delta": opts.get(CONF_AWAY_COMFORT_DELTA, DEFAULT_AWAY_COMFORT_DELTA),
     }
 
+    # Pre-read beestat profile off the event loop (blocking I/O)
+    profile_json: str | None = None
+    if profile_path and init_mode == INIT_MODE_BEESTAT:
+        try:
+            profile_json = await hass.async_add_executor_job(
+                Path(profile_path).read_text
+            )
+        except (FileNotFoundError, OSError) as err:
+            _LOGGER.error("Cannot read Beestat profile '%s': %s", profile_path, err)
+
     # Create coordinator
     coordinator = HeatPumpOptimizerCoordinator(
         hass,
         profile_path=profile_path,
+        profile_json=profile_json,
         climate_entity_id=climate_entity,
         weather_entity_id=weather_entity,
         weather_entity_ids=weather_entities,
