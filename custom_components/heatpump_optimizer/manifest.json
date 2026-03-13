@@ -3,6 +3,7 @@
   "name": "Heat Pump Optimizer",
   "codeowners": ["@negative-video"],
   "config_flow": true,
+  "after_dependencies": ["climate", "weather", "person", "calendar"],
   "dependencies": ["http", "frontend", "panel_custom"],
   "documentation": "https://github.com/negative-video/heat-pump-optimizer",
   "homeassistant": "2025.1.0",

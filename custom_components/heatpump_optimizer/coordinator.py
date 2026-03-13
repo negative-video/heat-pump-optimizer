@@ -14,6 +14,7 @@ Learning:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -381,6 +382,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._last_learning_persist: datetime | None = None
         self._thermostat_was_unavailable: bool = False
         self._thermostat_unavailable_count: int = 0
+        self._startup_delay_done: bool = False
         self._last_good_thermo_state: Any = None
         self._confidence_threshold_reached: bool = False
         self._last_model_alert: bool = False
@@ -465,6 +467,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     async def _update_cycle(self) -> dict[str, Any]:
         """Full 5-minute update cycle."""
+        # On first cycle after boot, wait briefly for climate/weather entities
+        # to finish initializing — avoids harmless but alarming warnings.
+        if not self._startup_delay_done:
+            self._startup_delay_done = True
+            await asyncio.sleep(30)
         now = datetime.now(timezone.utc)
 
         # Expire any constraints that have timed out

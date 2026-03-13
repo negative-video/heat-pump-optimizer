@@ -415,6 +415,8 @@ function renderTimeline(states, hass) {
   dayStart.setHours(0, 0, 0, 0);
   const dayMs = 24 * 60 * 60 * 1000;
 
+  // Build segments with labels
+  const usedPhases = new Set();
   const segments = entries.map((e) => {
     const start = new Date(e.start);
     const end = new Date(e.end);
@@ -422,7 +424,13 @@ function renderTimeline(states, hass) {
     const widthPct = Math.min(100 - leftPct, ((end - start) / dayMs) * 100);
     const phaseKey = reasonToPhaseKey(e.reason);
     const phaseInfo = PHASE_MAP[phaseKey] || PHASE_MAP["idle"];
-    return `<div class="tl-segment ${phaseInfo.cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%" title="${e.reason}: ${e.target_temp}${unit}"></div>`;
+    usedPhases.add(phaseKey);
+    // Format time range for tooltip
+    const fmtTime = (d) => { const h = d.getHours(); const m = d.getMinutes(); return `${h === 0 ? 12 : h > 12 ? h - 12 : h}:${String(m).padStart(2, "0")}${h >= 12 ? "p" : "a"}`; };
+    const tooltip = `${phaseInfo.label}: ${fmtTime(start)}\u2013${fmtTime(end)} \u00b7 ${e.target_temp}${unit}`;
+    // Show inline label if segment is wide enough (>8% of day = ~2hrs)
+    const inlineLabel = widthPct > 8 ? `<span class="tl-seg-label">${phaseInfo.label}</span>` : "";
+    return `<div class="tl-segment ${phaseInfo.cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%" title="${tooltip}">${inlineLabel}</div>`;
   });
 
   const nowPct = ((now - dayStart) / dayMs) * 100;
@@ -431,6 +439,22 @@ function renderTimeline(states, hass) {
   const ticks = [0, 6, 12, 18].map(
     (h) => `<span class="tl-tick" style="left:${(h / 24) * 100}%">${h === 0 ? "12a" : h === 12 ? "12p" : h > 12 ? h - 12 + "p" : h + "a"}</span>`
   );
+
+  // Legend showing only phases that appear in today's schedule
+  const PHASE_LEGEND = {
+    "pre-cooling": { label: "Pre-Cooling", cls: "phase-active" },
+    "pre-heating": { label: "Pre-Heating", cls: "phase-active" },
+    coasting: { label: "Coasting", cls: "phase-coast" },
+    maintaining: { label: "Maintaining", cls: "phase-maintain" },
+    idle: { label: "Idle", cls: "phase-idle" },
+    preconditioning: { label: "Pre-conditioning", cls: "phase-active" },
+  };
+  const legendItems = [...usedPhases]
+    .filter(k => PHASE_LEGEND[k])
+    .map(k => {
+      const p = PHASE_LEGEND[k];
+      return `<span class="tl-legend-item"><span class="tl-legend-swatch ${p.cls}"></span>${p.label}</span>`;
+    }).join("");
 
   // Preconditioning info
   let precondInfo = "";
@@ -447,6 +471,7 @@ function renderTimeline(states, hass) {
   return `
     <div class="card timeline-card">
       <h2>Schedule</h2>
+      ${legendItems ? `<div class="tl-legend">${legendItems}</div>` : ""}
       <div class="tl-bar">
         ${segments.join("")}
         <div class="tl-now" style="left:${nowPct}%"></div>
@@ -476,7 +501,6 @@ function renderSavingsCard(states, hass) {
   const baselineCop = findEntity(states, "baseline_avg_cop");
   const optimizedCop = findEntity(states, "optimized_avg_cop");
   const copImprovement = findEntity(states, "cop_improvement_pct");
-  const tier = findEntity(states, "savings_accuracy_tier");
   const cumulKwh = findEntity(states, "savings_kwh_cumulative");
   const cumulCost = findEntity(states, "savings_cost_cumulative");
   const cumulCo2 = findEntity(states, "savings_co2_cumulative");
@@ -1143,12 +1167,12 @@ const PANEL_CSS = `
     height: 100%;
     opacity: 0.85;
   }
-  .tl-segment.phase-active { background: var(--accent); }
-  .tl-segment.phase-coast { background: var(--green); }
-  .tl-segment.phase-maintain { background: color-mix(in srgb, var(--text-primary) 30%, transparent); }
-  .tl-segment.phase-idle { background: color-mix(in srgb, var(--text-secondary) 20%, transparent); }
-  .tl-segment.phase-paused { background: var(--orange); }
-  .tl-segment.phase-warn { background: var(--red); }
+  .tl-segment.phase-active, .tl-legend-swatch.phase-active { background: var(--accent); }
+  .tl-segment.phase-coast, .tl-legend-swatch.phase-coast { background: var(--green); }
+  .tl-segment.phase-maintain, .tl-legend-swatch.phase-maintain { background: color-mix(in srgb, var(--text-primary) 30%, transparent); }
+  .tl-segment.phase-idle, .tl-legend-swatch.phase-idle { background: color-mix(in srgb, var(--text-secondary) 20%, transparent); }
+  .tl-segment.phase-paused, .tl-legend-swatch.phase-paused { background: var(--orange); }
+  .tl-segment.phase-warn, .tl-legend-swatch.phase-warn { background: var(--red); }
   .tl-now {
     position: absolute;
     top: 0;
@@ -1167,6 +1191,37 @@ const PANEL_CSS = `
     font-size: 9px;
     color: var(--text-secondary);
     transform: translateX(-50%);
+  }
+  .tl-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .tl-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .tl-legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    display: inline-block;
+    opacity: 0.85;
+  }
+  .tl-seg-label {
+    font-size: 9px;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding: 0 4px;
+    line-height: 28px;
+    display: block;
   }
 
   /* ── Savings Card ── */
