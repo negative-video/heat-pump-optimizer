@@ -54,7 +54,7 @@ The result: your HVAC runs the same total amount (or less), but at better times.
 Or manually:
 
 1. Open **HACS** → three-dot menu → **Custom repositories**
-2. Add `https://github.com/negative-video/hacs-heatpump` as an **Integration**
+2. Add `https://github.com/negative-video/heat-pump-optimizer` as an **Integration**
 3. Search for **Heat Pump Optimizer** and install
 4. Restart Home Assistant
 5. Go to **Settings → Devices & Services → Add Integration** → search **Heat Pump Optimizer**
@@ -585,9 +585,9 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
 [hacs-url]: https://hacs.xyz/
-[release-badge]: https://img.shields.io/github/v/release/negative-video/hacs-heatpump
-[release-url]: https://github.com/negative-video/hacs-heatpump/releases
-[license-badge]: https://img.shields.io/github/license/negative-video/hacs-heatpump
-[license-url]: https://github.com/negative-video/hacs-heatpump/blob/main/LICENSE
+[release-badge]: https://img.shields.io/github/v/release/negative-video/heat-pump-optimizer
+[release-url]: https://github.com/negative-video/heat-pump-optimizer/releases
+[license-badge]: https://img.shields.io/github/license/negative-video/heat-pump-optimizer
+[license-url]: https://github.com/negative-video/heat-pump-optimizer/blob/main/LICENSE
 [hacs-install-badge]: https://my.home-assistant.io/badges/hacs_repository.svg
-[hacs-install-url]: https://my.home-assistant.io/redirect/hacs_repository/?owner=negative-video&repository=hacs-heatpump&category=integration
+[hacs-install-url]: https://my.home-assistant.io/redirect/hacs_repository/?owner=negative-video&repository=heat-pump-optimizer&category=integration
