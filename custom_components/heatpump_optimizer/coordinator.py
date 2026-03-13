@@ -34,6 +34,7 @@ from .const import (
     CONF_BAROMETRIC_PRESSURE_ENTITY,
     CONF_CALENDAR_AWAY_KEYWORDS,
     CONF_CALENDAR_DEFAULT_MODE,
+    CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
     CONF_CARBON_WEIGHT,
@@ -41,6 +42,7 @@ from .const import (
     CONF_COST_WEIGHT,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
+    CONF_DEPARTURE_ZONES,
     CONF_ELECTRICITY_FLAT_RATE,
     CONF_ELECTRICITY_RATE_ENTITY,
     CONF_GRID_IMPORT_ENTITY,
@@ -56,6 +58,7 @@ from .const import (
     CONF_OCCUPANCY_ENTITIES,
     CONF_PRECONDITIONING_BUFFER_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
+    CONF_TRAVEL_TIME_SENSORS,
     CONF_OUTDOOR_HUMIDITY_ENTITIES,
     CONF_OUTDOOR_TEMP_ENTITIES,
     CONF_SOLAR_EXPORT_RATE_ENTITY,
@@ -305,12 +308,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.thermostat = ThermostatAdapter(hass, climate_entity_id)
         self.occupancy = OccupancyAdapter(hass, occupancy_entity_id)
 
-        # Calendar-based occupancy scheduling (optional)
-        calendar_entity = opts.get(CONF_CALENDAR_ENTITY)
-        if calendar_entity:
+        # Calendar-based occupancy scheduling (optional, multi-calendar)
+        calendar_entities = opts.get(CONF_CALENDAR_ENTITIES, [])
+        # Migrate singular → plural
+        if not calendar_entities:
+            singular = opts.get(CONF_CALENDAR_ENTITY)
+            if singular:
+                calendar_entities = [singular]
+        if calendar_entities:
             self.calendar_occupancy: CalendarOccupancyAdapter | None = CalendarOccupancyAdapter(
                 hass,
-                calendar_entity_id=calendar_entity,
+                calendar_entity_ids=calendar_entities,
                 home_keywords=opts.get(CONF_CALENDAR_HOME_KEYWORDS, DEFAULT_CALENDAR_HOME_KEYWORDS),
                 away_keywords=opts.get(CONF_CALENDAR_AWAY_KEYWORDS, DEFAULT_CALENDAR_AWAY_KEYWORDS),
                 default_when_no_event=opts.get(CONF_CALENDAR_DEFAULT_MODE, DEFAULT_CALENDAR_DEFAULT_MODE),
@@ -325,9 +333,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             CONF_PRECONDITIONING_BUFFER_MINUTES, DEFAULT_PRECONDITIONING_BUFFER_MINUTES
         )
 
-        # Departure-aware pre-conditioning (optional)
-        self._departure_zone: str | None = opts.get(CONF_DEPARTURE_ZONE)
-        self._travel_time_sensor: str | None = opts.get(CONF_TRAVEL_TIME_SENSOR)
+        # Departure-aware pre-conditioning (optional, multi-zone)
+        self._departure_zones: list[str] = opts.get(CONF_DEPARTURE_ZONES, [])
+        if not self._departure_zones:
+            singular = opts.get(CONF_DEPARTURE_ZONE)
+            if singular:
+                self._departure_zones = [singular]
+        self._travel_time_sensors: list[str] = opts.get(CONF_TRAVEL_TIME_SENSORS, [])
+        if not self._travel_time_sensors:
+            singular = opts.get(CONF_TRAVEL_TIME_SENSOR)
+            if singular:
+                self._travel_time_sensors = [singular]
         self._departure_trigger_window: int = opts.get(
             CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES, DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES
         )
@@ -1055,7 +1071,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             return
 
         # Check for zone departure (if configured)
-        if self._departure_zone and self._travel_time_sensor and not self._departure_detected:
+        if self._departure_zones and self._travel_time_sensors and not self._departure_detected:
             departed = self._has_left_zone()
             if departed:
                 self._departure_detected = True
@@ -1100,35 +1116,42 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 })
 
     def _has_left_zone(self) -> bool:
-        """Check if the user's person entity has left the departure zone."""
-        if not self._departure_zone:
+        """Check if any person entity has left any configured departure zone.
+
+        Returns True if at least one person was previously at a departure zone
+        and is now not_home (i.e., in transit).
+        """
+        if not self._departure_zones:
             return False
 
-        # Find person entity from occupancy entities
+        zone_names = {z.replace("zone.", "") for z in self._departure_zones}
+
         for eid in self.occupancy.entity_ids:
             if eid.startswith("person."):
                 state = self.hass.states.get(eid)
-                if state is not None:
-                    # Person entity state is the zone name or "not_home"
-                    zone_name = self._departure_zone.replace("zone.", "")
-                    if state.state != zone_name and state.state != "not_home":
-                        continue
-                    # If state was the zone and now isn't, they left
-                    if state.state == "not_home":
-                        return True
+                if state is not None and state.state == "not_home":
+                    # Person left some zone — could be heading home
+                    return True
         return False
 
     def _read_travel_time(self) -> float | None:
-        """Read the travel time sensor value in minutes."""
-        if not self._travel_time_sensor:
+        """Read travel time from all configured sensors, return the minimum.
+
+        With multiple departure zones, each may have its own travel sensor.
+        The minimum represents the soonest possible arrival.
+        """
+        if not self._travel_time_sensors:
             return None
-        state = self.hass.states.get(self._travel_time_sensor)
-        if state is None or state.state in ("unknown", "unavailable"):
-            return None
-        try:
-            return float(state.state)
-        except (ValueError, TypeError):
-            return None
+        values: list[float] = []
+        for sensor_id in self._travel_time_sensors:
+            state = self.hass.states.get(sensor_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                continue
+            try:
+                values.append(float(state.state))
+            except (ValueError, TypeError):
+                continue
+        return min(values) if values else None
 
     @property
     def precondition_plan(self) -> PreconditionPlan | None:

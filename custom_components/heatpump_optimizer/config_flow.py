@@ -23,6 +23,7 @@ from .const import (
     CONF_BAROMETRIC_PRESSURE_ENTITY,
     CONF_CALENDAR_AWAY_KEYWORDS,
     CONF_CALENDAR_DEFAULT_MODE,
+    CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
     CONF_CARBON_WEIGHT,
@@ -35,6 +36,7 @@ from .const import (
     CONF_COST_WEIGHT,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
+    CONF_DEPARTURE_ZONES,
     CONF_ELECTRICITY_FLAT_RATE,
     CONF_ELECTRICITY_RATE_ENTITY,
     CONF_GRID_IMPORT_ENTITY,
@@ -64,6 +66,7 @@ from .const import (
     CONF_SUN_ENTITY,
     CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
+    CONF_TRAVEL_TIME_SENSORS,
     CONF_USE_ADAPTIVE_MODEL,
     CONF_USE_GREYBOX_MODEL,
     CONF_WEATHER_ENTITIES,
@@ -1008,49 +1011,64 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         """Calendar-based scheduling and pre-conditioning configuration."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
-            # Convert comma-separated keywords to lists
-            for key in (CONF_CALENDAR_HOME_KEYWORDS, CONF_CALENDAR_AWAY_KEYWORDS):
-                val = user_input.get(key, "")
-                if isinstance(val, str):
-                    user_input[key] = [k.strip() for k in val.split(",") if k.strip()]
+            # Convert comma-separated away keywords to list
+            val = user_input.get(CONF_CALENDAR_AWAY_KEYWORDS, "")
+            if isinstance(val, str):
+                user_input[CONF_CALENDAR_AWAY_KEYWORDS] = [
+                    k.strip() for k in val.split(",") if k.strip()
+                ]
             self._options.update(user_input)
+            # Check if user wants to configure advanced settings
+            if user_input.get("show_advanced"):
+                return await self.async_step_schedule_advanced()
             return self.async_create_entry(title="", data=self._options)
 
-        # Format keyword lists as comma-separated for display
-        home_kw = self._options.get(CONF_CALENDAR_HOME_KEYWORDS, DEFAULT_CALENDAR_HOME_KEYWORDS)
+        # Format keyword list as comma-separated for display
         away_kw = self._options.get(CONF_CALENDAR_AWAY_KEYWORDS, DEFAULT_CALENDAR_AWAY_KEYWORDS)
-        if isinstance(home_kw, list):
-            home_kw = ", ".join(home_kw)
         if isinstance(away_kw, list):
             away_kw = ", ".join(away_kw)
 
+        # Migrate singular → plural
+        existing_calendars = self._options.get(CONF_CALENDAR_ENTITIES, [])
+        if not existing_calendars:
+            singular = self._options.get(CONF_CALENDAR_ENTITY)
+            if singular:
+                existing_calendars = [singular]
+
+        existing_zones = self._options.get(CONF_DEPARTURE_ZONES, [])
+        if not existing_zones:
+            singular = self._options.get(CONF_DEPARTURE_ZONE)
+            if singular:
+                existing_zones = [singular]
+
+        existing_travel = self._options.get(CONF_TRAVEL_TIME_SENSORS, [])
+        if not existing_travel:
+            singular = self._options.get(CONF_TRAVEL_TIME_SENSOR)
+            if singular:
+                existing_travel = [singular]
+
         # Discover calendar entities for smart defaults
-        existing_calendar = self._options.get(CONF_CALENDAR_ENTITY, "")
-        if not existing_calendar:
+        if not existing_calendars:
             discovery = EntityDiscovery(self.hass)
             calendar_suggestions = discovery.discover_calendar_entities()
-            calendar_default = (
-                calendar_suggestions[0].entity_id if calendar_suggestions else ""
-            )
+            calendars_default = [
+                s.entity_id for s in calendar_suggestions
+                if s.confidence in ("high", "medium")
+            ][:2]
         else:
-            calendar_default = existing_calendar
+            calendars_default = existing_calendars
 
         return self.async_show_form(
             step_id="schedule",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
-                        CONF_CALENDAR_ENTITY,
-                        description={"suggested_value": calendar_default or None},
+                        CONF_CALENDAR_ENTITIES,
+                        default=calendars_default,
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="calendar"),
-                    ),
-                    vol.Optional(
-                        CONF_CALENDAR_HOME_KEYWORDS,
-                        default=home_kw,
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(
-                            type=selector.TextSelectorType.TEXT,
+                        selector.EntitySelectorConfig(
+                            domain="calendar",
+                            multiple=True,
                         ),
                     ),
                     vol.Optional(
@@ -1059,17 +1077,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.TextSelector(
                         selector.TextSelectorConfig(
                             type=selector.TextSelectorType.TEXT,
-                        ),
-                    ),
-                    vol.Optional(
-                        CONF_CALENDAR_DEFAULT_MODE,
-                        default=self._options.get(
-                            CONF_CALENDAR_DEFAULT_MODE, DEFAULT_CALENDAR_DEFAULT_MODE
-                        ),
-                    ): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=["home", "away"],
-                            translation_key="calendar_default_mode",
                         ),
                     ),
                     vol.Optional(
@@ -1088,16 +1095,22 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
-                        CONF_DEPARTURE_ZONE,
-                        description={"suggested_value": self._options.get(CONF_DEPARTURE_ZONE)},
+                        CONF_DEPARTURE_ZONES,
+                        default=existing_zones,
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="zone"),
+                        selector.EntitySelectorConfig(
+                            domain="zone",
+                            multiple=True,
+                        ),
                     ),
                     vol.Optional(
-                        CONF_TRAVEL_TIME_SENSOR,
-                        description={"suggested_value": self._options.get(CONF_TRAVEL_TIME_SENSOR)},
+                        CONF_TRAVEL_TIME_SENSORS,
+                        default=existing_travel,
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor"),
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            multiple=True,
+                        ),
                     ),
                     vol.Optional(
                         CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
@@ -1113,6 +1126,55 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             unit_of_measurement="min",
                         ),
                     ),
+                    vol.Optional(
+                        "show_advanced",
+                        default=False,
+                    ): selector.BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_schedule_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Advanced calendar settings — home keywords, default mode."""
+        if user_input is not None:
+            # Convert comma-separated home keywords to list
+            val = user_input.get(CONF_CALENDAR_HOME_KEYWORDS, "")
+            if isinstance(val, str):
+                user_input[CONF_CALENDAR_HOME_KEYWORDS] = [
+                    k.strip() for k in val.split(",") if k.strip()
+                ]
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        home_kw = self._options.get(CONF_CALENDAR_HOME_KEYWORDS, DEFAULT_CALENDAR_HOME_KEYWORDS)
+        if isinstance(home_kw, list):
+            home_kw = ", ".join(home_kw)
+
+        return self.async_show_form(
+            step_id="schedule_advanced",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_CALENDAR_DEFAULT_MODE,
+                        default=self._options.get(
+                            CONF_CALENDAR_DEFAULT_MODE, DEFAULT_CALENDAR_DEFAULT_MODE
+                        ),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=["home", "away"],
+                            translation_key="calendar_default_mode",
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_CALENDAR_HOME_KEYWORDS,
+                        default=home_kw,
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.TEXT,
+                        ),
+                    ),
                 }
             ),
         )
@@ -1124,15 +1186,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Room-aware occupancy-weighted indoor sensing configuration."""
         if user_input is not None:
-            # If mode changed to non-equal and no area config exists, run discovery
-            mode = user_input.get(CONF_INDOOR_WEIGHTING_MODE, WEIGHTING_MODE_EQUAL)
-            if mode != WEIGHTING_MODE_EQUAL and not self._options.get(CONF_AREA_SENSOR_CONFIG):
-                # Store the mode settings and proceed to room discovery
-                self._options.update(user_input)
-                return await self.async_step_rooms_discover()
-
             self._options.update(user_input)
-            return self.async_create_entry(title="", data=self._options)
+            # Always proceed to room discovery so users can see/configure rooms
+            return await self.async_step_rooms_discover()
 
         return self.async_show_form(
             step_id="rooms",
@@ -1201,15 +1257,18 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         """Discover and select rooms from HA area registry."""
         if user_input is not None:
             selected_area_ids = user_input.get("selected_areas", [])
-            # Filter discovered areas to only selected ones
-            all_areas = await AreaOccupancyManager.async_discover_areas(
+            # Store selected area IDs for the edit step
+            self._discovered_areas = await AreaOccupancyManager.async_discover_areas(
                 self.hass,
                 indoor_temp_entities=self._options.get(CONF_INDOOR_TEMP_ENTITIES),
                 indoor_humidity_entities=self._options.get(CONF_INDOOR_HUMIDITY_ENTITIES),
             )
-            selected = [a for a in all_areas if a.area_id in selected_area_ids]
+            self._selected_area_ids = selected_area_ids
+            if selected_area_ids:
+                return await self.async_step_rooms_edit()
+            # No rooms selected — save empty config and return
             self._options[CONF_AREA_SENSOR_CONFIG] = (
-                AreaOccupancyManager.serialize_area_config(selected)
+                AreaOccupancyManager.serialize_area_config([])
             )
             return self.async_create_entry(title="", data=self._options)
 
@@ -1221,7 +1280,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         )
 
         if not discovered:
-            # No areas found — return to rooms step with a note
             return self.async_show_form(
                 step_id="rooms_discover",
                 data_schema=vol.Schema({}),
@@ -1231,6 +1289,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     "then try again."
                 },
             )
+
+        # Load existing config to pre-select previously configured areas
+        existing_config = self._options.get(CONF_AREA_SENSOR_CONFIG)
+        existing_area_ids: set[str] = set()
+        if existing_config:
+            for ac in AreaOccupancyManager.deserialize_area_config(existing_config):
+                existing_area_ids.add(ac["area_id"])
 
         # Build options list from discovered areas
         area_options = []
@@ -1246,11 +1311,18 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 parts.append(f"{n_hum} humidity")
             if n_motion:
                 parts.append(f"{n_motion} motion")
+            else:
+                parts.append("no motion sensor")
             label = f"{area.area_name} ({', '.join(parts)})"
             area_options.append(
                 selector.SelectOptionDict(value=area.area_id, label=label)
             )
-            default_selected.append(area.area_id)
+            # Pre-select: either previously configured or all discovered
+            if existing_area_ids:
+                if area.area_id in existing_area_ids:
+                    default_selected.append(area.area_id)
+            else:
+                default_selected.append(area.area_id)
 
         return self.async_show_form(
             step_id="rooms_discover",
@@ -1268,4 +1340,93 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
+        )
+
+    async def async_step_rooms_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit per-room motion/occupancy sensors."""
+        if user_input is not None:
+            # Build final area config from user edits
+            areas = getattr(self, "_discovered_areas", [])
+            selected_ids = getattr(self, "_selected_area_ids", [])
+            final_areas = []
+            for area in areas:
+                if area.area_id not in selected_ids:
+                    continue
+                # Use user-edited motion sensors for this room
+                motion_key = f"motion_{area.area_id}"
+                edited_motion = user_input.get(motion_key, area.motion_entities)
+                from ..engine.data_types import AreaSensorGroup
+                final_areas.append(AreaSensorGroup(
+                    area_id=area.area_id,
+                    area_name=area.area_name,
+                    temp_entities=area.temp_entities,
+                    humidity_entities=area.humidity_entities,
+                    motion_entities=edited_motion,
+                ))
+            self._options[CONF_AREA_SENSOR_CONFIG] = (
+                AreaOccupancyManager.serialize_area_config(final_areas)
+            )
+            return self.async_create_entry(title="", data=self._options)
+
+        # Build a form with one motion-sensor multi-select per selected room
+        areas = getattr(self, "_discovered_areas", [])
+        selected_ids = getattr(self, "_selected_area_ids", [])
+
+        # Load existing config for pre-filling edited motion sensors
+        existing_motion: dict[str, list[str]] = {}
+        existing_config = self._options.get(CONF_AREA_SENSOR_CONFIG)
+        if existing_config:
+            for ac in AreaOccupancyManager.deserialize_area_config(existing_config):
+                existing_motion[ac["area_id"]] = ac.get("motion_entities", [])
+
+        schema_dict: dict[Any, Any] = {}
+        for area in areas:
+            if area.area_id not in selected_ids:
+                continue
+            motion_key = f"motion_{area.area_id}"
+            # Use existing edited config if available, otherwise discovery
+            default_motion = existing_motion.get(area.area_id, area.motion_entities)
+
+            # Build a readable summary for this room
+            sensor_parts = []
+            if area.temp_entities:
+                sensor_parts.append(
+                    f"Temp: {', '.join(e.split('.')[-1] for e in area.temp_entities)}"
+                )
+            if area.humidity_entities:
+                sensor_parts.append(
+                    f"Humidity: {', '.join(e.split('.')[-1] for e in area.humidity_entities)}"
+                )
+            # The label shows the room name; description will show sensors
+            schema_dict[
+                vol.Optional(motion_key, default=default_motion)
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="binary_sensor",
+                    device_class=["motion", "occupancy"],
+                    multiple=True,
+                ),
+            )
+
+        if not schema_dict:
+            # No rooms selected (shouldn't happen but handle gracefully)
+            return self.async_create_entry(title="", data=self._options)
+
+        # Build description placeholders showing temp/humidity info per room
+        room_summaries = []
+        for area in areas:
+            if area.area_id not in selected_ids:
+                continue
+            temps = ", ".join(e.split(".")[-1] for e in area.temp_entities) or "none"
+            hums = ", ".join(e.split(".")[-1] for e in area.humidity_entities) or "none"
+            room_summaries.append(f"**{area.area_name}** — temp: {temps}, humidity: {hums}")
+
+        return self.async_show_form(
+            step_id="rooms_edit",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={
+                "room_details": "\n".join(room_summaries),
+            },
         )

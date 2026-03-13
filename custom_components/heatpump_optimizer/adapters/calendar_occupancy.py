@@ -23,18 +23,28 @@ _CACHE_SECONDS = 900  # 15 minutes
 
 
 class CalendarOccupancyAdapter:
-    """Build an occupancy timeline from Home Assistant calendar events."""
+    """Build an occupancy timeline from Home Assistant calendar events.
+
+    Accepts one or more calendar entity IDs. Events from all calendars are
+    merged into a single timeline — an "away" event from *any* calendar marks
+    that window as away (useful for multi-person households where each member
+    has their own work calendar).
+    """
 
     def __init__(
         self,
         hass: HomeAssistant,
-        calendar_entity_id: str,
+        calendar_entity_ids: list[str] | str,
         home_keywords: list[str],
         away_keywords: list[str],
         default_when_no_event: str = "home",
     ):
         self.hass = hass
-        self.calendar_entity_id = calendar_entity_id
+        # Accept both single string (backward compat) and list
+        if isinstance(calendar_entity_ids, str):
+            self.calendar_entity_ids = [calendar_entity_ids]
+        else:
+            self.calendar_entity_ids = list(calendar_entity_ids)
         self.home_keywords = [kw.lower() for kw in home_keywords]
         self.away_keywords = [kw.lower() for kw in away_keywords]
         self.default_when_no_event = default_when_no_event
@@ -62,15 +72,21 @@ class CalendarOccupancyAdapter:
         ):
             return self._cached_timeline
 
-        events = await self._fetch_events(now, hours_ahead)
-        if events is None:
-            _LOGGER.warning(
-                "Calendar %s unavailable — returning empty timeline",
-                self.calendar_entity_id,
-            )
+        all_events: list[dict[str, Any]] = []
+        for cal_id in self.calendar_entity_ids:
+            events = await self._fetch_events(cal_id, now, hours_ahead)
+            if events is None:
+                _LOGGER.warning(
+                    "Calendar %s unavailable — skipping",
+                    cal_id,
+                )
+            else:
+                all_events.extend(events)
+
+        if not all_events and not self.calendar_entity_ids:
             return []
 
-        timeline = self._build_timeline(events, now, hours_ahead)
+        timeline = self._build_timeline(all_events, now, hours_ahead)
         self._cached_timeline = timeline
         self._cache_time = now
         return timeline
@@ -97,29 +113,30 @@ class CalendarOccupancyAdapter:
 
     async def _fetch_events(
         self,
+        calendar_entity_id: str,
         now: datetime,
         hours_ahead: int,
     ) -> list[dict[str, Any]] | None:
-        """Fetch events from the HA calendar entity."""
+        """Fetch events from a single HA calendar entity."""
         end_time = now + timedelta(hours=hours_ahead)
         try:
             result = await self.hass.services.async_call(
                 "calendar",
                 "get_events",
                 {
-                    "entity_id": self.calendar_entity_id,
+                    "entity_id": calendar_entity_id,
                     "start_date_time": now.isoformat(),
                     "end_date_time": end_time.isoformat(),
                 },
                 blocking=True,
                 return_response=True,
             )
-            if result and self.calendar_entity_id in result:
-                return result[self.calendar_entity_id].get("events", [])
+            if result and calendar_entity_id in result:
+                return result[calendar_entity_id].get("events", [])
         except Exception:
             _LOGGER.debug(
                 "Failed to fetch events from %s",
-                self.calendar_entity_id,
+                calendar_entity_id,
                 exc_info=True,
             )
         return None

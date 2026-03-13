@@ -13,16 +13,16 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, VERSION
 
 
 def _device_info(entry: ConfigEntry) -> DeviceInfo:
     return DeviceInfo(
         identifiers={(DOMAIN, entry.entry_id)},
         name="Heat Pump Optimizer",
-        manufacturer="Heat Pump Optimizer",
-        model="Optimizer",
-        sw_version="0.1.0",
+        manufacturer="Gerald Burkett",
+        model="Heat Pump Optimizer",
+        sw_version=VERSION,
     )
 from .coordinator import HeatPumpOptimizerCoordinator
 

@@ -1,6 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
+VERSION = "0.1.1"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -132,7 +133,8 @@ DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES = 5
 DEFAULT_SENSOR_STALE_MINUTES = 15
 
 # Calendar-based occupancy scheduling
-CONF_CALENDAR_ENTITY = "calendar_entity"
+CONF_CALENDAR_ENTITY = "calendar_entity"  # singular (backward compat)
+CONF_CALENDAR_ENTITIES = "calendar_entities"  # plural (preferred)
 CONF_CALENDAR_HOME_KEYWORDS = "calendar_home_keywords"
 CONF_CALENDAR_AWAY_KEYWORDS = "calendar_away_keywords"
 CONF_CALENDAR_DEFAULT_MODE = "calendar_default_mode"
@@ -143,8 +145,10 @@ DEFAULT_CALENDAR_DEFAULT_MODE = "home"
 DEFAULT_PRECONDITIONING_BUFFER_MINUTES = 15
 
 # Departure-aware pre-conditioning (optional, refines calendar-based plan)
-CONF_DEPARTURE_ZONE = "departure_zone"
-CONF_TRAVEL_TIME_SENSOR = "travel_time_sensor"
+CONF_DEPARTURE_ZONE = "departure_zone"  # singular (backward compat)
+CONF_DEPARTURE_ZONES = "departure_zones"  # plural (preferred)
+CONF_TRAVEL_TIME_SENSOR = "travel_time_sensor"  # singular (backward compat)
+CONF_TRAVEL_TIME_SENSORS = "travel_time_sensors"  # plural (preferred)
 CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES = "departure_trigger_window_minutes"
 DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES = 60
 

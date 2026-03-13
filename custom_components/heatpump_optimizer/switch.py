@@ -9,7 +9,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, VERSION
 from .coordinator import HeatPumpOptimizerCoordinator
 
 
@@ -44,9 +44,9 @@ class OptimizerEnabledSwitch(CoordinatorEntity, SwitchEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Heat Pump Optimizer",
-            manufacturer="Heat Pump Optimizer",
-            model="Optimizer",
-            sw_version="0.1.0",
+            manufacturer="Gerald Burkett",
+            model="Heat Pump Optimizer",
+            sw_version=VERSION,
         )
 
     @property

@@ -174,31 +174,41 @@
       },
       "schedule": {
         "title": "Calendar Scheduling & Pre-Conditioning",
-        "description": "Use a calendar entity to plan HVAC optimization around your schedule. The optimizer applies wider comfort ranges when you're away and pre-conditions your home efficiently before you return.",
+        "description": "Use calendar entities to forecast departure and arrival patterns for your household. The optimizer applies wider comfort ranges when everyone is away and pre-conditions your home efficiently before the first person returns. Add one calendar per household member for best results.",
         "data": {
-          "calendar_entity": "Calendar entity",
-          "calendar_home_keywords": "Home keywords",
+          "calendar_entities": "Calendar entities",
           "calendar_away_keywords": "Away keywords",
-          "calendar_default_mode": "Default mode (no event)",
           "preconditioning_buffer_minutes": "Pre-conditioning buffer (minutes)",
-          "departure_zone": "Departure zone",
-          "travel_time_sensor": "Travel time sensor",
-          "departure_trigger_window_minutes": "Departure trigger window (minutes)"
+          "departure_zones": "Departure zones",
+          "travel_time_sensors": "Travel time sensors",
+          "departure_trigger_window_minutes": "Departure trigger window (minutes)",
+          "show_advanced": "Show advanced calendar settings"
         },
         "data_description": {
-          "calendar_entity": "A calendar entity whose events indicate your location (e.g., 'Remote', 'In-Person').",
-          "calendar_home_keywords": "Comma-separated keywords in event titles that mean you're home (e.g., 'WFH, Remote, Home').",
-          "calendar_away_keywords": "Comma-separated keywords in event titles that mean you're away (e.g., 'Office, In-Person, On-Site').",
-          "calendar_default_mode": "Occupancy mode to assume when there is no calendar event.",
+          "calendar_entities": "One calendar per household member whose events indicate their location (e.g., 'Remote', 'In-Person'). Events from all calendars are merged to build the occupancy forecast.",
+          "calendar_away_keywords": "Comma-separated keywords in event titles that mean someone is away (e.g., 'Office, In-Person, On-Site').",
           "preconditioning_buffer_minutes": "How many minutes before your expected arrival to have the house at the home comfort range.",
-          "departure_zone": "Optional zone entity for your workplace. When you leave this zone near the end of an away event, the system refines your arrival estimate.",
-          "travel_time_sensor": "Optional sensor providing travel time in minutes from the departure zone to home (e.g., Waze or Google Maps).",
-          "departure_trigger_window_minutes": "How many minutes before the calendar event ends to start watching for zone departure."
+          "departure_zones": "Zone entities for workplaces (one per location). When a person leaves any of these zones near the end of an away event, the system refines their arrival estimate.",
+          "travel_time_sensors": "Sensors providing travel time in minutes from departure zones to home (e.g., Waze or Google Maps). The shortest travel time is used for pre-conditioning.",
+          "departure_trigger_window_minutes": "How many minutes before the calendar event ends to start watching for zone departure.",
+          "show_advanced": "Configure home keywords and the default occupancy mode when no calendar event is active."
+        }
+      },
+      "schedule_advanced": {
+        "title": "Advanced Calendar Settings",
+        "description": "These settings are only needed if your calendar contains events that indicate when you're home (e.g., 'WFH' or 'Remote'). Most users only need away keywords — the optimizer assumes you're home when there's no away event.",
+        "data": {
+          "calendar_default_mode": "Default mode (no event)",
+          "calendar_home_keywords": "Home keywords"
+        },
+        "data_description": {
+          "calendar_default_mode": "Occupancy mode to assume when there is no calendar event. Most users should leave this as 'home'.",
+          "calendar_home_keywords": "Comma-separated keywords in event titles that mean someone is home (e.g., 'WFH, Remote, Home'). Only useful if your default mode is 'away'."
         }
       },
       "rooms": {
         "title": "Room-Aware Sensing",
-        "description": "Weight indoor temperature and humidity by room occupancy. When configured, the optimizer uses sensors from rooms you're actually in rather than a flat whole-house average. This reduces manual overrides and improves comfort accuracy.",
+        "description": "Weight indoor temperature and humidity by room occupancy. When configured, the optimizer uses sensors from rooms you're actually in rather than a flat whole-house average. After choosing a mode, you'll see discovered rooms and can fine-tune their motion sensors.",
         "data": {
           "indoor_weighting_mode": "Weighting mode",
           "room_occupancy_debounce_minutes": "Room occupancy debounce (minutes)",
@@ -212,10 +222,15 @@
       },
       "rooms_discover": {
         "title": "Select Rooms",
-        "description": "These rooms were discovered from your Home Assistant area registry. Select the rooms to include in occupancy-weighted sensing.",
+        "description": "These rooms were discovered from your Home Assistant area registry. Each room shows its detected sensors. Select the rooms to include, then fine-tune motion sensors on the next page.",
         "data": {
           "selected_areas": "Rooms to include"
         }
+      },
+      "rooms_edit": {
+        "title": "Room Motion Sensors",
+        "description": "Review and adjust motion/occupancy sensors for each selected room. The optimizer uses these to detect which rooms are occupied.\n\n{room_details}",
+        "data": {}
       }
     },
     "error": {

@@ -80,7 +80,7 @@ def _make_adapter(hass=None, default="home"):
         hass = MagicMock()
     return CalendarOccupancyAdapter(
         hass=hass,
-        calendar_entity_id="calendar.work_location",
+        calendar_entity_ids=["calendar.work_location"],
         home_keywords=HOME_KW,
         away_keywords=AWAY_KW,
         default_when_no_event=default,
