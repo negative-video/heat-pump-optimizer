@@ -35,7 +35,7 @@ def _make_hass(states=None):
     hass = MagicMock()
     state_dict = states or {}
     hass.states.get = lambda eid: state_dict.get(eid)
-    hass.config.units.is_metric = False
+    hass.config.units.wind_speed_unit = "mph"
     return hass
 
 

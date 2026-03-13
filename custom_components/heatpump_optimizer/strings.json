@@ -19,7 +19,7 @@
         },
         "data_description": {
           "initialization_mode": "\"Learn automatically\" starts fresh and takes 2-3 weeks to fully calibrate using conservative settings. \"Import Beestat profile\" uses your measured data for faster startup (~3-5 days). \"Restore exported model\" loads a previously saved model.",
-          "profile_path": "Path to the Beestat JSON file on your Home Assistant server (only needed for Beestat import).",
+          "profile_path": "Full path inside your Home Assistant instance. For HAOS/Docker: upload the file to your config directory (e.g. via Samba or File Editor add-on) and enter /config/beestat_profile.json. For Core installs, use the absolute filesystem path.",
           "model_import_data": "Paste the JSON from the export_model service (only needed for model restore)."
         }
       },

@@ -12,9 +12,9 @@ from homeassistant.components.weather import (
     ATTR_FORECAST_WIND_SPEED,
     WeatherEntityFeature,
 )
-from homeassistant.const import UnitOfTemperature
+from homeassistant.const import UnitOfSpeed, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.util.unit_conversion import TemperatureConverter
+from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConverter
 
 from ..engine.data_types import ForecastPoint
 
@@ -72,7 +72,7 @@ async def async_get_forecast(
 
         # Wind speed (HA provides in km/h or mph depending on unit system)
         wind_speed = entry.get(ATTR_FORECAST_WIND_SPEED)
-        wind_speed_mph = _ensure_mph(hass, wind_speed) if wind_speed is not None else None
+        wind_speed_mph = _ensure_mph(hass, weather_entity_id, wind_speed) if wind_speed is not None else None
 
         # Humidity
         humidity = entry.get("humidity")
@@ -163,15 +163,21 @@ def _ensure_fahrenheit(
     return temp
 
 
-def _ensure_mph(hass: HomeAssistant, wind_speed: float) -> float:
-    """Convert wind speed to mph.
-
-    HA weather forecasts report wind speed in the configured unit system:
-    metric → km/h, imperial → mph.
-    """
-    if hass.config.units.is_metric:
-        return wind_speed * 0.621371  # km/h → mph
-    return wind_speed  # imperial: already mph
+def _ensure_mph(hass: HomeAssistant, entity_id: str, wind_speed: float) -> float:
+    """Convert wind speed to mph based on the weather entity's reported unit."""
+    state = hass.states.get(entity_id)
+    if state is None:
+        return wind_speed
+    unit = state.attributes.get("wind_speed_unit", UnitOfSpeed.MILES_PER_HOUR)
+    if unit in (UnitOfSpeed.KILOMETERS_PER_HOUR, "km/h"):
+        return SpeedConverter.convert(
+            wind_speed, UnitOfSpeed.KILOMETERS_PER_HOUR, UnitOfSpeed.MILES_PER_HOUR
+        )
+    if unit in (UnitOfSpeed.METERS_PER_SECOND, "m/s"):
+        return SpeedConverter.convert(
+            wind_speed, UnitOfSpeed.METERS_PER_SECOND, UnitOfSpeed.MILES_PER_HOUR
+        )
+    return wind_speed
 
 
 async def enrich_forecast_with_grid_data(

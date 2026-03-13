@@ -249,7 +249,7 @@ def mock_hass():
     hass = MagicMock()
     hass.data = {}
     hass.states.get.return_value = None
-    hass.config.units.is_metric = False
+    hass.config.units.wind_speed_unit = "mph"
     hass.services.async_register = MagicMock()
     hass.services.async_remove = MagicMock()
     hass.bus.async_fire = MagicMock()

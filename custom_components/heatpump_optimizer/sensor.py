@@ -777,9 +777,9 @@ class OccupancyForecastSensor(OptimizerBaseSensor):
         return self.coordinator.data.get("occupancy_mode")
 
     @property
-    def extra_state_attributes(self) -> dict | None:
+    def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
-            return None
+            return {}
         transition = self.coordinator.data.get("next_occupancy_transition")
         return {
             "source": self.coordinator.data.get("occupancy_forecast_source", "reactive"),
@@ -805,9 +805,9 @@ class PreconditioningStatusSensor(OptimizerBaseSensor):
         return self.coordinator.data.get("precondition_status", "not_configured")
 
     @property
-    def extra_state_attributes(self) -> dict | None:
+    def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
-            return None
+            return {}
         plan = self.coordinator.data.get("precondition_plan")
         if plan is None:
             return {"configured": self.coordinator.data.get(

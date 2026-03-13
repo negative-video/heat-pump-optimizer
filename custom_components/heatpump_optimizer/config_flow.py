@@ -345,7 +345,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                         default=DEFAULT_SAFETY_HEAT_MIN,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=40, max=62, step=1,
+                            min=35, max=65, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -355,7 +355,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                         default=DEFAULT_SAFETY_COOL_MAX,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=78, max=95, step=1,
+                            min=75, max=100, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -366,7 +366,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                         default=DEFAULT_COMFORT_COOL_MIN,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=60, max=78, step=1,
+                            min=58, max=80, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -376,7 +376,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                         default=DEFAULT_COMFORT_COOL_MAX,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=72, max=85, step=1,
+                            min=70, max=88, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -386,7 +386,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                         default=DEFAULT_COMFORT_HEAT_MIN,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=50, max=68, step=1,
+                            min=45, max=72, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -396,7 +396,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                         default=DEFAULT_COMFORT_HEAT_MAX,
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=58, max=78, step=1,
+                            min=55, max=78, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -613,7 +613,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=0.0, max=1.0, step=0.1, mode="slider"
+                            min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER
                         ),
                     ),
                     vol.Optional(
@@ -623,7 +623,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=0.0, max=1.0, step=0.1, mode="slider"
+                            min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER
                         ),
                     ),
                     vol.Optional(
@@ -774,7 +774,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=40, max=62, step=1,
+                            min=35, max=65, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -787,7 +787,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=78, max=95, step=1,
+                            min=75, max=100, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -800,7 +800,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=60, max=78, step=1,
+                            min=58, max=80, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -813,7 +813,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=72, max=85, step=1,
+                            min=70, max=88, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -826,7 +826,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=50, max=68, step=1,
+                            min=45, max=72, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -839,7 +839,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=58, max=78, step=1,
+                            min=55, max=78, step=1,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),

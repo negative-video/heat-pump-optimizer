@@ -269,10 +269,25 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 _LOGGER.error("Failed to import model (%s) — falling back to defaults", type(err).__name__, exc_info=True)
                 self.model = PerformanceModel.from_defaults()
                 self.estimator = ThermalEstimator.cold_start()
-        else:
+        elif profile_path:
             # Beestat mode (default, backward compatible)
-            self.model = PerformanceModel.from_file(profile_path)
-            self.estimator = ThermalEstimator.from_beestat(self.model._raw)
+            try:
+                self.model = PerformanceModel.from_file(profile_path)
+                self.estimator = ThermalEstimator.from_beestat(self.model._raw)
+            except (FileNotFoundError, OSError, KeyError, ValueError) as err:
+                _LOGGER.error(
+                    "Failed to load Beestat profile '%s' (%s) — falling back to learning mode",
+                    profile_path, err,
+                )
+                self.model = PerformanceModel.from_defaults()
+                self.estimator = ThermalEstimator.cold_start()
+        else:
+            # Beestat mode selected but no profile path — fall back to learning
+            _LOGGER.warning(
+                "Beestat mode selected but no profile path configured — using learning mode"
+            )
+            self.model = PerformanceModel.from_defaults()
+            self.estimator = ThermalEstimator.cold_start()
 
         self.simulator = ThermalSimulator(self.model)
         self.optimizer = ScheduleOptimizer(self.model, self.simulator)

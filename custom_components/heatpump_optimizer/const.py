@@ -32,14 +32,14 @@ CONF_CARBON_WEIGHT = "carbon_weight"
 CONF_COST_WEIGHT = "cost_weight"
 
 # Defaults — comfort optimization range (where the optimizer works when home)
-DEFAULT_COMFORT_COOL_MIN = 70.0
+DEFAULT_COMFORT_COOL_MIN = 72.0
 DEFAULT_COMFORT_COOL_MAX = 78.0  # wider band = more savings opportunity
-DEFAULT_COMFORT_HEAT_MIN = 64.0
+DEFAULT_COMFORT_HEAT_MIN = 62.0
 DEFAULT_COMFORT_HEAT_MAX = 70.0
 
 # Defaults — safety limits (absolute guardrails, never exceeded)
-DEFAULT_SAFETY_COOL_MAX = 85.0
-DEFAULT_SAFETY_HEAT_MIN = 50.0
+DEFAULT_SAFETY_COOL_MAX = 90.0
+DEFAULT_SAFETY_HEAT_MIN = 45.0
 
 DEFAULT_REOPTIMIZE_INTERVAL_HOURS = 4
 DEFAULT_FORECAST_DEVIATION_THRESHOLD = 5.0  # °F

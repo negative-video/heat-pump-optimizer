@@ -432,13 +432,14 @@ class TestDefaultValues:
     """Tests for the updated default constants."""
 
     def test_comfort_defaults_wider_than_before(self):
-        assert const_mod.DEFAULT_COMFORT_COOL_MAX == 78.0  # was 76.0
-        assert const_mod.DEFAULT_COMFORT_HEAT_MIN == 64.0  # was 58.0
-        assert const_mod.DEFAULT_COMFORT_HEAT_MAX == 70.0  # was 64.0
+        assert const_mod.DEFAULT_COMFORT_COOL_MIN == 72.0
+        assert const_mod.DEFAULT_COMFORT_COOL_MAX == 78.0
+        assert const_mod.DEFAULT_COMFORT_HEAT_MIN == 62.0
+        assert const_mod.DEFAULT_COMFORT_HEAT_MAX == 70.0
 
     def test_safety_defaults_are_generous(self):
-        assert const_mod.DEFAULT_SAFETY_COOL_MAX == 85.0
-        assert const_mod.DEFAULT_SAFETY_HEAT_MIN == 50.0
+        assert const_mod.DEFAULT_SAFETY_COOL_MAX == 90.0
+        assert const_mod.DEFAULT_SAFETY_HEAT_MIN == 45.0
 
     def test_safety_wider_than_comfort(self):
         assert const_mod.DEFAULT_SAFETY_COOL_MAX > const_mod.DEFAULT_COMFORT_COOL_MAX
