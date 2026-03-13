@@ -1,0 +1,1106 @@
+/**
+ * Heat Pump Optimizer — Sidebar Dashboard Panel
+ *
+ * A custom panel web component for Home Assistant that displays
+ * optimizer status, savings, forecast, and learning progress.
+ *
+ * Receives `hass`, `narrow`, and `panel` properties from HA automatically.
+ */
+
+const ENTITY_PREFIX = "heatpump_optimizer";
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/** Find the first entity whose ID ends with `_<suffix>`. */
+function findEntity(states, suffix) {
+  for (const id of Object.keys(states)) {
+    if (id.endsWith(`_${suffix}`)) return states[id];
+  }
+  return null;
+}
+
+/** Find a binary_sensor entity by suffix. */
+function findBinary(states, suffix) {
+  for (const id of Object.keys(states)) {
+    if (id.startsWith("binary_sensor.") && id.endsWith(`_${suffix}`))
+      return states[id];
+  }
+  return null;
+}
+
+/** Format a numeric state with fallback. */
+function fmt(entity, decimals = 1, fallback = "\u2014") {
+  if (!entity || entity.state === "unknown" || entity.state === "unavailable")
+    return fallback;
+  const n = Number(entity.state);
+  if (isNaN(n)) return entity.state;
+  return n.toFixed(decimals);
+}
+
+/** Get temperature unit symbol from hass config. */
+function tempUnit(hass) {
+  try {
+    const u = hass.config.unit_system.temperature;
+    return u || "\u00b0F";
+  } catch {
+    return "\u00b0F";
+  }
+}
+
+/** Check if an entity exists and has a valid numeric value. */
+function hasValue(entity) {
+  if (!entity) return false;
+  if (entity.state === "unknown" || entity.state === "unavailable") return false;
+  return !isNaN(Number(entity.state));
+}
+
+/** Check if entity exists and its state is not unknown/unavailable. */
+function isAvailable(entity) {
+  return entity && entity.state !== "unknown" && entity.state !== "unavailable";
+}
+
+/** Phase → friendly label + color class */
+const PHASE_MAP = {
+  "pre-cooling": { label: "Pre-Cooling", cls: "phase-active" },
+  "pre-heating": { label: "Pre-Heating", cls: "phase-active" },
+  coasting: { label: "Coasting", cls: "phase-coast" },
+  maintaining: { label: "Maintaining", cls: "phase-maintain" },
+  idle: { label: "Idle", cls: "phase-idle" },
+  paused: { label: "Paused", cls: "phase-paused" },
+  safe_mode: { label: "Safe Mode", cls: "phase-warn" },
+  preconditioning: { label: "Pre-conditioning", cls: "phase-active" },
+};
+
+/** Accuracy tier → dot count + label */
+const TIER_MAP = {
+  learning: { dots: 0, label: "Learning" },
+  estimated: { dots: 1, label: "Estimated" },
+  simulated: { dots: 3, label: "Simulated" },
+  calibrated: { dots: 4, label: "Calibrated" },
+};
+
+/** Reason string → PHASE_MAP key (best effort). */
+function reasonToPhaseKey(reason) {
+  if (!reason) return "idle";
+  const r = reason.toLowerCase().replace(/[_\s]+/g, "-");
+  if (r.includes("pre-cool")) return "pre-cooling";
+  if (r.includes("pre-heat")) return "pre-heating";
+  if (r.includes("precondition")) return "preconditioning";
+  if (r.includes("coast")) return "coasting";
+  if (r.includes("maintain")) return "maintaining";
+  return "idle";
+}
+
+// ── Section Renderers ────────────────────────────────────────────────
+
+/** [A] Alert Banner — conditional warnings. */
+function renderAlerts(states) {
+  const alerts = [];
+  const phase = findEntity(states, "current_phase");
+  const override = findBinary(states, "override_detected");
+  const stale = findBinary(states, "sensor_stale");
+  const auxHeat = findBinary(states, "aux_heat_active");
+
+  if (phase?.state === "safe_mode")
+    alerts.push({ cls: "alert-error", msg: "Safe mode \u2014 using conservative defaults" });
+  if (auxHeat?.state === "on")
+    alerts.push({ cls: "alert-warning", msg: "Auxiliary/emergency heat is running" });
+  if (stale?.state === "on")
+    alerts.push({ cls: "alert-warning", msg: "Temperature sensor may be stale" });
+  if (override?.state === "on")
+    alerts.push({ cls: "alert-info", msg: "Manual override detected \u2014 optimizer paused" });
+
+  if (alerts.length === 0) return "";
+  return alerts
+    .map((a) => `<div class="alert ${a.cls}">${a.msg}</div>`)
+    .join("");
+}
+
+/** [B] Hero Status Strip — phase, temps, setpoint, toggle. */
+function renderHeroStrip(states, hass) {
+  const phase = findEntity(states, "current_phase");
+  const apparent = findEntity(states, "apparent_temperature");
+  const setpoint = findEntity(states, "target_setpoint");
+  const tactical = findEntity(states, "tactical_correction");
+  const outdoor = findEntity(states, "outdoor_temp_source");
+  const enabled = findEntity(states, "enabled");
+
+  const phaseVal = phase?.state || "unknown";
+  const phaseInfo = PHASE_MAP[phaseVal] || { label: phaseVal, cls: "phase-idle" };
+  const unit = tempUnit(hass);
+  const isEnabled = enabled?.state === "on";
+
+  // Tactical correction annotation
+  let tacticalNote = "";
+  if (hasValue(tactical) && Math.abs(Number(tactical.state)) >= 0.1) {
+    const v = Number(tactical.state);
+    tacticalNote = `<span class="tactical-delta">${v > 0 ? "+" : ""}${v.toFixed(1)}\u00b0</span>`;
+  }
+
+  // Indoor subtitle: raw temp + humidity from apparent_temperature attributes
+  let indoorSub = "";
+  if (apparent?.attributes) {
+    const parts = [];
+    if (apparent.attributes.raw_temp != null)
+      parts.push(`${Number(apparent.attributes.raw_temp).toFixed(1)}${unit} actual`);
+    if (apparent.attributes.indoor_humidity != null)
+      parts.push(`${Number(apparent.attributes.indoor_humidity).toFixed(0)}% humidity`);
+    if (parts.length) indoorSub = `<span class="hero-sub">${parts.join(" \u00b7 ")}</span>`;
+  }
+
+  return `
+    <div class="card hero-card">
+      <div class="hero-row">
+        <span class="phase-badge ${phaseInfo.cls}">${phaseInfo.label}</span>
+        <div class="hero-temps">
+          <div class="hero-temp-item">
+            <span class="hero-label">Indoor</span>
+            <span class="hero-value">${fmt(apparent)}${unit}</span>
+            ${indoorSub}
+          </div>
+          <div class="hero-temp-item">
+            <span class="hero-label">Setpoint</span>
+            <span class="hero-value">${fmt(setpoint)}${unit}${tacticalNote}</span>
+          </div>
+          ${isAvailable(outdoor) ? `
+          <div class="hero-temp-item">
+            <span class="hero-label">Outdoor</span>
+            <span class="hero-value">${fmt(outdoor)}${unit}</span>
+          </div>` : ""}
+        </div>
+        <button class="toggle-btn ${isEnabled ? "on" : "off"}" id="toggle-optimizer">
+          ${isEnabled ? "Enabled" : "Disabled"}
+        </button>
+      </div>
+    </div>`;
+}
+
+/** [C] Forecast Chart — 24h predicted indoor/outdoor temps + HVAC. */
+function renderForecastChart(states, hass) {
+  const schedule = findEntity(states, "schedule");
+  const tier = findEntity(states, "savings_accuracy_tier");
+  const unit = tempUnit(hass);
+
+  // Only show when model has some maturity
+  const tierVal = tier?.state || "learning";
+  if (tierVal === "learning") {
+    return `
+      <div class="card forecast-card">
+        <h2>Forecast</h2>
+        <div class="forecast-placeholder">
+          Forecast available once model reaches Estimated accuracy
+        </div>
+      </div>`;
+  }
+
+  const forecast = schedule?.attributes?.forecast;
+  if (!forecast || !Array.isArray(forecast) || forecast.length < 2) {
+    return `
+      <div class="card forecast-card">
+        <h2>Forecast</h2>
+        <div class="forecast-placeholder">No forecast data available</div>
+      </div>`;
+  }
+
+  // Compute temperature range
+  let allTemps = [];
+  for (const pt of forecast) {
+    allTemps.push(pt.indoor, pt.outdoor);
+    if (pt.comfort_min != null) allTemps.push(pt.comfort_min);
+    if (pt.comfort_max != null) allTemps.push(pt.comfort_max);
+  }
+  const minT = Math.floor(Math.min(...allTemps) - 1);
+  const maxT = Math.ceil(Math.max(...allTemps) + 1);
+  const range = maxT - minT || 1;
+
+  // Generate gridlines (4 evenly spaced)
+  const step = range / 4;
+  const gridlines = [];
+  for (let i = 0; i <= 4; i++) {
+    const temp = minT + step * i;
+    gridlines.push({ temp: Math.round(temp), pct: ((temp - minT) / range) * 100 });
+  }
+
+  // Current hour for "now" marker
+  const nowHour = new Date().getHours();
+
+  // Build columns
+  const cols = forecast.map((pt, i) => {
+    const time = new Date(pt.time);
+    const hour = time.getHours();
+    const indoorPct = ((pt.indoor - minT) / range) * 100;
+    const outdoorPct = ((pt.outdoor - minT) / range) * 100;
+    const isNow = hour === nowHour && i === forecast.findIndex(p => new Date(p.time).getHours() === nowHour);
+
+    // Comfort band
+    let comfortBand = "";
+    if (pt.comfort_min != null && pt.comfort_max != null) {
+      const minPct = ((pt.comfort_min - minT) / range) * 100;
+      const maxPct = ((pt.comfort_max - minT) / range) * 100;
+      comfortBand = `<div class="chart-comfort" style="bottom:${minPct}%;height:${maxPct - minPct}%"></div>`;
+    }
+
+    // HVAC strip
+    const hvacStrip = pt.hvac
+      ? `<div class="chart-hvac ${pt.outdoor > pt.indoor ? "chart-hvac-cool" : "chart-hvac-heat"}"></div>`
+      : "";
+
+    // Time label (every 3 hours)
+    const timeLabel = hour % 3 === 0
+      ? `<span class="chart-time">${hour === 0 ? "12a" : hour === 12 ? "12p" : hour > 12 ? (hour - 12) + "p" : hour + "a"}</span>`
+      : "";
+
+    return `
+      <div class="chart-col${isNow ? " chart-col-now" : ""}">
+        <div class="chart-area">
+          ${comfortBand}
+          <div class="chart-dot chart-dot-outdoor" style="bottom:${outdoorPct}%"></div>
+          <div class="chart-dot chart-dot-indoor" style="bottom:${indoorPct}%"></div>
+          ${hvacStrip}
+        </div>
+        ${timeLabel}
+      </div>`;
+  });
+
+  return `
+    <div class="card forecast-card">
+      <h2>Forecast</h2>
+      <div class="chart-legend">
+        <span class="legend-item"><span class="legend-dot legend-indoor"></span>Indoor</span>
+        <span class="legend-item"><span class="legend-dot legend-outdoor"></span>Outdoor</span>
+        <span class="legend-item"><span class="legend-band"></span>Comfort</span>
+        <span class="legend-item"><span class="legend-hvac"></span>HVAC</span>
+      </div>
+      <div class="chart-container">
+        <div class="chart-yaxis">
+          ${gridlines.map(g => `<span class="chart-ylabel" style="bottom:${g.pct}%">${g.temp}\u00b0</span>`).join("")}
+        </div>
+        <div class="chart-grid">
+          ${gridlines.map(g => `<div class="chart-gridline" style="bottom:${g.pct}%"></div>`).join("")}
+          ${cols.join("")}
+        </div>
+      </div>
+    </div>`;
+}
+
+/** [D] Schedule Timeline — 24h horizontal bar with phase colors. */
+function renderTimeline(states, hass) {
+  const schedule = findEntity(states, "schedule");
+  const nextAction = findEntity(states, "next_action");
+  const precond = findEntity(states, "preconditioning_status");
+  const unit = tempUnit(hass);
+
+  const entries = schedule?.attributes?.entries;
+  if (!entries || !Array.isArray(entries) || entries.length === 0) {
+    return `
+      <div class="card timeline-card">
+        <h2>Schedule</h2>
+        <div class="timeline-empty">No active schedule</div>
+        ${isAvailable(nextAction) ? `<div class="timeline-next">${nextAction.state}</div>` : ""}
+      </div>`;
+  }
+
+  // Parse entries and compute hour positions relative to start of day
+  const now = new Date();
+  const dayStart = new Date(now);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  const segments = entries.map((e) => {
+    const start = new Date(e.start);
+    const end = new Date(e.end);
+    const leftPct = Math.max(0, ((start - dayStart) / dayMs) * 100);
+    const widthPct = Math.min(100 - leftPct, ((end - start) / dayMs) * 100);
+    const phaseKey = reasonToPhaseKey(e.reason);
+    const phaseInfo = PHASE_MAP[phaseKey] || PHASE_MAP["idle"];
+    return `<div class="tl-segment ${phaseInfo.cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%" title="${e.reason}: ${e.target_temp}${unit}"></div>`;
+  });
+
+  const nowPct = ((now - dayStart) / dayMs) * 100;
+
+  // Hour ticks
+  const ticks = [0, 6, 12, 18].map(
+    (h) => `<span class="tl-tick" style="left:${(h / 24) * 100}%">${h === 0 ? "12a" : h === 12 ? "12p" : h > 12 ? h - 12 + "p" : h + "a"}</span>`
+  );
+
+  // Preconditioning info
+  let precondInfo = "";
+  if (isAvailable(precond) && precond.attributes) {
+    const a = precond.attributes;
+    if (a.arrival_time) {
+      const parts = [`Arrival: ${a.arrival_time}`];
+      if (a.energy_estimate != null) parts.push(`${Number(a.energy_estimate).toFixed(1)} kWh`);
+      if (a.cost_estimate != null) parts.push(`$${Number(a.cost_estimate).toFixed(2)}`);
+      precondInfo = `<div class="timeline-precond">${parts.join(" \u00b7 ")}</div>`;
+    }
+  }
+
+  return `
+    <div class="card timeline-card">
+      <h2>Schedule</h2>
+      <div class="tl-bar">
+        ${segments.join("")}
+        <div class="tl-now" style="left:${nowPct}%"></div>
+      </div>
+      <div class="tl-ticks">${ticks.join("")}</div>
+      ${isAvailable(nextAction) ? `<div class="timeline-next">${nextAction.state}</div>` : ""}
+      ${precondInfo}
+    </div>`;
+}
+
+/** [E] Savings Card — today + decomposition + all-time. */
+function renderSavingsCard(states, hass) {
+  const savingsKwh = findEntity(states, "savings_kwh_today");
+  const savingsCost = findEntity(states, "savings_cost_today");
+  const savingsCo2 = findEntity(states, "savings_co2_today");
+  const comfortHours = findEntity(states, "comfort_hours_gained");
+  const baselineKwh = findEntity(states, "baseline_kwh_today");
+  const savingsPct = findEntity(states, "estimated_savings");
+  const runtimeSavings = findEntity(states, "runtime_savings_today");
+  const copSavings = findEntity(states, "cop_savings_today");
+  const rateSavings = findEntity(states, "rate_savings_today");
+  const carbonSavings = findEntity(states, "carbon_shift_savings_today");
+  const baselineCop = findEntity(states, "baseline_avg_cop");
+  const optimizedCop = findEntity(states, "optimized_avg_cop");
+  const copImprovement = findEntity(states, "cop_improvement_pct");
+  const tier = findEntity(states, "savings_accuracy_tier");
+  const cumulKwh = findEntity(states, "savings_kwh_cumulative");
+  const cumulCost = findEntity(states, "savings_cost_cumulative");
+  const cumulCo2 = findEntity(states, "savings_co2_cumulative");
+
+  const tierVal = tier?.state || "learning";
+  const tierInfo = TIER_MAP[tierVal] || TIER_MAP["learning"];
+
+  // Tier dots
+  const dots = Array.from({ length: 4 }, (_, i) =>
+    `<span class="tier-dot${i < tierInfo.dots ? " filled" : ""}"></span>`
+  ).join("");
+
+  // Context bar: savings as % of baseline
+  let contextBar = "";
+  if (hasValue(baselineKwh) && hasValue(savingsKwh)) {
+    const baseline = Number(baselineKwh.state);
+    const saved = Number(savingsKwh.state);
+    if (baseline > 0) {
+      const pct = Math.round((saved / baseline) * 100);
+      const usedPct = Math.max(0, Math.min(100, 100 - pct));
+      contextBar = `
+        <div class="context-bar-wrap">
+          <div class="context-bar">
+            <div class="context-bar-used" style="width:${usedPct}%"></div>
+          </div>
+          <span class="context-bar-label">${pct}% less than baseline</span>
+        </div>`;
+    }
+  } else if (hasValue(savingsPct)) {
+    contextBar = `
+      <div class="context-bar-wrap">
+        <div class="context-bar">
+          <div class="context-bar-used" style="width:${100 - Number(savingsPct.state)}%"></div>
+        </div>
+        <span class="context-bar-label">${fmt(savingsPct, 0)}% runtime savings</span>
+      </div>`;
+  }
+
+  // Decomposition chips
+  const chips = [];
+  if (hasValue(runtimeSavings) && Number(runtimeSavings.state) > 0)
+    chips.push(`<span class="chip">Runtime ${fmt(runtimeSavings, 2)} kWh</span>`);
+  if (hasValue(copSavings) && Number(copSavings.state) > 0)
+    chips.push(`<span class="chip">COP ${fmt(copSavings, 2)} kWh</span>`);
+  if (hasValue(rateSavings) && Number(rateSavings.state) > 0)
+    chips.push(`<span class="chip">Rate $${fmt(rateSavings, 2)}</span>`);
+  if (hasValue(carbonSavings) && Number(carbonSavings.state) > 0)
+    chips.push(`<span class="chip">Carbon ${fmt(carbonSavings, 0)}g</span>`);
+
+  // COP comparison
+  let copLine = "";
+  if (hasValue(baselineCop) && hasValue(optimizedCop) && hasValue(copImprovement)) {
+    copLine = `<div class="cop-compare">COP: ${fmt(optimizedCop)} vs ${fmt(baselineCop)} baseline <span class="cop-gain">(+${fmt(copImprovement, 0)}%)</span></div>`;
+  }
+
+  return `
+    <div class="card savings-card">
+      <div class="savings-header">
+        <h2>Savings Today</h2>
+        <span class="tier-indicator">${dots} <span class="tier-label-text">${tierInfo.label}</span></span>
+      </div>
+      <div class="savings-grid">
+        ${hasValue(savingsCost) ? `<div class="savings-item"><span class="savings-value">$${fmt(savingsCost, 2)}</span><span class="savings-unit">saved</span></div>` : ""}
+        ${hasValue(savingsKwh) ? `<div class="savings-item"><span class="savings-value">${fmt(savingsKwh, 2)}</span><span class="savings-unit">kWh</span></div>` : ""}
+        ${hasValue(savingsCo2) ? `<div class="savings-item"><span class="savings-value">${fmt(savingsCo2, 0)}</span><span class="savings-unit">g CO\u2082</span></div>` : ""}
+        ${hasValue(comfortHours) ? `<div class="savings-item"><span class="savings-value">+${fmt(comfortHours)}</span><span class="savings-unit">comfort hrs</span></div>` : ""}
+      </div>
+      ${contextBar}
+      ${chips.length > 0 ? `<div class="chips-row">${chips.join("")}</div>` : ""}
+      ${copLine}
+      <div class="alltime-row">
+        All time:
+        ${hasValue(cumulCost) ? ` $${fmt(cumulCost, 2)}` : ""}
+        ${hasValue(cumulKwh) ? ` \u00b7 ${fmt(cumulKwh, 1)} kWh` : ""}
+        ${hasValue(cumulCo2) ? ` \u00b7 ${fmt(cumulCo2, 1)} kg CO\u2082` : ""}
+      </div>
+    </div>`;
+}
+
+/** [F] System Health Card — learning, confidence, diagnostics. */
+function renderHealthCard(states, hass) {
+  const confidence = findEntity(states, "model_confidence");
+  const progress = findEntity(states, "learning_progress");
+  const baselineConf = findEntity(states, "baseline_confidence");
+  const sourceHealth = findEntity(states, "source_health");
+  const accuracy = findEntity(states, "model_accuracy");
+  const learningActive = findBinary(states, "learning_active");
+  const unit = tempUnit(hass);
+
+  const confPct = hasValue(confidence) ? fmt(confidence, 0) : "0";
+
+  // Day count from baseline_confidence attributes
+  let dayInfo = "";
+  if (baselineConf?.attributes) {
+    const a = baselineConf.attributes;
+    if (a.sample_days != null) {
+      dayInfo = `Day ${a.sample_days}`;
+      if (a.days_remaining != null && a.days_remaining > 0)
+        dayInfo += ` (${a.days_remaining} remaining)`;
+    }
+  }
+
+  // Source health coloring
+  let healthCls = "health-ok";
+  if (isAvailable(sourceHealth)) {
+    const m = sourceHealth.state.match(/(\d+)\/(\d+)/);
+    if (m && Number(m[1]) < Number(m[2])) healthCls = "health-warn";
+    if (m && Number(m[1]) === 0) healthCls = "health-error";
+  }
+
+  // Advanced diagnostics
+  const rValue = findEntity(states, "envelope_r_value");
+  const thermalMass = findEntity(states, "thermal_mass");
+  const coolCap = findEntity(states, "cooling_capacity");
+  const heatCap = findEntity(states, "heating_capacity");
+  const profilerObs = findEntity(states, "profiler_observations");
+  const profilerConf = findEntity(states, "profiler_confidence");
+  const profilerActive = findEntity(states, "profiler_active");
+  const baselineTemp = findEntity(states, "baseline_avg_indoor_temp");
+  const baselineViols = findEntity(states, "baseline_comfort_violations");
+  const greybox = findEntity(states, "greybox_active");
+
+  const hasDiagnostics = hasValue(rValue) || hasValue(thermalMass) || hasValue(coolCap) ||
+    hasValue(heatCap) || isAvailable(profilerActive) || isAvailable(greybox);
+
+  let diagnosticsSection = "";
+  if (hasDiagnostics) {
+    const rows = [];
+    if (hasValue(rValue)) rows.push(`<div class="diag-row"><span>R-value</span><span>${fmt(rValue, 2)}</span></div>`);
+    if (hasValue(thermalMass)) rows.push(`<div class="diag-row"><span>Thermal mass</span><span>${fmt(thermalMass, 0)} BTU/\u00b0F</span></div>`);
+    if (hasValue(coolCap)) rows.push(`<div class="diag-row"><span>Cooling capacity</span><span>${fmt(coolCap, 0)} BTU/hr</span></div>`);
+    if (hasValue(heatCap)) rows.push(`<div class="diag-row"><span>Heating capacity</span><span>${fmt(heatCap, 0)} BTU/hr</span></div>`);
+    if (isAvailable(greybox)) rows.push(`<div class="diag-row"><span>Grey-box optimizer</span><span>${greybox.state}</span></div>`);
+    if (isAvailable(profilerActive)) rows.push(`<div class="diag-row"><span>Profiler</span><span>${profilerActive.state}${hasValue(profilerObs) ? ` (${fmt(profilerObs, 0)} obs)` : ""}${hasValue(profilerConf) ? ` ${fmt(profilerConf, 0)}%` : ""}</span></div>`);
+    if (hasValue(baselineTemp)) rows.push(`<div class="diag-row"><span>Baseline avg temp</span><span>${fmt(baselineTemp)}${unit}</span></div>`);
+    if (hasValue(baselineViols)) rows.push(`<div class="diag-row"><span>Baseline comfort violations</span><span>${fmt(baselineViols, 0)}</span></div>`);
+
+    diagnosticsSection = `
+      <details class="diag-details">
+        <summary class="diag-summary">Advanced Diagnostics</summary>
+        <div class="diag-grid">${rows.join("")}</div>
+      </details>`;
+  }
+
+  return `
+    <div class="card health-card">
+      <h2>System Health</h2>
+      <div class="progress-label">
+        <span>${isAvailable(progress) ? progress.state : "Initializing..."}</span>
+        <span>${confPct}% confidence</span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" style="width:${confPct}%"></div>
+      </div>
+      ${dayInfo ? `<div class="day-info">${dayInfo}</div>` : ""}
+      ${isAvailable(baselineConf) && learningActive?.state === "on" ? `
+      <div class="stat-row">
+        <span class="label">Baseline captured</span>
+        <span class="value">${fmt(baselineConf, 0)}%</span>
+      </div>` : ""}
+      <div class="health-row">
+        ${isAvailable(sourceHealth) ? `
+        <div class="health-item ${healthCls}">
+          <span class="health-label">Sources</span>
+          <span class="health-value">${sourceHealth.state}</span>
+        </div>` : ""}
+        ${hasValue(accuracy) ? `
+        <div class="health-item health-ok">
+          <span class="health-label">Prediction</span>
+          <span class="health-value">\u00b1${fmt(accuracy)}${unit}</span>
+        </div>` : ""}
+      </div>
+      ${diagnosticsSection}
+    </div>`;
+}
+
+// ── Main Component ───────────────────────────────────────────────────
+
+class HeatPumpOptimizerPanel extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
+    this._hass = null;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  set narrow(val) {
+    this._narrow = val;
+  }
+
+  set panel(val) {
+    this._panel = val;
+  }
+
+  _render() {
+    if (!this._hass) return;
+    const s = this._hass.states;
+
+    this.shadowRoot.innerHTML = `
+      <style>${PANEL_CSS}</style>
+      <div class="panel">
+        <header class="header">
+          <h1>Heat Pump Optimizer</h1>
+        </header>
+        ${renderAlerts(s)}
+        ${renderHeroStrip(s, this._hass)}
+        ${renderForecastChart(s, this._hass)}
+        ${renderTimeline(s, this._hass)}
+        ${renderSavingsCard(s, this._hass)}
+        ${renderHealthCard(s, this._hass)}
+      </div>
+    `;
+
+    this._bindEvents();
+  }
+
+  _bindEvents() {
+    const btn = this.shadowRoot.getElementById("toggle-optimizer");
+    if (btn) {
+      const enabled = findEntity(this._hass.states, "enabled");
+      if (enabled) {
+        const isOn = enabled.state === "on";
+        btn.addEventListener("click", () => {
+          this._hass.callService("switch", isOn ? "turn_off" : "turn_on", {
+            entity_id: enabled.entity_id,
+          });
+        });
+      }
+    }
+  }
+}
+
+// ── Styles ───────────────────────────────────────────────────────────
+
+const PANEL_CSS = `
+  :host {
+    display: block;
+    height: 100%;
+    --card-bg: var(--ha-card-background, var(--card-background-color, #fff));
+    --text-primary: var(--primary-text-color, #212121);
+    --text-secondary: var(--secondary-text-color, #727272);
+    --accent: var(--primary-color, #03a9f4);
+    --accent-light: color-mix(in srgb, var(--accent) 15%, transparent);
+    --green: #4caf50;
+    --green-light: color-mix(in srgb, var(--green) 15%, transparent);
+    --orange: #ff9800;
+    --red: #f44336;
+    --blue: #2196f3;
+    --border: var(--divider-color, #e0e0e0);
+    --radius: 12px;
+  }
+
+  .panel {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px;
+    font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
+    color: var(--text-primary);
+  }
+
+  .header {
+    margin-bottom: 16px;
+  }
+  h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 500;
+  }
+  h2 {
+    margin: 0 0 12px 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-secondary);
+  }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 12px;
+  }
+
+  /* ── Alerts ── */
+  .alert {
+    padding: 10px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 12px;
+  }
+  .alert-error { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
+  .alert-warning { background: color-mix(in srgb, var(--orange) 12%, transparent); color: var(--orange); }
+  .alert-info { background: color-mix(in srgb, var(--orange) 10%, transparent); color: var(--orange); }
+
+  /* ── Hero Strip ── */
+  .hero-card {
+    background: color-mix(in srgb, var(--accent) 3%, var(--card-bg));
+  }
+  .hero-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .hero-temps {
+    display: flex;
+    gap: 20px;
+    flex: 1;
+    flex-wrap: wrap;
+  }
+  .hero-temp-item {
+    display: flex;
+    flex-direction: column;
+  }
+  .hero-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+  }
+  .hero-value {
+    font-size: 20px;
+    font-weight: 600;
+  }
+  .hero-sub {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 1px;
+  }
+  .tactical-delta {
+    font-size: 12px;
+    color: var(--accent);
+    margin-left: 4px;
+    font-weight: 500;
+  }
+
+  .phase-badge {
+    padding: 6px 14px;
+    border-radius: 16px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .phase-active { background: var(--accent-light); color: var(--accent); }
+  .phase-coast { background: var(--green-light); color: var(--green); }
+  .phase-maintain { background: color-mix(in srgb, var(--text-primary) 10%, transparent); color: var(--text-primary); }
+  .phase-idle { background: color-mix(in srgb, var(--text-secondary) 15%, transparent); color: var(--text-secondary); }
+  .phase-paused { background: color-mix(in srgb, var(--orange) 15%, transparent); color: var(--orange); }
+  .phase-warn { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
+
+  .toggle-btn {
+    border: none;
+    padding: 8px 20px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-left: auto;
+  }
+  .toggle-btn.on { background: var(--green-light); color: var(--green); }
+  .toggle-btn.off { background: color-mix(in srgb, var(--red) 15%, transparent); color: var(--red); }
+  .toggle-btn:hover { filter: brightness(0.95); }
+
+  /* ── Forecast Chart ── */
+  .forecast-card { }
+  .forecast-placeholder {
+    color: var(--text-secondary);
+    font-size: 14px;
+    text-align: center;
+    padding: 24px 0;
+    font-style: italic;
+  }
+  .chart-legend {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .legend-indoor { background: var(--accent); }
+  .legend-outdoor { background: var(--text-secondary); }
+  .legend-band {
+    width: 12px; height: 8px;
+    background: color-mix(in srgb, var(--green) 20%, transparent);
+    border-radius: 2px;
+    display: inline-block;
+  }
+  .legend-hvac {
+    width: 12px; height: 4px;
+    background: var(--blue);
+    border-radius: 1px;
+    display: inline-block;
+  }
+
+  .chart-container {
+    display: flex;
+    height: 140px;
+  }
+  .chart-yaxis {
+    width: 32px;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .chart-ylabel {
+    position: absolute;
+    right: 4px;
+    transform: translateY(50%);
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+  .chart-grid {
+    flex: 1;
+    position: relative;
+    display: flex;
+    border-left: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .chart-gridline {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 0;
+    border-top: 1px dashed color-mix(in srgb, var(--border) 50%, transparent);
+  }
+  .chart-col {
+    flex: 1;
+    position: relative;
+  }
+  .chart-col-now {
+    border-left: 2px solid var(--accent);
+  }
+  .chart-area {
+    position: absolute;
+    inset: 0;
+  }
+  .chart-comfort {
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: color-mix(in srgb, var(--green) 12%, transparent);
+  }
+  .chart-dot {
+    position: absolute;
+    left: 50%;
+    transform: translate(-50%, 50%);
+    border-radius: 50%;
+    z-index: 1;
+  }
+  .chart-dot-indoor {
+    width: 6px; height: 6px;
+    background: var(--accent);
+  }
+  .chart-dot-outdoor {
+    width: 4px; height: 4px;
+    background: var(--text-secondary);
+  }
+  .chart-hvac {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+  }
+  .chart-hvac-cool { background: var(--blue); }
+  .chart-hvac-heat { background: var(--orange); }
+  .chart-time {
+    position: absolute;
+    bottom: -16px;
+    left: 0;
+    font-size: 9px;
+    color: var(--text-secondary);
+    transform: translateX(-50%);
+  }
+
+  /* ── Schedule Timeline ── */
+  .timeline-card { }
+  .timeline-empty, .timeline-next {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+  .timeline-next { margin-top: 8px; }
+  .timeline-precond {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+  .tl-bar {
+    position: relative;
+    height: 28px;
+    background: color-mix(in srgb, var(--border) 40%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .tl-segment {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    opacity: 0.85;
+  }
+  .tl-segment.phase-active { background: var(--accent); }
+  .tl-segment.phase-coast { background: var(--green); }
+  .tl-segment.phase-maintain { background: color-mix(in srgb, var(--text-primary) 30%, transparent); }
+  .tl-segment.phase-idle { background: color-mix(in srgb, var(--text-secondary) 20%, transparent); }
+  .tl-segment.phase-paused { background: var(--orange); }
+  .tl-segment.phase-warn { background: var(--red); }
+  .tl-now {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: var(--red);
+    z-index: 2;
+  }
+  .tl-ticks {
+    position: relative;
+    height: 14px;
+    margin-top: 2px;
+  }
+  .tl-tick {
+    position: absolute;
+    font-size: 9px;
+    color: var(--text-secondary);
+    transform: translateX(-50%);
+  }
+
+  /* ── Savings Card ── */
+  .savings-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .savings-header h2 { margin-bottom: 0; }
+  .tier-indicator {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .tier-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--text-secondary) 25%, transparent);
+    display: inline-block;
+  }
+  .tier-dot.filled { background: var(--green); }
+  .tier-label-text { margin-left: 4px; }
+
+  .savings-grid {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 12px 0;
+  }
+  .savings-item {
+    flex: 1;
+    min-width: 80px;
+    padding: 8px 12px;
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    border-radius: 8px;
+    text-align: center;
+  }
+  .savings-value {
+    display: block;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .savings-unit {
+    display: block;
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+
+  .context-bar-wrap {
+    margin: 8px 0;
+  }
+  .context-bar {
+    height: 6px;
+    background: color-mix(in srgb, var(--green) 20%, transparent);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .context-bar-used {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.6s ease;
+  }
+  .context-bar-label {
+    font-size: 12px;
+    color: var(--green);
+    font-weight: 500;
+    margin-top: 4px;
+    display: block;
+  }
+
+  .chips-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+  }
+  .chip {
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--text-secondary);
+  }
+
+  .cop-compare {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin: 6px 0;
+  }
+  .cop-gain {
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  .alltime-row {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+  }
+
+  /* ── Health Card ── */
+  .progress-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    margin-bottom: 6px;
+  }
+  .progress-bar {
+    height: 6px;
+    background: color-mix(in srgb, var(--border) 60%, transparent);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.6s ease;
+  }
+
+  .day-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+  }
+
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+  }
+  .label {
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .value {
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .health-row {
+    display: flex;
+    gap: 16px;
+    margin-top: 10px;
+  }
+  .health-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .health-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+  }
+  .health-value {
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .health-ok .health-value { color: var(--green); }
+  .health-warn .health-value { color: var(--orange); }
+  .health-error .health-value { color: var(--red); }
+
+  /* ── Diagnostics ── */
+  .diag-details {
+    margin-top: 12px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+    padding-top: 8px;
+  }
+  .diag-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    padding: 4px 0;
+  }
+  .diag-summary:hover { color: var(--text-primary); }
+  .diag-grid {
+    margin-top: 8px;
+  }
+  .diag-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .diag-row + .diag-row {
+    border-top: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+  }
+`;
+
+customElements.define("heatpump-optimizer-panel", HeatPumpOptimizerPanel);

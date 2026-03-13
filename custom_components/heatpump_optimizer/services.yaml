@@ -1,0 +1,123 @@
+force_reoptimize:
+  name: Force Re-optimization
+  description: Immediately re-run the schedule optimizer with the latest forecast.
+
+pause:
+  name: Pause Optimization
+  description: >-
+    Pause active optimization and stop writing setpoints to the thermostat.
+    The thermostat will hold its current setpoint.
+
+resume:
+  name: Resume Optimization
+  description: >-
+    Resume optimization after a manual pause. Triggers an immediate
+    re-optimization with current conditions.
+
+set_occupancy:
+  name: Set Occupancy Mode
+  description: Override the occupancy detection with a specific mode.
+  fields:
+    mode:
+      name: Mode
+      description: The occupancy mode to set.
+      required: true
+      selector:
+        select:
+          options:
+            - "home"
+            - "away"
+            - "vacation"
+            - "auto"
+
+demand_response:
+  name: Demand Response
+  description: >-
+    Activate or deactivate demand response mode. When active, comfort bounds are
+    temporarily widened to reduce HVAC load. Automatically restores after the
+    specified duration.
+  fields:
+    mode:
+      name: Mode
+      description: Whether to reduce load or restore normal operation.
+      required: true
+      selector:
+        select:
+          options:
+            - "reduce"
+            - "restore"
+    duration_minutes:
+      name: Duration (minutes)
+      description: How long to maintain demand response mode before auto-restoring.
+      default: 60
+      selector:
+        number:
+          min: 15
+          max: 480
+          step: 15
+          unit_of_measurement: minutes
+
+export_model:
+  name: Export Learned Model
+  description: >-
+    Export the current learned thermal model parameters as JSON.
+    Useful for transferring to a similar installation or for backup.
+
+import_model:
+  name: Import Learned Model
+  description: >-
+    Import previously exported thermal model parameters. Overwrites the
+    current learned model state.
+  fields:
+    model_data:
+      name: Model Data
+      description: The model data dictionary previously returned by export_model.
+      required: true
+      selector:
+        object:
+
+set_constraint:
+  name: Set Constraint
+  description: >-
+    Apply a temporary constraint from an external energy manager or automation.
+    Useful for coordinating with other integrations that manage energy usage.
+    Constraints auto-expire after the specified duration.
+  fields:
+    type:
+      name: Constraint Type
+      description: The type of constraint to apply.
+      required: true
+      selector:
+        select:
+          options:
+            - "max_temp"
+            - "min_temp"
+            - "max_power"
+            - "pause_until"
+    value:
+      name: Value
+      description: >-
+        The constraint value. For max_temp/min_temp this is a temperature in °F.
+        For max_power this is watts. Ignored for pause_until.
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 10000
+          step: 1
+    duration_minutes:
+      name: Duration (minutes)
+      description: How long the constraint remains active before auto-expiring.
+      default: 60
+      selector:
+        number:
+          min: 5
+          max: 480
+          step: 5
+          unit_of_measurement: minutes
+    source:
+      name: Source
+      description: Identifier for the integration or automation that set this constraint.
+      default: "service_call"
+      selector:
+        text:

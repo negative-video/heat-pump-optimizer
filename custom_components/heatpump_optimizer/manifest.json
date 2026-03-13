@@ -1,0 +1,14 @@
+{
+  "domain": "heatpump_optimizer",
+  "name": "Heat Pump Optimizer",
+  "codeowners": ["@negative-video"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend", "panel_custom"],
+  "documentation": "https://github.com/negative-video/hacs-heatpump",
+  "homeassistant": "2025.1.0",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/negative-video/hacs-heatpump/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}
