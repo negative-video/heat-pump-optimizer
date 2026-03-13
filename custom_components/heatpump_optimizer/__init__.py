@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from homeassistant.components.frontend import async_register_built_in_panel, async_remove_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -169,7 +170,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Unregister services and panel if no more instances
     if not hass.data[DOMAIN]:
         await async_unload_services(hass)
-        hass.components.frontend.async_remove_panel(DOMAIN)
+        async_remove_panel(hass, DOMAIN)
 
     return unload_ok
 
@@ -180,7 +181,8 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     await hass.http.async_register_static_paths(
         [StaticPathConfig(f"/api/{DOMAIN}/frontend", str(frontend_path), cache_headers=False)]
     )
-    hass.components.frontend.async_register_built_in_panel(
+    async_register_built_in_panel(
+        hass,
         component_name="custom",
         sidebar_title="Heat Pump",
         sidebar_icon="mdi:heat-pump-outline",

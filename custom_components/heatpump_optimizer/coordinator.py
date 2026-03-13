@@ -422,8 +422,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self._handle_thermostat_state_change,
         )
 
-        # Run initial optimization
-        await self._run_strategic_optimization()
+        # Run initial optimization (non-fatal — weather/thermostat may not be ready yet)
+        try:
+            await self._run_strategic_optimization()
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Initial optimization failed — will retry on next update cycle",
+                exc_info=True,
+            )
 
     async def async_shutdown(self) -> None:
         """Graceful shutdown: safe setpoint, persist state, remove listeners."""

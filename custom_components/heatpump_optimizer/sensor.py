@@ -449,12 +449,14 @@ class ScheduleSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return {}
         attrs = {}
+        # Cap schedule/forecast entries to stay under HA's 16 KB attribute limit.
+        # Full data remains available via coordinator.data for the sidebar panel.
         detail = self.coordinator.data.get("schedule_detail")
         if detail:
-            attrs["entries"] = detail
+            attrs["entries"] = detail[:24]
         forecast = self.coordinator.data.get("forecast_detail")
         if forecast:
-            attrs["forecast"] = forecast
+            attrs["forecast"] = forecast[:24]
         attrs["mode"] = self.coordinator.data.get("mode")
         attrs["last_optimization"] = self.coordinator.data.get("last_optimization")
         attrs["savings_pct"] = self.coordinator.data.get("savings_pct")
@@ -661,7 +663,7 @@ class SavingsCostCumulativeSensor(OptimizerBaseSensor):
         super().__init__(coordinator, entry, "savings_cost_cumulative", "Cost Saved Total")
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_native_unit_of_measurement = "$"
-        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:currency-usd"
 
