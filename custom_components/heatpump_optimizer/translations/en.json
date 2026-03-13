@@ -230,9 +230,13 @@
           "selected_areas": "Rooms to include"
         }
       },
+      "rooms_no_areas": {
+        "title": "No Rooms Found",
+        "description": "No areas with temperature sensors were found in your Home Assistant area registry.\n\nTo use room-aware sensing:\n1. Go to Settings → Areas in Home Assistant\n2. Create areas for your rooms (e.g., Living Room, Bedroom)\n3. Assign your temperature sensors to the correct areas\n4. Return here to configure room-aware sensing\n\nPress Submit to continue without room-aware sensing."
+      },
       "rooms_edit": {
         "title": "Room Motion Sensors",
-        "description": "Review and adjust motion/occupancy sensors for each selected room. The optimizer uses these to detect which rooms are occupied.\n\n{room_details}",
+        "description": "Assign motion or occupancy sensors to each room. The optimizer uses these to detect which rooms are occupied and weight temperatures accordingly. Rooms without motion sensors are always treated as occupied.\n\n{room_details}",
         "data": {}
       }
     },

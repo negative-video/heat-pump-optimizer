@@ -496,6 +496,22 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             menu_options=["sensors", "energy", "behavior", "comfort", "occupancy", "schedule", "rooms"],
         )
 
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    def _get_own_entity_ids(self) -> list[str]:
+        """Return entity IDs created by this integration entry.
+
+        Used to exclude our own sensors from entity pickers so the user
+        doesn't accidentally select an integration output as an input.
+        """
+        from homeassistant.helpers import entity_registry
+        ent_reg = entity_registry.async_get(self.hass)
+        return [
+            entry.entity_id
+            for entry in ent_reg.entities.values()
+            if entry.config_entry_id == self.config_entry.entry_id
+        ]
+
     # ── Sensors ──────────────────────────────────────────────────────
 
     async def async_step_sensors(
@@ -521,6 +537,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         # Run discovery for smart defaults on empty fields
         discovery = EntityDiscovery(self.hass)
+        exclude = self._get_own_entity_ids()
 
         def _suggest_multi(conf_key, suggestions, max_count=2):
             """Return high-confidence entity IDs if the user hasn't configured any yet."""
@@ -555,6 +572,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             domain="sensor",
                             device_class="temperature",
                             multiple=True,
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -565,20 +583,26 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             domain="sensor",
                             device_class="humidity",
                             multiple=True,
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
                         CONF_WIND_SPEED_ENTITY,
                         description={"suggested_value": self._options.get(CONF_WIND_SPEED_ENTITY)},
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor"),
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            exclude_entities=exclude,
+                        ),
                     ),
                     vol.Optional(
                         CONF_SOLAR_IRRADIANCE_ENTITY,
                         description={"suggested_value": self._options.get(CONF_SOLAR_IRRADIANCE_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
-                            domain="sensor", device_class="irradiance"
+                            domain="sensor",
+                            device_class="irradiance",
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -588,6 +612,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         selector.EntitySelectorConfig(
                             domain="sensor",
                             device_class="atmospheric_pressure",
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -604,6 +629,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             domain="sensor",
                             device_class="temperature",
                             multiple=True,
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -614,6 +640,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             domain="sensor",
                             device_class="humidity",
                             multiple=True,
+                            exclude_entities=exclude,
                         ),
                     ),
                 }
@@ -634,6 +661,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         # Discover power, solar, CO2, and rate sensors for smart defaults
         discovery = EntityDiscovery(self.hass)
+        exclude = self._get_own_entity_ids()
 
         def _suggest_single(conf_key, suggestions):
             """Return first discovered entity_id if user hasn't configured one."""
@@ -663,7 +691,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         CONF_HVAC_POWER_ENTITY,
                         description={"suggested_value": power_default},
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor"),
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            exclude_entities=exclude,
+                        ),
                     ),
                     vol.Optional(
                         CONF_HVAC_POWER_DEFAULT_WATTS,
@@ -675,7 +706,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         CONF_CO2_ENTITY,
                         description={"suggested_value": co2_default},
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor"),
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            exclude_entities=exclude,
+                        ),
                     ),
                     vol.Optional(
                         CONF_ELECTRICITY_RATE_ENTITY,
@@ -683,6 +717,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain=["sensor", "input_number"],
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -714,7 +749,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": solar_default},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
-                            domain="sensor", device_class="power"
+                            domain="sensor",
+                            device_class="power",
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -722,14 +759,19 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": self._options.get(CONF_GRID_IMPORT_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
-                            domain="sensor", device_class="power"
+                            domain="sensor",
+                            device_class="power",
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
                         CONF_SOLAR_EXPORT_RATE_ENTITY,
                         description={"suggested_value": self._options.get(CONF_SOLAR_EXPORT_RATE_ENTITY)},
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor"),
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            exclude_entities=exclude,
+                        ),
                     ),
                 }
             ),
@@ -1360,12 +1402,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         """Discover and select rooms from HA area registry."""
         if user_input is not None:
             selected_area_ids = user_input.get("selected_areas", [])
-            # Store selected area IDs for the edit step
-            self._discovered_areas = await AreaOccupancyManager.async_discover_areas(
-                self.hass,
-                indoor_temp_entities=self._options.get(CONF_INDOOR_TEMP_ENTITIES),
-                indoor_humidity_entities=self._options.get(CONF_INDOOR_HUMIDITY_ENTITIES),
-            )
+            # Reuse areas from display-time discovery (stored on self)
             self._selected_area_ids = selected_area_ids
             if selected_area_ids:
                 return await self.async_step_rooms_edit()
@@ -1375,22 +1412,17 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             )
             return self.async_create_entry(title="", data=self._options)
 
-        # Run discovery
-        discovered = await AreaOccupancyManager.async_discover_areas(
-            self.hass,
-            indoor_temp_entities=self._options.get(CONF_INDOOR_TEMP_ENTITIES),
-            indoor_humidity_entities=self._options.get(CONF_INDOOR_HUMIDITY_ENTITIES),
-        )
+        # Discover ALL areas with temp sensors — don't filter by configured
+        # indoor entities so that users can set up room-aware sensing even
+        # if their global indoor sensors aren't assigned to HA areas yet.
+        discovered = await AreaOccupancyManager.async_discover_areas(self.hass)
+        # Store for reuse in submit handler and rooms_edit
+        self._discovered_areas = discovered
 
         if not discovered:
             return self.async_show_form(
-                step_id="rooms_discover",
+                step_id="rooms_no_areas",
                 data_schema=vol.Schema({}),
-                description_placeholders={
-                    "message": "No areas found with temperature sensors. "
-                    "Assign your indoor sensors to areas in Home Assistant, "
-                    "then try again."
-                },
             )
 
         # Load existing config to pre-select previously configured areas
@@ -1445,22 +1477,39 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
+    async def async_step_rooms_no_areas(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle case where no areas with temp sensors were found."""
+        if user_input is not None:
+            # Clear any stale room config and return to options
+            self._options[CONF_AREA_SENSOR_CONFIG] = (
+                AreaOccupancyManager.serialize_area_config([])
+            )
+            return self.async_create_entry(title="", data=self._options)
+        # Shouldn't get here (form is shown from rooms_discover), but handle it
+        return self.async_show_form(
+            step_id="rooms_no_areas",
+            data_schema=vol.Schema({}),
+        )
+
     async def async_step_rooms_edit(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Edit per-room motion/occupancy sensors."""
+        from ..engine.data_types import AreaSensorGroup
+
+        areas = getattr(self, "_discovered_areas", [])
+        selected_ids = getattr(self, "_selected_area_ids", [])
+
         if user_input is not None:
             # Build final area config from user edits
-            areas = getattr(self, "_discovered_areas", [])
-            selected_ids = getattr(self, "_selected_area_ids", [])
             final_areas = []
             for area in areas:
                 if area.area_id not in selected_ids:
                     continue
-                # Use user-edited motion sensors for this room
                 motion_key = f"motion_{area.area_id}"
                 edited_motion = user_input.get(motion_key, area.motion_entities)
-                from ..engine.data_types import AreaSensorGroup
                 final_areas.append(AreaSensorGroup(
                     area_id=area.area_id,
                     area_name=area.area_name,
@@ -1472,10 +1521,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 AreaOccupancyManager.serialize_area_config(final_areas)
             )
             return self.async_create_entry(title="", data=self._options)
-
-        # Build a form with one motion-sensor multi-select per selected room
-        areas = getattr(self, "_discovered_areas", [])
-        selected_ids = getattr(self, "_selected_area_ids", [])
 
         # Load existing config for pre-filling edited motion sensors
         existing_motion: dict[str, list[str]] = {}
@@ -1492,19 +1537,12 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             # Use existing edited config if available, otherwise discovery
             default_motion = existing_motion.get(area.area_id, area.motion_entities)
 
-            # Build a readable summary for this room
-            sensor_parts = []
-            if area.temp_entities:
-                sensor_parts.append(
-                    f"Temp: {', '.join(e.split('.')[-1] for e in area.temp_entities)}"
-                )
-            if area.humidity_entities:
-                sensor_parts.append(
-                    f"Humidity: {', '.join(e.split('.')[-1] for e in area.humidity_entities)}"
-                )
-            # The label shows the room name; description will show sensors
+            # Use suggested_value so empty list doesn't block submission
             schema_dict[
-                vol.Optional(motion_key, default=default_motion)
+                vol.Optional(
+                    motion_key,
+                    description={"suggested_value": default_motion},
+                )
             ] = selector.EntitySelector(
                 selector.EntitySelectorConfig(
                     domain="binary_sensor",
@@ -1514,7 +1552,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             )
 
         if not schema_dict:
-            # No rooms selected (shouldn't happen but handle gracefully)
+            # No rooms matched selection — save what we have and return
+            self._options[CONF_AREA_SENSOR_CONFIG] = (
+                AreaOccupancyManager.serialize_area_config([])
+            )
             return self.async_create_entry(title="", data=self._options)
 
         # Build description placeholders showing temp/humidity info per room
