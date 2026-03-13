@@ -566,6 +566,13 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     if (!this._hass) return;
     const s = this._hass.states;
 
+    // Preserve <details> open state across re-renders
+    const openDetails = new Set();
+    this.shadowRoot.querySelectorAll("details[open]").forEach((el) => {
+      const key = el.className || el.querySelector("summary")?.textContent;
+      if (key) openDetails.add(key);
+    });
+
     this.shadowRoot.innerHTML = `
       <style>${PANEL_CSS}</style>
       <div class="panel">
@@ -580,6 +587,14 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         ${renderHealthCard(s, this._hass)}
       </div>
     `;
+
+    // Restore <details> open state
+    openDetails.forEach((key) => {
+      this.shadowRoot.querySelectorAll("details").forEach((el) => {
+        const elKey = el.className || el.querySelector("summary")?.textContent;
+        if (elKey === key) el.setAttribute("open", "");
+      });
+    });
 
     this._bindEvents();
   }
