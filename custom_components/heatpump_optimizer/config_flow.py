@@ -108,23 +108,43 @@ _LOGGER = logging.getLogger(__name__)
 def _validate_profile(path: str) -> str | None:
     """Validate a Beestat temperature profile JSON file.
 
-    Returns None if valid, error string if invalid.
+    Returns None if valid, or an error key string matching strings.json.
     """
     if not os.path.isfile(path):
-        return "File not found"
+        _LOGGER.error("Beestat profile not found at path: %s", path)
+        return "profile_not_found"
     try:
         with open(path) as f:
             data = json.load(f)
-        # Check required keys
-        temp = data.get("temperature", {})
-        if not temp.get("cool_1", {}).get("deltas"):
-            return "Missing cool_1 deltas"
-        if not temp.get("heat_1", {}).get("deltas"):
-            return "Missing heat_1 deltas"
-        if not temp.get("resist", {}).get("deltas"):
-            return "Missing resist deltas"
     except (json.JSONDecodeError, OSError) as err:
-        return f"Invalid file: {err}"
+        _LOGGER.error("Beestat profile parse error at %s: %s", path, err)
+        return "profile_parse_error"
+
+    # Check required keys that PerformanceModel.__init__ expects
+    temp = data.get("temperature", {})
+    required_modes = ["cool_1", "heat_1", "resist"]
+    for mode in required_modes:
+        mode_data = temp.get(mode, {})
+        if not mode_data or not mode_data.get("deltas"):
+            _LOGGER.error(
+                "Beestat profile missing temperature.%s.deltas. "
+                "Top-level keys: %s, temperature keys: %s",
+                mode, list(data.keys()), list(temp.keys()),
+            )
+            return "profile_missing_keys"
+        if not mode_data.get("linear_trendline"):
+            _LOGGER.error(
+                "Beestat profile missing temperature.%s.linear_trendline", mode
+            )
+            return "profile_missing_keys"
+
+    if "balance_point" not in data:
+        _LOGGER.error(
+            "Beestat profile missing balance_point. Top-level keys: %s",
+            list(data.keys()),
+        )
+        return "profile_missing_keys"
+
     return None
 
 
@@ -248,45 +268,17 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_thermal_profile(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 2: Choose how to initialize the thermal model."""
-        errors: dict[str, str] = {}
-
+        """Step 2a: Choose initialization method for the thermal model."""
         if user_input is not None:
             mode = user_input.get(CONF_INITIALIZATION_MODE, INIT_MODE_LEARNING)
             self._config_data[CONF_INITIALIZATION_MODE] = mode
 
             if mode == INIT_MODE_BEESTAT:
-                profile_path = user_input.get(CONF_PROFILE_PATH, "")
-                if not profile_path:
-                    errors[CONF_PROFILE_PATH] = "invalid_profile"
-                else:
-                    validation_error = await self.hass.async_add_executor_job(
-                        _validate_profile, profile_path
-                    )
-                    if validation_error:
-                        errors[CONF_PROFILE_PATH] = "invalid_profile"
-                        _LOGGER.error(
-                            "Profile validation failed: %s", validation_error
-                        )
-                    else:
-                        self._config_data[CONF_PROFILE_PATH] = profile_path
-
-            elif mode == INIT_MODE_IMPORT:
-                model_data_str = user_input.get(CONF_MODEL_IMPORT_DATA, "")
-                if not model_data_str:
-                    errors[CONF_MODEL_IMPORT_DATA] = "invalid_model_data"
-                else:
-                    validation_error = _validate_model_import(model_data_str)
-                    if validation_error:
-                        errors[CONF_MODEL_IMPORT_DATA] = "invalid_model_data"
-                        _LOGGER.error(
-                            "Model import validation failed: %s", validation_error
-                        )
-                    else:
-                        self._config_data[CONF_MODEL_IMPORT_DATA] = model_data_str
-
-            if not errors:
-                return await self.async_step_comfort()
+                return await self.async_step_thermal_profile_beestat()
+            if mode == INIT_MODE_IMPORT:
+                return await self.async_step_thermal_profile_import()
+            # Learning mode — no extra fields needed
+            return await self.async_step_comfort()
 
         return self.async_show_form(
             step_id="thermal_profile",
@@ -313,8 +305,73 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         ),
                     ),
-                    vol.Optional(CONF_PROFILE_PATH): str,
-                    vol.Optional(CONF_MODEL_IMPORT_DATA): selector.TextSelector(
+                }
+            ),
+        )
+
+    async def async_step_thermal_profile_beestat(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 2b: Provide Beestat temperature profile file path."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            profile_path = user_input.get(CONF_PROFILE_PATH, "").strip().strip("'\"")
+            if not profile_path:
+                errors[CONF_PROFILE_PATH] = "profile_not_found"
+            else:
+                validation_error = await self.hass.async_add_executor_job(
+                    _validate_profile, profile_path
+                )
+                if validation_error:
+                    errors[CONF_PROFILE_PATH] = validation_error
+                    _LOGGER.error(
+                        "Profile validation failed: %s", validation_error
+                    )
+                else:
+                    self._config_data[CONF_PROFILE_PATH] = profile_path
+
+            if not errors:
+                return await self.async_step_comfort()
+
+        return self.async_show_form(
+            step_id="thermal_profile_beestat",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PROFILE_PATH): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_thermal_profile_import(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 2c: Paste exported model JSON data."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            model_data_str = user_input.get(CONF_MODEL_IMPORT_DATA, "")
+            if not model_data_str:
+                errors[CONF_MODEL_IMPORT_DATA] = "invalid_model_data"
+            else:
+                validation_error = _validate_model_import(model_data_str)
+                if validation_error:
+                    errors[CONF_MODEL_IMPORT_DATA] = "invalid_model_data"
+                    _LOGGER.error(
+                        "Model import validation failed: %s", validation_error
+                    )
+                else:
+                    self._config_data[CONF_MODEL_IMPORT_DATA] = model_data_str
+
+            if not errors:
+                return await self.async_step_comfort()
+
+        return self.async_show_form(
+            step_id="thermal_profile_import",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_MODEL_IMPORT_DATA): selector.TextSelector(
                         selector.TextSelectorConfig(multiline=True),
                     ),
                 }
@@ -417,6 +474,11 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     def __init__(self) -> None:
         self._options: dict[str, Any] = {}
 
+    @staticmethod
+    def _strip_empty_strings(user_input: dict[str, Any]) -> dict[str, Any]:
+        """Remove keys with empty string values so optional EntitySelectors don't reject them."""
+        return {k: v for k, v in user_input.items() if v != ""}
+
     # ── Menu ─────────────────────────────────────────────────────────
 
     async def async_step_init(
@@ -436,19 +498,33 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Environmental and indoor sensor configuration."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            self._options.update(user_input)
-            return self.async_create_entry(title="", data=self._options)
+            user_input = self._strip_empty_strings(user_input)
+
+            # Prevent the same sensor from being used as both indoor and outdoor
+            outdoor_temps = set(user_input.get(CONF_OUTDOOR_TEMP_ENTITIES, []))
+            indoor_temps = set(user_input.get(CONF_INDOOR_TEMP_ENTITIES, []))
+            outdoor_hum = set(user_input.get(CONF_OUTDOOR_HUMIDITY_ENTITIES, []))
+            indoor_hum = set(user_input.get(CONF_INDOOR_HUMIDITY_ENTITIES, []))
+            if outdoor_temps & indoor_temps or outdoor_hum & indoor_hum:
+                errors["base"] = "sensor_overlap"
+
+            if not errors:
+                self._options.update(user_input)
+                return self.async_create_entry(title="", data=self._options)
 
         # Run discovery for smart defaults on empty fields
         discovery = EntityDiscovery(self.hass)
 
-        def _suggest_multi(conf_key, suggestions):
-            """Return suggested entity IDs if the user hasn't configured any yet."""
+        def _suggest_multi(conf_key, suggestions, max_count=2):
+            """Return high-confidence entity IDs if the user hasn't configured any yet."""
             existing = self._options.get(conf_key, [])
             if existing:
                 return existing
-            return [s.entity_id for s in suggestions]
+            high = [s.entity_id for s in suggestions if s.confidence == "high"]
+            return high[:max_count]
 
         outdoor_temp_default = _suggest_multi(
             CONF_OUTDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=True)
@@ -489,13 +565,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_WIND_SPEED_ENTITY,
-                        default=self._options.get(CONF_WIND_SPEED_ENTITY, ""),
+                        description={"suggested_value": self._options.get(CONF_WIND_SPEED_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor"),
                     ),
                     vol.Optional(
                         CONF_SOLAR_IRRADIANCE_ENTITY,
-                        default=self._options.get(CONF_SOLAR_IRRADIANCE_ENTITY, ""),
+                        description={"suggested_value": self._options.get(CONF_SOLAR_IRRADIANCE_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain="sensor", device_class="irradiance"
@@ -503,9 +579,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_BAROMETRIC_PRESSURE_ENTITY,
-                        default=self._options.get(
-                            CONF_BAROMETRIC_PRESSURE_ENTITY, ""
-                        ),
+                        description={"suggested_value": self._options.get(CONF_BAROMETRIC_PRESSURE_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain="sensor",
@@ -540,6 +614,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
+            errors=errors,
         )
 
     # ── Energy & Cost ────────────────────────────────────────────────
@@ -549,6 +624,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Power monitoring, CO2, electricity rates, optimization weights."""
         if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
             self._options.update(user_input)
             return self.async_create_entry(title="", data=self._options)
 
@@ -557,10 +633,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         def _suggest_single(conf_key, suggestions):
             """Return first discovered entity_id if user hasn't configured one."""
-            existing = self._options.get(conf_key, "")
+            existing = self._options.get(conf_key)
             if existing:
                 return existing
-            return suggestions[0].entity_id if suggestions else ""
+            return suggestions[0].entity_id if suggestions else None
 
         power_default = _suggest_single(
             CONF_HVAC_POWER_ENTITY, discovery.discover_power_sensors()
@@ -581,7 +657,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 {
                     vol.Optional(
                         CONF_HVAC_POWER_ENTITY,
-                        default=power_default,
+                        description={"suggested_value": power_default},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor"),
                     ),
@@ -593,13 +669,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): vol.Coerce(float),
                     vol.Optional(
                         CONF_CO2_ENTITY,
-                        default=co2_default,
+                        description={"suggested_value": co2_default},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor"),
                     ),
                     vol.Optional(
                         CONF_ELECTRICITY_RATE_ENTITY,
-                        default=rate_default,
+                        description={"suggested_value": rate_default},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor"),
                     ),
@@ -629,7 +705,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SOLAR_PRODUCTION_ENTITY,
-                        default=solar_default,
+                        description={"suggested_value": solar_default},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain="sensor", device_class="power"
@@ -637,7 +713,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_GRID_IMPORT_ENTITY,
-                        default=self._options.get(CONF_GRID_IMPORT_ENTITY, ""),
+                        description={"suggested_value": self._options.get(CONF_GRID_IMPORT_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain="sensor", device_class="power"
@@ -645,7 +721,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SOLAR_EXPORT_RATE_ENTITY,
-                        default=self._options.get(CONF_SOLAR_EXPORT_RATE_ENTITY, ""),
+                        description={"suggested_value": self._options.get(CONF_SOLAR_EXPORT_RATE_ENTITY)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor"),
                     ),
@@ -929,6 +1005,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Calendar-based scheduling and pre-conditioning configuration."""
         if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
             # Convert comma-separated keywords to lists
             for key in (CONF_CALENDAR_HOME_KEYWORDS, CONF_CALENDAR_AWAY_KEYWORDS):
                 val = user_input.get(key, "")
@@ -962,7 +1039,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 {
                     vol.Optional(
                         CONF_CALENDAR_ENTITY,
-                        default=calendar_default,
+                        description={"suggested_value": calendar_default or None},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="calendar"),
                     ),
@@ -1010,13 +1087,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_DEPARTURE_ZONE,
-                        default=self._options.get(CONF_DEPARTURE_ZONE, ""),
+                        description={"suggested_value": self._options.get(CONF_DEPARTURE_ZONE)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="zone"),
                     ),
                     vol.Optional(
                         CONF_TRAVEL_TIME_SENSOR,
-                        default=self._options.get(CONF_TRAVEL_TIME_SENSOR, ""),
+                        description={"suggested_value": self._options.get(CONF_TRAVEL_TIME_SENSOR)},
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(domain="sensor"),
                     ),
