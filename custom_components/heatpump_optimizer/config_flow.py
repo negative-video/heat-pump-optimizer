@@ -180,7 +180,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow handler."""
-        return HeatPumpOptimizerOptionsFlow(config_entry)
+        return HeatPumpOptimizerOptionsFlow()
 
     # ── Step 1: Equipment ────────────────────────────────────────────
 
@@ -414,9 +414,8 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     """Options flow with categorized menu."""
 
-    def __init__(self, config_entry) -> None:
-        self.config_entry = config_entry
-        self._options: dict[str, Any] = dict(config_entry.options)
+    def __init__(self) -> None:
+        self._options: dict[str, Any] = {}
 
     # ── Menu ─────────────────────────────────────────────────────────
 
@@ -424,6 +423,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show the options menu."""
+        if not self._options:
+            self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
             menu_options=["sensors", "energy", "behavior", "comfort", "occupancy", "schedule", "rooms"],
