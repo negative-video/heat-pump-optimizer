@@ -1309,7 +1309,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=["home", "away"],
-                            translation_key="calendar_default_mode",
                         ),
                     ),
                     vol.Optional(
@@ -1361,7 +1360,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                                     label="Weighted (occupied rooms count more)",
                                 ),
                             ],
-                            translation_key="indoor_weighting_mode",
                         ),
                     ),
                     vol.Optional(
@@ -1470,7 +1468,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         selector.SelectSelectorConfig(
                             options=area_options,
                             multiple=True,
-                            translation_key="room_areas",
                         ),
                     ),
                 }
