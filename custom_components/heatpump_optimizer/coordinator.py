@@ -40,6 +40,7 @@ from .const import (
     CONF_CARBON_WEIGHT,
     CONF_CO2_ENTITY,
     CONF_COST_WEIGHT,
+    CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
     CONF_DEPARTURE_ZONES,
@@ -333,21 +334,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             CONF_PRECONDITIONING_BUFFER_MINUTES, DEFAULT_PRECONDITIONING_BUFFER_MINUTES
         )
 
-        # Departure-aware pre-conditioning (optional, multi-zone)
-        self._departure_zones: list[str] = opts.get(CONF_DEPARTURE_ZONES, [])
-        if not self._departure_zones:
-            singular = opts.get(CONF_DEPARTURE_ZONE)
-            if singular:
-                self._departure_zones = [singular]
-        self._travel_time_sensors: list[str] = opts.get(CONF_TRAVEL_TIME_SENSORS, [])
-        if not self._travel_time_sensors:
-            singular = opts.get(CONF_TRAVEL_TIME_SENSOR)
-            if singular:
-                self._travel_time_sensors = [singular]
+        # Departure-aware pre-conditioning — per-person profiles
+        self._departure_profiles: list[dict[str, str]] = self._load_departure_profiles(opts)
         self._departure_trigger_window: int = opts.get(
             CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES, DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES
         )
-        self._departure_detected: bool = False
+        # Track per-person departure detection state
+        self._departure_detected: dict[str, bool] = {}
         self._occupancy_timeline: list[OccupancyForecastPoint] = []
 
         # Layer 1: Strategic Planner
@@ -1054,15 +1047,51 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 plan.temperature_gap,
             )
 
+    @staticmethod
+    def _load_departure_profiles(opts: dict) -> list[dict[str, str]]:
+        """Load departure profiles from options, with legacy migration."""
+        import json as _json
+
+        raw = opts.get(CONF_DEPARTURE_PROFILES)
+        if raw:
+            try:
+                profiles = _json.loads(raw)
+                if isinstance(profiles, list):
+                    return profiles
+            except (ValueError, TypeError):
+                pass
+
+        # Legacy migration: single zone/sensor → one profile for first person
+        zone = opts.get(CONF_DEPARTURE_ZONE)
+        travel = opts.get(CONF_TRAVEL_TIME_SENSOR)
+        if not zone and not travel:
+            # Try plural legacy keys
+            zones = opts.get(CONF_DEPARTURE_ZONES, [])
+            travels = opts.get(CONF_TRAVEL_TIME_SENSORS, [])
+            zone = zones[0] if zones else None
+            travel = travels[0] if travels else None
+
+        if zone or travel:
+            # Can't determine person here (no occupancy entities yet),
+            # but store what we have — coordinator will match at runtime
+            profile: dict[str, str] = {}
+            if zone:
+                profile["zone"] = zone
+            if travel:
+                profile["travel_sensor"] = travel
+            return [profile]
+
+        return []
+
     async def _check_departure_trigger(
         self,
         now: datetime,
         indoor_temp: float,
         forecast: list[ForecastPoint] | None,
     ) -> None:
-        """Stage 2: refine pre-conditioning with zone departure + travel time."""
+        """Stage 2: refine pre-conditioning with per-person zone departure + travel time."""
         plan = self._precondition_plan
-        if plan is None:
+        if plan is None or not self._departure_profiles:
             return
 
         # Check if we're within the departure trigger window
@@ -1070,39 +1099,59 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if now < window_start:
             return
 
-        # Check for zone departure (if configured)
-        if self._departure_zones and self._travel_time_sensors and not self._departure_detected:
-            departed = self._has_left_zone()
-            if departed:
-                self._departure_detected = True
-                travel_minutes = self._read_travel_time()
-                if travel_minutes is not None:
-                    refined_arrival = now + timedelta(minutes=travel_minutes)
-                    _LOGGER.info(
-                        "Departure detected — refining arrival to %s (%.0f min travel)",
-                        refined_arrival.strftime("%H:%M"),
-                        travel_minutes,
+        # Check each person's departure profile independently
+        for profile in self._departure_profiles:
+            person = profile.get("person", "")
+            zone = profile.get("zone")
+            travel_sensor = profile.get("travel_sensor")
+
+            if not zone or not travel_sensor:
+                continue
+
+            # Skip if this person's departure was already detected
+            if self._departure_detected.get(person, False):
+                continue
+
+            departed = self._has_person_left_zone(person, zone)
+            if not departed:
+                continue
+
+            self._departure_detected[person] = True
+            travel_minutes = self._read_travel_time(travel_sensor)
+            if travel_minutes is None:
+                continue
+
+            refined_arrival = now + timedelta(minutes=travel_minutes)
+            _LOGGER.info(
+                "Departure detected for %s — refining arrival to %s (%.0f min travel)",
+                person or "unknown",
+                refined_arrival.strftime("%H:%M"),
+                travel_minutes,
+            )
+
+            # Re-plan with the soonest real arrival time
+            # Only re-plan if this arrival is sooner than current plan
+            if refined_arrival < plan.arrival_time:
+                mode = self.strategic.mode
+                if mode and mode != "off" and forecast:
+                    home_comfort = self.comfort_cool if mode == "cool" else self.comfort_heat
+                    away_comfort = OccupancyAdapter.adjust_comfort_for_mode(
+                        home_comfort, mode, OccupancyMode.AWAY
                     )
-                    # Re-plan with real arrival time
-                    mode = self.strategic.mode
-                    if mode and mode != "off" and forecast:
-                        home_comfort = self.comfort_cool if mode == "cool" else self.comfort_heat
-                        away_comfort = OccupancyAdapter.adjust_comfort_for_mode(
-                            home_comfort, mode, OccupancyMode.AWAY
-                        )
-                        new_plan = self.precondition_planner.plan(
-                            arrival_time=refined_arrival,
-                            current_indoor_temp=indoor_temp,
-                            forecast=forecast,
-                            mode=mode,
-                            home_comfort=home_comfort,
-                            away_comfort=away_comfort,
-                            power_watts=self._power_default_watts,
-                            buffer_minutes=self._precondition_buffer_minutes,
-                            arrival_source="travel_sensor",
-                        )
-                        if new_plan:
-                            self._precondition_plan = new_plan
+                    new_plan = self.precondition_planner.plan(
+                        arrival_time=refined_arrival,
+                        current_indoor_temp=indoor_temp,
+                        forecast=forecast,
+                        mode=mode,
+                        home_comfort=home_comfort,
+                        away_comfort=away_comfort,
+                        power_watts=self._power_default_watts,
+                        buffer_minutes=self._precondition_buffer_minutes,
+                        arrival_source=f"travel_sensor:{person}",
+                    )
+                    if new_plan:
+                        self._precondition_plan = new_plan
+                        plan = new_plan  # update local ref for start check
 
         # Check if it's time to start pre-conditioning
         if plan.should_start_now or (plan.start_time <= now):
@@ -1115,43 +1164,34 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     "arrival_source": plan.arrival_source,
                 })
 
-    def _has_left_zone(self) -> bool:
-        """Check if any person entity has left any configured departure zone.
-
-        Returns True if at least one person was previously at a departure zone
-        and is now not_home (i.e., in transit).
-        """
-        if not self._departure_zones:
+    def _has_person_left_zone(self, person_eid: str, zone_eid: str) -> bool:
+        """Check if a specific person has left their configured departure zone."""
+        if not person_eid:
+            # Legacy profile without person — check all person entities
+            for eid in self.occupancy.entity_ids:
+                if eid.startswith("person."):
+                    state = self.hass.states.get(eid)
+                    if state is not None and state.state == "not_home":
+                        return True
             return False
 
-        zone_names = {z.replace("zone.", "") for z in self._departure_zones}
+        state = self.hass.states.get(person_eid)
+        if state is None:
+            return False
 
-        for eid in self.occupancy.entity_ids:
-            if eid.startswith("person."):
-                state = self.hass.states.get(eid)
-                if state is not None and state.state == "not_home":
-                    # Person left some zone — could be heading home
-                    return True
-        return False
+        zone_name = zone_eid.replace("zone.", "")
+        # Person was at this zone and has now left (state is "not_home" or another zone)
+        return state.state != zone_name
 
-    def _read_travel_time(self) -> float | None:
-        """Read travel time from all configured sensors, return the minimum.
-
-        With multiple departure zones, each may have its own travel sensor.
-        The minimum represents the soonest possible arrival.
-        """
-        if not self._travel_time_sensors:
+    def _read_travel_time(self, sensor_id: str) -> float | None:
+        """Read a single travel time sensor value in minutes."""
+        state = self.hass.states.get(sensor_id)
+        if state is None or state.state in ("unknown", "unavailable"):
             return None
-        values: list[float] = []
-        for sensor_id in self._travel_time_sensors:
-            state = self.hass.states.get(sensor_id)
-            if state is None or state.state in ("unknown", "unavailable"):
-                continue
-            try:
-                values.append(float(state.state))
-            except (ValueError, TypeError):
-                continue
-        return min(values) if values else None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
 
     @property
     def precondition_plan(self) -> PreconditionPlan | None:

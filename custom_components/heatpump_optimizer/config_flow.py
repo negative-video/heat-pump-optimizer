@@ -34,6 +34,7 @@ from .const import (
     CONF_COMFORT_HEAT_MAX,
     CONF_COMFORT_HEAT_MIN,
     CONF_COST_WEIGHT,
+    CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
     CONF_DEPARTURE_ZONES,
@@ -1017,9 +1018,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 user_input[CONF_CALENDAR_AWAY_KEYWORDS] = [
                     k.strip() for k in val.split(",") if k.strip()
                 ]
+            # Extract navigation flags before storing
+            configure_departures = user_input.pop("configure_departures", False)
+            show_advanced = user_input.pop("show_advanced", False)
             self._options.update(user_input)
-            # Check if user wants to configure advanced settings
-            if user_input.get("show_advanced"):
+            if configure_departures:
+                return await self.async_step_schedule_departures()
+            if show_advanced:
                 return await self.async_step_schedule_advanced()
             return self.async_create_entry(title="", data=self._options)
 
@@ -1035,18 +1040,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             if singular:
                 existing_calendars = [singular]
 
-        existing_zones = self._options.get(CONF_DEPARTURE_ZONES, [])
-        if not existing_zones:
-            singular = self._options.get(CONF_DEPARTURE_ZONE)
-            if singular:
-                existing_zones = [singular]
-
-        existing_travel = self._options.get(CONF_TRAVEL_TIME_SENSORS, [])
-        if not existing_travel:
-            singular = self._options.get(CONF_TRAVEL_TIME_SENSOR)
-            if singular:
-                existing_travel = [singular]
-
         # Discover calendar entities for smart defaults
         if not existing_calendars:
             discovery = EntityDiscovery(self.hass)
@@ -1057,6 +1050,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ][:2]
         else:
             calendars_default = existing_calendars
+
+        # Check if departure profiles already exist
+        has_profiles = bool(self._options.get(CONF_DEPARTURE_PROFILES))
 
         return self.async_show_form(
             step_id="schedule",
@@ -1095,24 +1091,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
-                        CONF_DEPARTURE_ZONES,
-                        default=existing_zones,
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain="zone",
-                            multiple=True,
-                        ),
-                    ),
-                    vol.Optional(
-                        CONF_TRAVEL_TIME_SENSORS,
-                        default=existing_travel,
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain="sensor",
-                            multiple=True,
-                        ),
-                    ),
-                    vol.Optional(
                         CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
                         default=self._options.get(
                             CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
@@ -1127,12 +1105,137 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
+                        "configure_departures",
+                        default=False,
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
                         "show_advanced",
                         default=False,
                     ): selector.BooleanSelector(),
                 }
             ),
         )
+
+    async def async_step_schedule_departures(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure per-person departure profiles (zone + travel sensor)."""
+        if user_input is not None:
+            # Build profiles from per-person fields
+            profiles: list[dict[str, str]] = []
+            person_entities = self._get_person_entities()
+            for person_eid in person_entities:
+                safe_key = person_eid.replace(".", "_")
+                zone = user_input.get(f"zone_{safe_key}")
+                travel = user_input.get(f"travel_{safe_key}")
+                if zone or travel:
+                    profile: dict[str, str] = {"person": person_eid}
+                    if zone:
+                        profile["zone"] = zone
+                    if travel:
+                        profile["travel_sensor"] = travel
+                    profiles.append(profile)
+
+            import json as _json
+            self._options[CONF_DEPARTURE_PROFILES] = _json.dumps(profiles)
+            return self.async_create_entry(title="", data=self._options)
+
+        # Load existing profiles
+        existing_profiles: dict[str, dict[str, str]] = {}
+        raw = self._options.get(CONF_DEPARTURE_PROFILES)
+        if raw:
+            import json as _json
+            try:
+                for p in _json.loads(raw):
+                    existing_profiles[p["person"]] = p
+            except (ValueError, KeyError):
+                pass
+
+        # Migrate from legacy flat lists if no profiles exist
+        if not existing_profiles:
+            existing_profiles = self._migrate_legacy_departure_config()
+
+        person_entities = self._get_person_entities()
+        if not person_entities:
+            # No person entities configured — skip departure profiles
+            return self.async_create_entry(title="", data=self._options)
+
+        # Build form with zone + travel sensor per person
+        schema_dict: dict[Any, Any] = {}
+        for person_eid in person_entities:
+            safe_key = person_eid.replace(".", "_")
+            profile = existing_profiles.get(person_eid, {})
+
+            schema_dict[
+                vol.Optional(
+                    f"zone_{safe_key}",
+                    description={"suggested_value": profile.get("zone")},
+                )
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="zone"),
+            )
+            schema_dict[
+                vol.Optional(
+                    f"travel_{safe_key}",
+                    description={"suggested_value": profile.get("travel_sensor")},
+                )
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="sensor"),
+            )
+
+        # Build description showing which person each pair belongs to
+        person_labels = []
+        for person_eid in person_entities:
+            state = self.hass.states.get(person_eid)
+            name = state.name if state else person_eid.split(".")[-1].replace("_", " ").title()
+            person_labels.append(f"**{name}** ({person_eid})")
+
+        return self.async_show_form(
+            step_id="schedule_departures",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={
+                "person_list": "\n".join(person_labels),
+            },
+        )
+
+    def _get_person_entities(self) -> list[str]:
+        """Get person entities from occupancy config."""
+        occupancy = self._options.get(CONF_OCCUPANCY_ENTITIES, [])
+        return [eid for eid in occupancy if eid.startswith("person.")]
+
+    def _migrate_legacy_departure_config(self) -> dict[str, dict[str, str]]:
+        """Migrate legacy flat zone/travel lists into per-person profiles.
+
+        Best-effort: pairs by index position if counts match,
+        or assigns the single zone/sensor to the first person.
+        """
+        zones = self._options.get(CONF_DEPARTURE_ZONES, [])
+        if not zones:
+            singular = self._options.get(CONF_DEPARTURE_ZONE)
+            if singular:
+                zones = [singular]
+        travel = self._options.get(CONF_TRAVEL_TIME_SENSORS, [])
+        if not travel:
+            singular = self._options.get(CONF_TRAVEL_TIME_SENSOR)
+            if singular:
+                travel = [singular]
+
+        if not zones and not travel:
+            return {}
+
+        persons = self._get_person_entities()
+        result: dict[str, dict[str, str]] = {}
+
+        for i, person_eid in enumerate(persons):
+            profile: dict[str, str] = {"person": person_eid}
+            if i < len(zones):
+                profile["zone"] = zones[i]
+            if i < len(travel):
+                profile["travel_sensor"] = travel[i]
+            if len(profile) > 1:  # has more than just "person"
+                result[person_eid] = profile
+
+        return result
 
     async def async_step_schedule_advanced(
         self, user_input: dict[str, Any] | None = None

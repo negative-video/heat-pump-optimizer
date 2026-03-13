@@ -146,11 +146,15 @@ DEFAULT_PRECONDITIONING_BUFFER_MINUTES = 15
 
 # Departure-aware pre-conditioning (optional, refines calendar-based plan)
 CONF_DEPARTURE_ZONE = "departure_zone"  # singular (backward compat)
-CONF_DEPARTURE_ZONES = "departure_zones"  # plural (preferred)
+CONF_DEPARTURE_ZONES = "departure_zones"  # deprecated plural (replaced by profiles)
 CONF_TRAVEL_TIME_SENSOR = "travel_time_sensor"  # singular (backward compat)
-CONF_TRAVEL_TIME_SENSORS = "travel_time_sensors"  # plural (preferred)
+CONF_TRAVEL_TIME_SENSORS = "travel_time_sensors"  # deprecated plural (replaced by profiles)
 CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES = "departure_trigger_window_minutes"
 DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES = 60
+
+# Departure profiles — pairs each person with their departure zone + travel sensor
+# Stored as JSON string: [{"person": "person.x", "zone": "zone.y", "travel_sensor": "sensor.z"}, ...]
+CONF_DEPARTURE_PROFILES = "departure_profiles"
 
 # Calendar/pre-conditioning events
 EVENT_PRECONDITIONING_START = f"{DOMAIN}_preconditioning_start"

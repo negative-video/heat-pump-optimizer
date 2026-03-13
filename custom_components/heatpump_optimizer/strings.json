@@ -179,20 +179,23 @@
           "calendar_entities": "Calendar entities",
           "calendar_away_keywords": "Away keywords",
           "preconditioning_buffer_minutes": "Pre-conditioning buffer (minutes)",
-          "departure_zones": "Departure zones",
-          "travel_time_sensors": "Travel time sensors",
           "departure_trigger_window_minutes": "Departure trigger window (minutes)",
+          "configure_departures": "Configure departure profiles",
           "show_advanced": "Show advanced calendar settings"
         },
         "data_description": {
           "calendar_entities": "One calendar per household member whose events indicate their location (e.g., 'Remote', 'In-Person'). Events from all calendars are merged to build the occupancy forecast.",
           "calendar_away_keywords": "Comma-separated keywords in event titles that mean someone is away (e.g., 'Office, In-Person, On-Site').",
           "preconditioning_buffer_minutes": "How many minutes before your expected arrival to have the house at the home comfort range.",
-          "departure_zones": "Zone entities for workplaces (one per location). When a person leaves any of these zones near the end of an away event, the system refines their arrival estimate.",
-          "travel_time_sensors": "Sensors providing travel time in minutes from departure zones to home (e.g., Waze or Google Maps). The shortest travel time is used for pre-conditioning.",
           "departure_trigger_window_minutes": "How many minutes before the calendar event ends to start watching for zone departure.",
+          "configure_departures": "Pair each household member with their work zone and travel time sensor for accurate pre-conditioning.",
           "show_advanced": "Configure home keywords and the default occupancy mode when no calendar event is active."
         }
+      },
+      "schedule_departures": {
+        "title": "Departure Profiles",
+        "description": "Pair each household member with their work zone and travel time sensor. When someone leaves their zone, their specific travel sensor is used to estimate arrival time. Fields are shown in pairs per person.\n\n{person_list}",
+        "data": {}
       },
       "schedule_advanced": {
         "title": "Advanced Calendar Settings",
