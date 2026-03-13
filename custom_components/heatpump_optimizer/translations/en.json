@@ -99,15 +99,23 @@
         "description": "Configure power monitoring, electricity rates, and carbon intensity to enable savings tracking and cost-aware optimization. Detected entities are pre-filled where possible.",
         "data": {
           "hvac_power_entity": "HVAC power sensor",
-          "hvac_power_default_watts": "Default HVAC power (watts)",
+          "hvac_power_default_watts": "Fallback HVAC power (watts)",
           "co2_entity": "CO₂ intensity sensor",
-          "electricity_rate_entity": "Electricity rate sensor",
+          "electricity_rate_entity": "Electricity rate entity",
           "electricity_flat_rate": "Flat electricity rate ($/kWh)",
           "carbon_weight": "Carbon optimization weight",
           "cost_weight": "Cost optimization weight",
           "solar_production_entity": "Solar production sensor (watts)",
           "grid_import_entity": "Grid import sensor (watts)",
           "solar_export_rate_entity": "Solar export rate sensor"
+        },
+        "data_description": {
+          "hvac_power_entity": "A sensor that reports your HVAC system's current power draw in watts.",
+          "hvac_power_default_watts": "Used as a fallback when the power sensor above is unavailable or not configured. Set to your system's typical draw.",
+          "electricity_rate_entity": "A sensor or input_number that provides your current electricity rate in $/kWh. Accepts sensor entities or helpers like input_number.",
+          "electricity_flat_rate": "If you don't have a rate entity, enter a fixed rate here. Ignored when a rate entity is configured.",
+          "carbon_weight": "How much to weigh carbon intensity in optimization decisions (0 = ignore, 1 = maximize carbon savings).",
+          "cost_weight": "How much to weigh electricity cost in optimization decisions (0 = ignore, 1 = maximize cost savings)."
         }
       },
       "behavior": {

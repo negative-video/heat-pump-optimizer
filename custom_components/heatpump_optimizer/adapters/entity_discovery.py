@@ -409,26 +409,38 @@ class EntityDiscovery:
         return results
 
     def discover_electricity_rate_sensors(self) -> list[EntitySuggestion]:
-        """Find electricity rate sensors."""
+        """Find electricity rate sensors and input_numbers."""
         _, entity_reg = self._get_registries()
         results: list[EntitySuggestion] = []
 
+        _rate_keywords = ("electricity", "rate", "tariff", "price", "kwh", "cost", "energy")
+
         for entry in entity_reg.entities.values():
-            if entry.domain != "sensor" or entry.disabled:
+            if entry.disabled:
                 continue
-            if entry.original_device_class != "monetary":
-                continue
+
             name = self._entity_name(entry)
             name_lower = name.lower()
             eid_lower = entry.entity_id.lower()
-            if any(kw in name_lower or kw in eid_lower for kw in (
-                "electricity", "rate", "tariff", "price", "kwh"
-            )):
-                results.append(EntitySuggestion(
-                    entity_id=entry.entity_id,
-                    friendly_name=name,
-                    confidence="high",
-                    reason="Electricity rate sensor",
-                ))
 
+            # Sensor with monetary device class + rate keyword → high confidence
+            if entry.domain == "sensor" and entry.original_device_class == "monetary":
+                if any(kw in name_lower or kw in eid_lower for kw in _rate_keywords):
+                    results.append(EntitySuggestion(
+                        entity_id=entry.entity_id,
+                        friendly_name=name,
+                        confidence="high",
+                        reason="Electricity rate sensor",
+                    ))
+            # input_number with rate/cost/energy keyword → medium confidence
+            elif entry.domain == "input_number":
+                if any(kw in name_lower or kw in eid_lower for kw in _rate_keywords):
+                    results.append(EntitySuggestion(
+                        entity_id=entry.entity_id,
+                        friendly_name=name,
+                        confidence="medium",
+                        reason="Input number (may contain electricity rate)",
+                    ))
+
+        results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results

@@ -677,7 +677,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         CONF_ELECTRICITY_RATE_ENTITY,
                         description={"suggested_value": rate_default},
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(domain="sensor"),
+                        selector.EntitySelectorConfig(
+                            domain=["sensor", "input_number"],
+                        ),
                     ),
                     vol.Optional(
                         CONF_ELECTRICITY_FLAT_RATE,
