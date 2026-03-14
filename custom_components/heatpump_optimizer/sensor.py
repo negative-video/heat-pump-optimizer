@@ -457,11 +457,10 @@ class ScheduleSensor(OptimizerBaseSensor):
         forecast = self.coordinator.data.get("forecast_detail")
         if forecast:
             attrs["forecast"] = forecast[:24]
-        else:
-            # During learning, provide weather-only forecast for the panel chart
-            weather = self.coordinator.data.get("weather_forecast")
-            if weather:
-                attrs["weather_forecast"] = weather[:24]
+        # Always include weather forecast — panel needs it for the weather chart
+        weather = self.coordinator.data.get("weather_forecast")
+        if weather:
+            attrs["weather_forecast"] = weather[:24]
         attrs["mode"] = self.coordinator.data.get("mode")
         attrs["last_optimization"] = self.coordinator.data.get("last_optimization")
         attrs["savings_pct"] = self.coordinator.data.get("savings_pct")

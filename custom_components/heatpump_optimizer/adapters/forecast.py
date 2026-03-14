@@ -30,18 +30,16 @@ async def async_get_forecast(
     Prefers hourly forecast; falls back to twice-daily if hourly unavailable.
     All temperatures are converted to °F for the engine.
     """
-    weather_state = hass.states.get(weather_entity_id)
-    if weather_state is None:
-        _LOGGER.warning("Weather entity %s not found", weather_entity_id)
+    # Check if entity exists — during early boot it may not be registered yet.
+    if hass.states.get(weather_entity_id) is None:
+        _LOGGER.debug("Weather entity %s not in state machine yet", weather_entity_id)
         return []
 
-    # Try hourly forecast first (best for optimization)
     forecast_data = await _fetch_forecast(hass, weather_entity_id, "hourly")
     if not forecast_data:
-        # Fall back to twice_daily
         forecast_data = await _fetch_forecast(hass, weather_entity_id, "twice_daily")
     if not forecast_data:
-        _LOGGER.warning("No forecast data available from %s", weather_entity_id)
+        _LOGGER.warning("No forecast data from %s", weather_entity_id)
         return []
 
     points: list[ForecastPoint] = []
@@ -114,7 +112,9 @@ async def async_get_forecast_multi(
                 )
             return points, entity_id
 
-    if len(weather_entity_ids) > 1:
+    # Only warn if entities exist (if they don't, it's a boot timing issue)
+    entities_exist = any(hass.states.get(eid) for eid in weather_entity_ids)
+    if entities_exist:
         _LOGGER.warning(
             "All %d weather entities failed to provide forecast: %s",
             len(weather_entity_ids),
@@ -139,10 +139,14 @@ async def _fetch_forecast(
         )
         if result and entity_id in result:
             return result[entity_id].get("forecast", [])
-    except Exception:
         _LOGGER.debug(
-            "Failed to get %s forecast from %s", forecast_type, entity_id,
-            exc_info=True,
+            "weather.get_forecasts(%s, %s) returned: %s",
+            entity_id, forecast_type, result,
+        )
+    except Exception as err:
+        _LOGGER.warning(
+            "Failed to get %s forecast from %s: %s",
+            forecast_type, entity_id, err,
         )
     return None
 
@@ -152,10 +156,12 @@ def _ensure_fahrenheit(
 ) -> float:
     """Convert temperature to °F if the weather entity reports in °C."""
     state = hass.states.get(entity_id)
-    if state is None:
-        return temp
+    if state is not None:
+        unit = state.attributes.get("temperature_unit")
+    else:
+        # Entity state not available yet — fall back to HA unit system
+        unit = hass.config.units.temperature_unit
 
-    unit = state.attributes.get("temperature_unit", UnitOfTemperature.FAHRENHEIT)
     if unit == UnitOfTemperature.CELSIUS:
         return TemperatureConverter.convert(
             temp, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
@@ -166,9 +172,11 @@ def _ensure_fahrenheit(
 def _ensure_mph(hass: HomeAssistant, entity_id: str, wind_speed: float) -> float:
     """Convert wind speed to mph based on the weather entity's reported unit."""
     state = hass.states.get(entity_id)
-    if state is None:
-        return wind_speed
-    unit = state.attributes.get("wind_speed_unit", UnitOfSpeed.MILES_PER_HOUR)
+    if state is not None:
+        unit = state.attributes.get("wind_speed_unit", UnitOfSpeed.MILES_PER_HOUR)
+    else:
+        # Fall back to HA unit system — metric uses km/h
+        unit = hass.config.units.wind_speed_unit
     if unit in (UnitOfSpeed.KILOMETERS_PER_HOUR, "km/h"):
         return SpeedConverter.convert(
             wind_speed, UnitOfSpeed.KILOMETERS_PER_HOUR, UnitOfSpeed.MILES_PER_HOUR

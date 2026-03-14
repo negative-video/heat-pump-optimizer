@@ -14,7 +14,6 @@ Learning:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -386,7 +385,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._last_learning_persist: datetime | None = None
         self._thermostat_was_unavailable: bool = False
         self._thermostat_unavailable_count: int = 0
-        self._startup_delay_done: bool = False
+        # _startup_delay_done removed — boot readiness handled by
+        # EVENT_HOMEASSISTANT_STARTED listener in __init__.py
         self._last_good_thermo_state: Any = None
         self._confidence_threshold_reached: bool = False
         self._last_model_alert: bool = False
@@ -471,12 +471,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     async def _update_cycle(self) -> dict[str, Any]:
         """Full 5-minute update cycle."""
-        # On first cycle after boot, wait briefly for climate/weather entities
-        # to finish initializing — avoids harmless but alarming warnings.
-        if not self._startup_delay_done:
-            self._startup_delay_done = True
-            await asyncio.sleep(30)
         now = datetime.now(timezone.utc)
+
+        # Always fetch weather early — panel needs it even when paused/override
+        new_forecast, forecast_source = await async_get_forecast_multi(
+            self.hass, self._weather_entity_ids
+        )
+        if new_forecast:
+            self._last_good_forecast = new_forecast
+            self._last_forecast_time = now
+            self._last_forecast_source = forecast_source
+            ir.async_delete_issue(self.hass, DOMAIN, "forecast_unavailable")
 
         # Expire any constraints that have timed out
         self._expire_constraints()
@@ -608,15 +613,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # ── Strategic check: need re-optimization? ──────────────────
 
-        new_forecast, forecast_source = await async_get_forecast_multi(
-            self.hass, self._weather_entity_ids
-        )
-        if new_forecast:
-            self._last_good_forecast = new_forecast
-            self._last_forecast_time = now
-            self._last_forecast_source = forecast_source
-            ir.async_delete_issue(self.hass, DOMAIN, "forecast_unavailable")
-
         if self.strategic.should_reoptimize(
             new_forecast,
             occupancy_timeline=self._occupancy_timeline or None,
@@ -645,7 +641,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             )
             comfort = self._active_comfort_range()
             await self.thermostat.async_write_safe_default(*comfort)
-            return self._build_data(thermo_state)
+            # Don't return — let EKF, baseline, and savings continue below
 
         # ── Tactical: reality check & setpoint execution ────────────
 

@@ -213,7 +213,7 @@ function renderForecastChart(states, hass) {
       return `
         <div class="card forecast-card">
           <h2>Weather Outlook</h2>
-          <div class="forecast-placeholder">Waiting for weather data\u2026</div>
+          <div class="forecast-placeholder">Loading weather data\u2026</div>
         </div>`;
     }
 
@@ -672,11 +672,10 @@ function renderEnvironmentCard(states, hass) {
   const items = [];
 
   // Outdoor temp source provenance
-  if (isAvailable(outdoor) && outdoor.attributes) {
-    const src = outdoor.attributes.source || "unknown";
-    const count = outdoor.attributes.entity_count || 0;
-    const srcLabel = count > 1 ? `${count} sensors avg` : src.replace(/^sensor\./, "");
-    items.push(`<div class="env-item"><span class="env-label">Outdoor</span><span class="env-value">${fmt(outdoor)}${unit}</span><span class="env-source">${srcLabel}</span></div>`);
+  if (isAvailable(outdoor)) {
+    const count = outdoor.attributes?.entity_count || 0;
+    const sub = count > 1 ? `<span class="env-source">${count} sensors avg</span>` : "";
+    items.push(`<div class="env-item"><span class="env-label">Outdoor</span><span class="env-value">${fmt(outdoor)}${unit}</span>${sub}</div>`);
   }
 
   // Indoor humidity
@@ -1473,6 +1472,10 @@ const PANEL_CSS = `
     font-size: 10px;
     color: var(--text-secondary);
     margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
   }
   .env-health-ok { color: var(--green); }
   .env-health-warn { color: var(--orange); }
@@ -1558,7 +1561,7 @@ const PANEL_CSS = `
     font-size: 11px;
     color: var(--text-secondary);
     text-align: center;
-    margin-top: 8px;
+    margin-top: 24px;
     font-style: italic;
   }
 

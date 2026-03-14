@@ -14,6 +14,7 @@ from homeassistant.components.frontend import async_register_built_in_panel, asy
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.start import async_at_started
 
 from .const import (
     CONF_AWAY_COMFORT_DELTA,
@@ -152,6 +153,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # First data refresh
     await coordinator.async_config_entry_first_refresh()
+
+    # Once HA is fully started (all integrations loaded), trigger a refresh
+    # so the coordinator can pick up weather entities that weren't ready yet.
+    async def _on_ha_started(_hass):
+        await coordinator.async_request_refresh()
+
+    async_at_started(hass, _on_ha_started)
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
