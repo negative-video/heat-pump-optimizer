@@ -2076,7 +2076,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "target_setpoint": current_entry.target_temp if current_entry else None,
             "next_action": self._describe_next_action(next_entry),
             "schedule_entries": len(schedule.entries) if schedule else 0,
-            "savings_pct": schedule.savings_pct if schedule else None,
+            "savings_pct": (
+                schedule.savings_pct if schedule
+                and self.savings_tracker.accuracy_tier != TIER_LEARNING
+                else None
+            ),
             "baseline_runtime": schedule.baseline_runtime_minutes if schedule else None,
             "optimized_runtime": schedule.optimized_runtime_minutes if schedule else None,
             "last_optimization": (
@@ -2162,30 +2166,63 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 thermo_state.indoor_temp if thermo_state else None
             ),
 
-            # Savings tracking
-            "savings_kwh_today": today_savings.total_saved_kwh,
-            "savings_cost_today": today_savings.total_saved_cost,
-            "savings_co2_today_grams": today_savings.total_saved_co2_grams,
+            # Savings tracking — suppress unreliable values during learning
+            # (tracker still records internally so data is ready when tier upgrades)
+            "savings_kwh_today": (
+                today_savings.total_saved_kwh
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "savings_cost_today": (
+                today_savings.total_saved_cost
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "savings_co2_today_grams": (
+                today_savings.total_saved_co2_grams
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
             "baseline_kwh_today": today_savings.total_baseline_kwh,
             "actual_kwh_today": today_savings.total_actual_kwh,
             "worst_case_kwh_today": today_savings.total_worst_case_kwh,
-            "savings_kwh_cumulative": cumulative["kwh_saved"],
-            "savings_cost_cumulative": cumulative["cost_saved"],
-            "savings_co2_cumulative_grams": cumulative["co2_saved_grams"],
+            "savings_kwh_cumulative": (
+                cumulative["kwh_saved"]
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "savings_cost_cumulative": (
+                cumulative["cost_saved"]
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "savings_co2_cumulative_grams": (
+                cumulative["co2_saved_grams"]
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
 
             # Counterfactual digital twin — decomposed savings
-            "runtime_savings_kwh_today": today_savings.total_runtime_savings_kwh,
-            "cop_savings_kwh_today": today_savings.total_cop_savings_kwh,
-            "rate_arbitrage_savings_today": today_savings.total_rate_arbitrage_savings,
+            "runtime_savings_kwh_today": (
+                today_savings.total_runtime_savings_kwh
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "cop_savings_kwh_today": (
+                today_savings.total_cop_savings_kwh
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "rate_arbitrage_savings_today": (
+                today_savings.total_rate_arbitrage_savings
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
             "carbon_shift_savings_today": (
                 today_savings.total_saved_co2_grams - sum(
                     h.saved_co2_grams or 0 for h in today_savings.hours
                     if h.runtime_savings_kwh > 0
-                ) if today_savings.total_saved_co2_grams else None
+                ) if today_savings.total_saved_co2_grams
+                and self.savings_tracker.accuracy_tier != TIER_LEARNING
+                else None
             ),
 
             # COP comparison
-            "baseline_avg_cop": today_savings.avg_baseline_cop,
+            "baseline_avg_cop": (
+                today_savings.avg_baseline_cop
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
             "optimized_avg_cop": today_savings.avg_actual_cop,
             "cop_improvement_pct": (
                 round(
@@ -2195,12 +2232,19 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 )
                 if today_savings.avg_actual_cop and today_savings.avg_baseline_cop
                 and today_savings.avg_baseline_cop > 0
+                and self.savings_tracker.accuracy_tier != TIER_LEARNING
                 else None
             ),
 
             # Comfort comparison
-            "comfort_hours_gained": today_savings.comfort_hours_gained,
-            "baseline_comfort_violations": today_savings.baseline_comfort_violations,
+            "comfort_hours_gained": (
+                today_savings.comfort_hours_gained
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
+            "baseline_comfort_violations": (
+                today_savings.baseline_comfort_violations
+                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+            ),
             "baseline_avg_indoor_temp": (
                 round(
                     sum(
@@ -2213,6 +2257,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     1,
                 )
                 if any(h.baseline_indoor_temp is not None for h in today_savings.hours)
+                and self.savings_tracker.accuracy_tier != TIER_LEARNING
                 else None
             ),
 

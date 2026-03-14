@@ -3,7 +3,7 @@
 Models the building as a two-node RC thermal circuit (air + thermal mass)
 and continuously estimates the physical parameters from thermostat readings:
 
-  C_air · dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + Q_solar
+  C_air · dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + Q_solar + Q_internal
   C_mass · dT_mass/dt = (T_air - T_mass)/R_int
 
 State vector (8 elements):
@@ -53,6 +53,10 @@ DT_HOURS = DT_MINUTES / 60.0
 
 # Solar gain scaling (BTU/hr per unit of clear_sky * sin(elevation))
 DEFAULT_SOLAR_GAIN_BTU = 3000.0  # typical residential solar gain at peak
+
+# Internal heat gain from occupants, appliances, and lighting (BTU/hr).
+# Typical occupied home: 2 people (~400 BTU/hr) + appliances/electronics (~800 BTU/hr).
+DEFAULT_INTERNAL_GAIN_BTU = 1200.0
 
 # Physical bounds for parameter clamping
 BOUNDS = {
@@ -132,7 +136,7 @@ class ThermalEstimator:
             indoor_temp,  # T_air
             indoor_temp,  # T_mass (assume equilibrium at start)
             0.10,         # R_inv → R ≈ 10 °F·hr/BTU (moderate insulation)
-            0.50,         # R_int_inv → R_int ≈ 2 (moderate coupling)
+            1.50,         # R_int_inv → R_int ≈ 0.67 (strong air↔mass coupling)
             0.001,        # C_inv → C ≈ 1000 BTU/°F
             0.0001,       # C_mass_inv → C_mass ≈ 10,000 BTU/°F
             20000.0,      # Q_cool_base ≈ 20k BTU/hr (~1.7 ton)
@@ -214,7 +218,7 @@ class ThermalEstimator:
             indoor_temp,
             indoor_temp,
             1.0 / r_envelope,    # R_inv
-            0.5,                  # R_int_inv (default — hard to extract from Beestat)
+            1.5,                  # R_int_inv — stronger air↔mass coupling default
             1.0 / c_air,         # C_inv
             1.0 / 10000.0,       # C_mass_inv (default)
             q_cool,
@@ -347,9 +351,10 @@ class ThermalEstimator:
         Q_hvac = self._hvac_output(hvac_mode, hvac_running, outdoor_temp,
                                     Q_cool_base, Q_heat_base)
         Q_solar = self._solar_gain(cloud_cover, sun_elevation)
+        Q_internal = DEFAULT_INTERNAL_GAIN_BTU        # occupants + appliances
 
         # Temperature updates
-        dT_air = C_inv * (Q_env + Q_int + Q_hvac + Q_solar) * dt_hours
+        dT_air = C_inv * (Q_env + Q_int + Q_hvac + Q_solar + Q_internal) * dt_hours
         dT_mass = C_mass_inv * (-Q_int) * dt_hours
 
         x_new = x.copy()
@@ -384,7 +389,8 @@ class ThermalEstimator:
         Q_hvac = self._hvac_output(hvac_mode, hvac_running, outdoor_temp,
                                     Q_cool_base, Q_heat_base)
         Q_solar = self._solar_gain(cloud_cover, sun_elevation)
-        Q_total = Q_env + Q_int + Q_hvac + Q_solar
+        Q_internal = DEFAULT_INTERNAL_GAIN_BTU
+        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal
 
         F = np.eye(N_STATES)
         dt = dt_hours

@@ -1494,7 +1494,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Edit per-room motion/occupancy sensors."""
-        from ..engine.data_types import AreaSensorGroup
+        from .engine.data_types import AreaSensorGroup
 
         areas = getattr(self, "_discovered_areas", [])
         selected_ids = getattr(self, "_selected_area_ids", [])

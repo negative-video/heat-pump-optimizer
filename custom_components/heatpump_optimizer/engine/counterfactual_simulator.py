@@ -27,6 +27,7 @@ from ..engine.data_types import BaselineHourResult, BaselineScheduleTemplate
 from ..learning.thermal_estimator import (
     ALPHA_COOL,
     ALPHA_HEAT,
+    DEFAULT_INTERNAL_GAIN_BTU,
     DEFAULT_SOLAR_GAIN_BTU,
     IDX_C_INV,
     IDX_C_MASS_INV,
@@ -168,9 +169,10 @@ class CounterfactualSimulator:
             Q_cool_base, Q_heat_base,
         )
         Q_solar = self._solar_gain(cloud_cover, sun_elevation)
+        Q_internal = DEFAULT_INTERNAL_GAIN_BTU
 
         # Temperature updates (same physics as EKF _predict_state)
-        dT_air = C_inv * (Q_env + Q_int + Q_hvac + Q_solar) * dt_hours
+        dT_air = C_inv * (Q_env + Q_int + Q_hvac + Q_solar + Q_internal) * dt_hours
         dT_mass = C_mass_inv * (-Q_int) * dt_hours
 
         self._T_air += dT_air
