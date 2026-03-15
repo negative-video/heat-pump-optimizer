@@ -64,13 +64,18 @@
       "profile_not_found": "File not found — check the path is accessible inside your HA container (no quotes needed around spaces)",
       "profile_parse_error": "Could not parse file as JSON — verify the file is a valid Beestat temperature profile export",
       "profile_missing_keys": "Missing required data — the file needs temperature deltas (cool_1, heat_1, resist) with linear trendlines and balance points",
-      "invalid_model_data": "Invalid model data — paste the JSON from the export_model service"
+      "invalid_model_data": "Invalid model data — paste the JSON from the export_model service",
+      "cool_range_inverted": "Cooling minimum must be less than cooling maximum",
+      "heat_range_inverted": "Heating minimum must be less than heating maximum",
+      "safety_above_comfort": "Safety minimum must be below the comfort heating minimum",
+      "comfort_above_safety": "Comfort cooling maximum must be below the safety maximum"
     }
   },
   "options": {
     "step": {
       "init": {
         "menu_options": {
+          "equipment": "Thermostat & weather source",
           "sensors": "Environmental & indoor sensors",
           "energy": "Energy & cost tracking",
           "behavior": "Optimizer behavior",
@@ -78,6 +83,14 @@
           "occupancy": "Occupancy & presence",
           "schedule": "Calendar scheduling & pre-conditioning",
           "rooms": "Room-aware sensing"
+        }
+      },
+      "equipment": {
+        "title": "Thermostat & Weather Source",
+        "description": "Change your thermostat or weather source without losing learned thermal model data. The optimizer will reload with the new entities.",
+        "data": {
+          "climate_entity": "Climate entity (thermostat)",
+          "weather_entities": "Weather entities (first = primary, rest = fallback)"
         }
       },
       "sensors": {
@@ -91,7 +104,10 @@
           "barometric_pressure_entity": "Barometric pressure sensor",
           "sun_entity": "Sun entity",
           "indoor_temp_entities": "Indoor temperature sensors",
-          "indoor_humidity_entities": "Indoor humidity sensors"
+          "indoor_humidity_entities": "Indoor humidity sensors",
+          "door_window_entities": "Door/window contact sensors",
+          "attic_temp_entity": "Attic temperature sensor",
+          "crawlspace_temp_entity": "Crawlspace temperature sensor"
         }
       },
       "energy": {
@@ -107,15 +123,22 @@
           "cost_weight": "Cost optimization weight",
           "solar_production_entity": "Solar production sensor (watts)",
           "grid_import_entity": "Grid import sensor (watts)",
-          "solar_export_rate_entity": "Solar export rate sensor"
+          "solar_export_rate_entity": "Solar export rate sensor",
+          "tou_schedule": "Time-of-use rate schedule (JSON)",
+          "demand_response_entity": "Demand response trigger entity"
         },
         "data_description": {
           "hvac_power_entity": "A sensor that reports your HVAC system's current power draw in watts.",
-          "hvac_power_default_watts": "Used as a fallback when the power sensor above is unavailable or not configured. Set to your system's typical draw.",
+          "hvac_power_default_watts": "Fallback power estimate when no HVAC power sensor is available. Set to your system's typical draw.",
           "electricity_rate_entity": "A sensor or input_number that provides your current electricity rate in $/kWh. Accepts sensor entities or helpers like input_number.",
-          "electricity_flat_rate": "If you don't have a rate entity, enter a fixed rate here. Ignored when a rate entity is configured.",
-          "carbon_weight": "How much to weigh carbon intensity in optimization decisions (0 = ignore, 1 = maximize carbon savings).",
-          "cost_weight": "How much to weigh electricity cost in optimization decisions (0 = ignore, 1 = maximize cost savings)."
+          "electricity_flat_rate": "Flat electricity rate in $/kWh. Only used when no rate entity is configured. Set to 0 to disable.",
+          "carbon_weight": "How much to weigh carbon intensity in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
+          "cost_weight": "How much to weigh electricity cost in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
+          "solar_production_entity": "A sensor reporting current solar panel output in watts.",
+          "grid_import_entity": "A sensor reporting current grid import in watts.",
+          "solar_export_rate_entity": "A sensor reporting the current solar export rate in $/kWh.",
+          "tou_schedule": "Define time-of-use electricity rate periods as JSON. Format: [{\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35}]. Days: 0=Monday through 6=Sunday. Leave empty to use the rate entity or flat rate instead.",
+          "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode — widening the comfort range to reduce HVAC load during grid stress events."
         }
       },
       "behavior": {
@@ -241,7 +264,16 @@
       }
     },
     "error": {
-      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor — please remove the duplicate"
+      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor — please remove the duplicate",
+      "cool_range_inverted": "Cooling minimum must be less than cooling maximum",
+      "heat_range_inverted": "Heating minimum must be less than heating maximum",
+      "safety_above_comfort": "Safety minimum must be below the comfort heating minimum",
+      "comfort_above_safety": "Comfort cooling maximum must be below the safety maximum",
+      "greybox_requires_adaptive": "The grey-box LP optimizer requires the adaptive thermal model to be enabled",
+      "tou_invalid_json": "Invalid JSON — check syntax and try again",
+      "tou_not_array": "TOU schedule must be a JSON array of rate period objects",
+      "tou_invalid_entry": "Each TOU entry must be a JSON object with at least a \"rate\" field",
+      "tou_missing_rate": "Each TOU entry must include a \"rate\" field ($/kWh)"
     }
   },
   "services": {
@@ -316,6 +348,20 @@
           "description": "Identifier for the integration or automation that set this constraint."
         }
       }
+    }
+  },
+  "issues": {
+    "forecast_unavailable": {
+      "title": "Weather forecast unavailable",
+      "description": "All configured weather entities have been unavailable for an extended period. The optimizer has entered safe mode and is holding your thermostat at a comfortable midpoint.\n\nCheck that your weather integration is working in **Settings → Devices & Services**."
+    },
+    "thermostat_unavailable": {
+      "title": "Thermostat unavailable",
+      "description": "Your thermostat ({entity_id}) has been unreachable for {minutes} minutes. The optimizer cannot control your HVAC until the connection is restored.\n\nCheck your thermostat's connectivity and its integration in **Settings → Devices & Services**."
+    },
+    "model_not_progressing": {
+      "title": "Thermal model not learning",
+      "description": "The thermal model has been learning for {days} days but confidence is only {confidence}%. This usually means the HVAC system hasn't run enough heating/cooling cycles.\n\nThis can happen during mild weather when neither heating nor cooling is needed. The model will resume learning when your HVAC system becomes active again."
     }
   }
 }

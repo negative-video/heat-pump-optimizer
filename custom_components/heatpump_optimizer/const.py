@@ -118,6 +118,13 @@ CONF_SUN_ENTITY = "sun_entity"
 CONF_INDOOR_TEMP_ENTITIES = "indoor_temp_entities"
 CONF_INDOOR_HUMIDITY_ENTITIES = "indoor_humidity_entities"
 
+# Door/window contact sensors (optional — for infiltration modeling)
+CONF_DOOR_WINDOW_ENTITIES = "door_window_entities"
+
+# Buffer zone temperature sensors (optional — for boundary heat transfer)
+CONF_ATTIC_TEMP_ENTITY = "attic_temp_entity"
+CONF_CRAWLSPACE_TEMP_ENTITY = "crawlspace_temp_entity"
+
 # Occupancy (multi-entity, replaces singular CONF_OCCUPANCY_ENTITY)
 CONF_OCCUPANCY_ENTITIES = "occupancy_entities"
 CONF_OCCUPANCY_DEBOUNCE_MINUTES = "occupancy_debounce_minutes"

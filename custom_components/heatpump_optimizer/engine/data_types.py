@@ -54,6 +54,8 @@ class ForecastPoint:
     solar_irradiance_w_m2: float | None = None  # direct measurement in W/m²
     sun_elevation: float | None = None  # degrees above horizon
     pressure_hpa: float | None = None  # atmospheric pressure in hPa
+    weather_condition: str | None = None  # HA weather condition string (e.g., "rainy")
+    precipitation: bool = False  # derived: True if rainy/snowy/etc.
     # Per-hour comfort bounds (set by strategic controller from occupancy timeline)
     comfort_min: float | None = None  # °F, None = use global comfort range
     comfort_max: float | None = None  # °F, None = use global comfort range

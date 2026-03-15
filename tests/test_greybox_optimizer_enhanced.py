@@ -111,7 +111,7 @@ def make_estimator(
     est.x[te_mod.IDX_Q_HEAT] = Q_heat
     est._n_obs = n_obs
     est.P = np.diag([
-        0.001, 0.1, 1e-5, 1e-4, 1e-9, 1e-11, 100, 100,
+        0.001, 0.1, 1e-5, 1e-4, 1e-9, 1e-11, 100, 100, 100,
     ])
     return est
 

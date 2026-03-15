@@ -55,6 +55,25 @@ class OccupancyAdapter:
         self._forced_mode: OccupancyMode | None = None
         self._last_active: dict[str, datetime] = {}
 
+    def get_people_home_count(self) -> int:
+        """Count the number of tracked entities currently in HOME state.
+
+        For person entities this is a direct headcount. For binary sensors
+        (e.g., Ecobee occupancy) each "on" sensor counts as one.
+        Returns 0 if no entities are configured.
+        """
+        if not self.entity_ids:
+            return 0
+
+        count = 0
+        for eid in self.entity_ids:
+            state = self.hass.states.get(eid)
+            if state is None:
+                continue
+            if self._interpret_state(state.state) == OccupancyMode.HOME:
+                count += 1
+        return count
+
     def get_mode(self) -> OccupancyMode:
         """Determine current occupancy mode (reactive only, no calendar).
 

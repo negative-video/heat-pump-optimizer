@@ -62,8 +62,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Heat Pump Optimizer from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Extract config — options can override data for comfort values
-    climate_entity = entry.data[CONF_CLIMATE_ENTITY]
+    # Extract config — options can override data for equipment & comfort values
+    climate_entity = (
+        entry.options.get(CONF_CLIMATE_ENTITY)
+        or entry.data[CONF_CLIMATE_ENTITY]
+    )
     weather_entity = entry.data.get(CONF_WEATHER_ENTITY)
 
     # Weather: migrate singular → plural for backward compat

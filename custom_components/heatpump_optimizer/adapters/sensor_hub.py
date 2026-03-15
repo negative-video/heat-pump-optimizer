@@ -66,6 +66,11 @@ class SensorHub:
         solar_production_entity: str | None = None,
         grid_import_entity: str | None = None,
         solar_export_rate_entity: str | None = None,
+        # Door/window contact sensors (optional)
+        door_window_entities: list[str] | None = None,
+        # Buffer zone temperature sensors (optional)
+        attic_temp_entity: str | None = None,
+        crawlspace_temp_entity: str | None = None,
         # Existing sensor config (migrated from coordinator)
         power_entity: str | None = None,
         power_default_watts: float = 3500.0,
@@ -94,6 +99,13 @@ class SensorHub:
 
         # Room-aware area occupancy manager (optional)
         self._area_manager: AreaOccupancyManager | None = None
+
+        # Door/window contact sensors (optional)
+        self._door_window_entities: list[str] = door_window_entities or []
+
+        # Buffer zone temperature sensors (optional)
+        self._attic_temp_entity = attic_temp_entity
+        self._crawlspace_temp_entity = crawlspace_temp_entity
 
         # Existing (migrated from coordinator)
         self._power_entity = power_entity
@@ -594,6 +606,45 @@ class SensorHub:
             return float(state.attributes.get("azimuth", 0))
         except (ValueError, TypeError):
             return None
+
+    # ── Door/window contact sensors ─────────────────────────────────────
+
+    def read_door_window_open_count(self) -> tuple[int, int]:
+        """Count open doors/windows.
+
+        Returns:
+            Tuple of (open_count, total_configured).
+            If no entities configured, returns (0, 0).
+        """
+        if not self._door_window_entities:
+            return 0, 0
+
+        open_count = 0
+        total = 0
+        for eid in self._door_window_entities:
+            state = self.hass.states.get(eid)
+            if state and state.state not in ("unknown", "unavailable"):
+                total += 1
+                if state.state == "on":  # binary_sensor: on = open
+                    open_count += 1
+
+        return open_count, total
+
+    # ── Buffer zone temperatures ──────────────────────────────────────
+
+    def read_attic_temp(self) -> SensorReading | None:
+        """Attic temperature in °F. Returns None if not configured or unavailable."""
+        if not self._attic_temp_entity:
+            return None
+        reading = self._read_multi_temp([self._attic_temp_entity], "Attic temp")
+        return reading
+
+    def read_crawlspace_temp(self) -> SensorReading | None:
+        """Crawlspace temperature in °F. Returns None if not configured or unavailable."""
+        if not self._crawlspace_temp_entity:
+            return None
+        reading = self._read_multi_temp([self._crawlspace_temp_entity], "Crawlspace temp")
+        return reading
 
     # ── Energy / solar production ─────────────────────────────────────
 

@@ -26,7 +26,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.calendar_occupancy import CalendarOccupancyAdapter
-from .adapters.forecast import async_get_forecast, async_get_forecast_multi, enrich_forecast_with_grid_data
+from .adapters.forecast import async_get_forecast, async_get_forecast_multi, enrich_forecast_with_grid_data, populate_sun_elevation
 from .adapters.occupancy import OccupancyAdapter, OccupancyMode
 from .adapters.sensor_hub import SensorHub
 from .adapters.thermostat import ThermostatAdapter
@@ -37,12 +37,15 @@ from .const import (
     CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
+    CONF_ATTIC_TEMP_ENTITY,
     CONF_CARBON_WEIGHT,
     CONF_CO2_ENTITY,
     CONF_COST_WEIGHT,
+    CONF_CRAWLSPACE_TEMP_ENTITY,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
+    CONF_DOOR_WINDOW_ENTITIES,
     CONF_DEPARTURE_ZONES,
     CONF_ELECTRICITY_FLAT_RATE,
     CONF_ELECTRICITY_RATE_ENTITY,
@@ -215,6 +218,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             solar_production_entity=opts.get(CONF_SOLAR_PRODUCTION_ENTITY),
             grid_import_entity=opts.get(CONF_GRID_IMPORT_ENTITY),
             solar_export_rate_entity=opts.get(CONF_SOLAR_EXPORT_RATE_ENTITY),
+            door_window_entities=opts.get(CONF_DOOR_WINDOW_ENTITIES) or [],
+            attic_temp_entity=opts.get(CONF_ATTIC_TEMP_ENTITY),
+            crawlspace_temp_entity=opts.get(CONF_CRAWLSPACE_TEMP_ENTITY),
             power_entity=self._power_entity_id,
             power_default_watts=self._power_default_watts,
             co2_entity=self._co2_entity_id,
@@ -478,6 +484,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.hass, self._weather_entity_ids
         )
         if new_forecast:
+            # Populate sun elevation for all forecast hours using lat/lon
+            populate_sun_elevation(
+                new_forecast,
+                latitude=self._get_latitude(),
+                longitude=self.hass.config.longitude or -77.0,
+            )
             self._last_good_forecast = new_forecast
             self._last_forecast_time = now
             self._last_forecast_source = forecast_source
@@ -777,6 +789,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     cloud_cover = new_forecast[0].cloud_cover
                     sun_elevation = new_forecast[0].sun_elevation
 
+                # Precipitation flag from current forecast
+                is_precip = new_forecast[0].precipitation if new_forecast else False
+
                 self.counterfactual.step(
                     now=now,
                     outdoor_temp=outdoor_temp,
@@ -789,6 +804,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     carbon_intensity=co2_intensity,
                     electricity_rate=elec_rate,
                     real_indoor_temp=thermo_state.indoor_temp,
+                    people_home_count=self.occupancy.get_people_home_count(),
+                    precipitation=is_precip,
+                    indoor_humidity=self._current_indoor_humidity,
                 )
 
         # ── Performance profiler feed ─────────────────────────────
@@ -955,6 +973,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.optimizer.model = active_model
             self.simulator.model = active_model
 
+        # Gather current environmental context for the optimizer
+        people_count = self.occupancy.get_people_home_count()
+
         # Run optimizer in executor (synchronous engine)
         try:
             schedule = await self.hass.async_add_executor_job(
@@ -966,6 +987,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self._current_indoor_humidity,
                 True,  # humidity_correction
                 occupancy_timeline,
+                people_count,
+                self._current_indoor_humidity,
             )
         finally:
             # Restore original model references
@@ -1468,6 +1491,28 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         )
         pressure_reading = self.sensor_hub.read_barometric_pressure()
 
+        # Indoor humidity for latent load correction
+        indoor_humidity_reading = self.sensor_hub.read_weighted_indoor_humidity(
+            thermo_state.humidity
+        )
+
+        # Occupancy: people count for internal heat gain scaling
+        people_count = self.occupancy.get_people_home_count()
+
+        # Door/window contacts for infiltration modeling
+        open_count, _total = self.sensor_hub.read_door_window_open_count()
+
+        # Buffer zone temperatures (attic, crawlspace)
+        attic_reading = self.sensor_hub.read_attic_temp()
+        crawlspace_reading = self.sensor_hub.read_crawlspace_temp()
+
+        # Precipitation from current forecast point
+        is_precipitation = False
+        if snapshot:
+            closest_pt = min(snapshot, key=lambda pt: abs((pt.time - now).total_seconds()))
+            if abs((closest_pt.time - now).total_seconds()) < 7200:
+                is_precipitation = closest_pt.precipitation
+
         innovation = self.estimator.update(
             observed_temp=thermo_state.indoor_temp,
             outdoor_temp=outdoor_temp,
@@ -1478,18 +1523,25 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             wind_speed_mph=wind_reading.value if wind_reading else None,
             humidity=humidity_reading.value if humidity_reading else None,
             pressure_hpa=pressure_reading.value if pressure_reading else None,
+            indoor_humidity=indoor_humidity_reading.value if indoor_humidity_reading else None,
+            people_home_count=people_count,
+            open_door_window_count=open_count,
+            attic_temp=attic_reading.value if attic_reading else None,
+            crawlspace_temp=crawlspace_reading.value if crawlspace_reading else None,
+            precipitation=is_precipitation,
         )
 
         if self.estimator._n_obs % 100 == 0:
             _LOGGER.info(
                 "Kalman filter: %d observations, confidence=%.0f%%, "
-                "R=%.1f, C_mass=%.0f, Q_cool=%.0f, Q_heat=%.0f",
+                "R=%.1f, C_mass=%.0f, Q_cool=%.0f, Q_heat=%.0f, solar=%.0f",
                 self.estimator._n_obs,
                 self.estimator.confidence * 100,
                 self.estimator.R_value,
                 self.estimator.thermal_mass,
                 float(self.estimator.x[6]),
                 float(self.estimator.x[7]),
+                self.estimator.solar_gain_btu,
             )
 
     def _get_active_model(self):

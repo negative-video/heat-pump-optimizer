@@ -93,111 +93,41 @@ def get_hvac_output(est, mode, running, outdoor_temp):
 # ── Tests ──────────────────────────────────────────────────────────
 
 
-class TestWindChillCorrection:
-    """Test wind chill effects on heating COP in _hvac_output."""
+class TestWindNotAppliedToCondenser:
+    """Wind should NOT affect condenser COP — only envelope infiltration.
 
-    def test_wind_chill_applied_during_heating(self):
-        """Wind chill should reduce effective outdoor temp for heating COP."""
+    Wind chill (NWS formula) models perceived temp on exposed human skin.
+    Heat pump condensers use forced convection from their own fan, so
+    ambient wind has negligible (or slightly positive) effect on COP.
+    """
+
+    def test_wind_does_not_affect_heating_output(self):
+        """Wind speed should not change HVAC heating output."""
         est = make_estimator()
 
-        # Baseline: no wind
         est._current_wind_speed = None
         baseline = get_hvac_output(est, "heat", True, 30.0)
 
-        # With wind
         est._current_wind_speed = 15.0
         with_wind = get_hvac_output(est, "heat", True, 30.0)
 
-        # Wind chill makes it feel colder, so COP degrades further,
-        # reducing heating output
-        assert with_wind < baseline, (
-            f"Wind chill should reduce heating output: {with_wind} vs {baseline}"
+        assert with_wind == baseline, (
+            f"Wind should not affect heating COP: {with_wind} vs {baseline}"
         )
 
-    def test_no_wind_chill_above_50f(self):
-        """Wind chill formula only applies below 50F outdoor."""
+    def test_wind_does_not_affect_cooling_output(self):
+        """Wind speed should not change HVAC cooling output."""
         est = make_estimator()
 
         est._current_wind_speed = None
-        baseline = get_hvac_output(est, "heat", True, 55.0)
+        baseline = get_hvac_output(est, "cool", True, 95.0)
 
         est._current_wind_speed = 20.0
-        with_wind = get_hvac_output(est, "heat", True, 55.0)
+        with_wind = get_hvac_output(est, "cool", True, 95.0)
 
         assert with_wind == baseline, (
-            "Wind chill should not apply above 50F"
+            "Wind should not affect cooling COP"
         )
-
-    def test_no_wind_chill_for_low_wind(self):
-        """Wind chill formula requires wind > 3 mph."""
-        est = make_estimator()
-
-        est._current_wind_speed = None
-        baseline = get_hvac_output(est, "heat", True, 30.0)
-
-        est._current_wind_speed = 2.0
-        with_low_wind = get_hvac_output(est, "heat", True, 30.0)
-
-        assert with_low_wind == baseline, (
-            "Wind chill should not apply for wind <= 3 mph"
-        )
-
-    def test_no_wind_chill_for_cooling(self):
-        """Wind chill should not affect cooling mode."""
-        est = make_estimator()
-
-        est._current_wind_speed = None
-        baseline = get_hvac_output(est, "cool", True, 40.0)
-
-        est._current_wind_speed = 20.0
-        with_wind = get_hvac_output(est, "cool", True, 40.0)
-
-        assert with_wind == baseline, (
-            "Wind chill should not affect cooling mode"
-        )
-
-    def test_nws_formula_correctness(self):
-        """Verify the NWS wind chill formula produces expected values."""
-        # NWS formula: 35.74 + 0.6215*T - 35.75*V^0.16 + 0.4275*T*V^0.16
-        # At 30F, 10 mph: should be approximately 21F
-        T = 30.0
-        V = 10.0
-        expected_wc = (
-            35.74 + 0.6215 * T - 35.75 * (V ** 0.16) + 0.4275 * T * (V ** 0.16)
-        )
-        assert 20.0 < expected_wc < 25.0, f"NWS wind chill at 30F/10mph = {expected_wc}"
-
-        est = make_estimator()
-        est._current_wind_speed = V
-        est._current_pressure = None
-        est._current_humidity = None
-
-        # The output should use the wind-chill-adjusted temp for COP
-        output = get_hvac_output(est, "heat", True, T)
-
-        # Compute what we expect: COP uses wind chill temp
-        cop_factor = max(0.1, 1.0 - ALPHA_HEAT * (T_REF_F - expected_wc))
-        Q_heat_base = float(est.x[IDX_Q_HEAT])
-        expected_output = Q_heat_base * cop_factor
-
-        assert abs(output - expected_output) < 1.0, (
-            f"Expected ~{expected_output:.1f}, got {output:.1f}"
-        )
-
-    def test_reduces_heating_output(self):
-        """Wind chill should produce strictly less heating output than calm conditions."""
-        est = make_estimator()
-
-        for wind_speed in [5.0, 10.0, 20.0, 30.0]:
-            est._current_wind_speed = None
-            baseline = get_hvac_output(est, "heat", True, 20.0)
-
-            est._current_wind_speed = wind_speed
-            windy = get_hvac_output(est, "heat", True, 20.0)
-
-            assert windy < baseline, (
-                f"Wind {wind_speed} mph should reduce heating output"
-            )
 
 
 class TestHumidityPenalty:
@@ -410,34 +340,23 @@ class TestCombinedCorrections:
         assert combined > humid_only, "Combined should reduce more than humidity alone"
         assert combined > pressure_only, "Combined should reduce more than pressure alone"
 
-    def test_wind_plus_pressure_combined_heating(self):
-        """Wind chill and pressure should stack for heating."""
+    def test_pressure_reduces_heating(self):
+        """Low pressure (altitude) should reduce heating capacity."""
         est = make_estimator()
         est._current_humidity = None
-
-        # Baseline: no corrections
         est._current_wind_speed = None
+
+        # Baseline: no pressure correction
         est._current_pressure = None
         baseline = get_hvac_output(est, "heat", True, 30.0)
 
-        # Wind only
-        est._current_wind_speed = 15.0
-        est._current_pressure = None
-        wind_only = get_hvac_output(est, "heat", True, 30.0)
-
-        # Pressure only (low)
-        est._current_wind_speed = None
+        # Low pressure (altitude)
         est._current_pressure = 850.0
-        pressure_only = get_hvac_output(est, "heat", True, 30.0)
+        low_pressure = get_hvac_output(est, "heat", True, 30.0)
 
-        # Both combined
-        est._current_wind_speed = 15.0
-        est._current_pressure = 850.0
-        combined = get_hvac_output(est, "heat", True, 30.0)
-
-        # Combined should produce less heating than either alone
-        assert combined < wind_only, "Combined should reduce more than wind alone"
-        assert combined < pressure_only, "Combined should reduce more than pressure alone"
+        assert low_pressure < baseline, (
+            "Low pressure should reduce heating capacity"
+        )
 
     def test_all_none_matches_baseline(self):
         """All environmental fields as None should match uncorrected baseline."""

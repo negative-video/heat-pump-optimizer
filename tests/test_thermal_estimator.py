@@ -129,7 +129,7 @@ class TestColdStart:
         est = ThermalEstimator.cold_start(indoor_temp=70.0)
         assert est.x[0] == 70.0  # T_air
         assert est.x[1] == 70.0  # T_mass
-        assert est.P.shape == (8, 8)
+        assert est.P.shape == (9, 9)
         assert est.confidence == 0.0  # No observations yet
         assert est._n_obs == 0
 

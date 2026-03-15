@@ -102,6 +102,8 @@ class StrategicPlanner:
         humidity: float | None = None,
         humidity_correction: bool = False,
         occupancy_timeline: list[OccupancyForecastPoint] | None = None,
+        people_home_count: int | None = None,
+        indoor_humidity: float | None = None,
     ) -> OptimizedSchedule | None:
         """Run the optimizer and update internal state.
 
@@ -148,7 +150,9 @@ class StrategicPlanner:
         try:
             if self._use_greybox and self.greybox_optimizer is not None:
                 schedule = self.greybox_optimizer.optimize(
-                    indoor_temp, forecast, comfort, mode
+                    indoor_temp, forecast, comfort, mode,
+                    people_home_count=people_home_count,
+                    indoor_humidity=indoor_humidity,
                 )
             else:
                 schedule = self.optimizer.optimize_setpoints(

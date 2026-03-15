@@ -27,6 +27,7 @@ from .const import (
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
     CONF_CARBON_WEIGHT,
+    CONF_ATTIC_TEMP_ENTITY,
     CONF_CLIMATE_ENTITY,
     CONF_CO2_ENTITY,
     CONF_COMFORT_COOL_MAX,
@@ -34,8 +35,11 @@ from .const import (
     CONF_COMFORT_HEAT_MAX,
     CONF_COMFORT_HEAT_MIN,
     CONF_COST_WEIGHT,
+    CONF_CRAWLSPACE_TEMP_ENTITY,
+    CONF_DEMAND_RESPONSE_ENTITY,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
+    CONF_DOOR_WINDOW_ENTITIES,
     CONF_DEPARTURE_ZONE,
     CONF_DEPARTURE_ZONES,
     CONF_ELECTRICITY_FLAT_RATE,
@@ -65,6 +69,7 @@ from .const import (
     CONF_SOLAR_IRRADIANCE_ENTITY,
     CONF_SOLAR_PRODUCTION_ENTITY,
     CONF_SUN_ENTITY,
+    CONF_TOU_SCHEDULE,
     CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
@@ -150,6 +155,33 @@ def _validate_profile(path: str) -> str | None:
         return "profile_missing_keys"
 
     return None
+
+
+def _validate_comfort_ranges(user_input: dict[str, Any]) -> dict[str, str]:
+    """Validate that comfort/safety temperature ranges are logically consistent.
+
+    Returns an empty dict if valid, or {field: error_key} for the first
+    violation found (HA only shows one error per field).
+    """
+    errors: dict[str, str] = {}
+
+    cool_min = user_input.get(CONF_COMFORT_COOL_MIN, DEFAULT_COMFORT_COOL_MIN)
+    cool_max = user_input.get(CONF_COMFORT_COOL_MAX, DEFAULT_COMFORT_COOL_MAX)
+    heat_min = user_input.get(CONF_COMFORT_HEAT_MIN, DEFAULT_COMFORT_HEAT_MIN)
+    heat_max = user_input.get(CONF_COMFORT_HEAT_MAX, DEFAULT_COMFORT_HEAT_MAX)
+    safety_heat = user_input.get(CONF_SAFETY_HEAT_MIN, DEFAULT_SAFETY_HEAT_MIN)
+    safety_cool = user_input.get(CONF_SAFETY_COOL_MAX, DEFAULT_SAFETY_COOL_MAX)
+
+    if cool_min >= cool_max:
+        errors[CONF_COMFORT_COOL_MIN] = "cool_range_inverted"
+    if heat_min >= heat_max:
+        errors[CONF_COMFORT_HEAT_MIN] = "heat_range_inverted"
+    if safety_heat >= heat_min:
+        errors[CONF_SAFETY_HEAT_MIN] = "safety_above_comfort"
+    if cool_max >= safety_cool:
+        errors[CONF_COMFORT_COOL_MAX] = "comfort_above_safety"
+
+    return errors
 
 
 def _validate_model_import(data_str: str) -> str | None:
@@ -389,15 +421,19 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Step 3: Configure safety limits and optimization range."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._config_data.update(user_input)
-            return self.async_create_entry(
-                title="Heat Pump Optimizer",
-                data=self._config_data,
-            )
+            errors = _validate_comfort_ranges(user_input)
+            if not errors:
+                self._config_data.update(user_input)
+                return self.async_create_entry(
+                    title="Heat Pump Optimizer",
+                    data=self._config_data,
+                )
 
         return self.async_show_form(
             step_id="comfort",
+            errors=errors,
             data_schema=vol.Schema(
                 {
                     # Safety limits (absolute guardrails)
@@ -493,7 +529,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["sensors", "energy", "behavior", "comfort", "occupancy", "schedule", "rooms"],
+            menu_options=["equipment", "sensors", "energy", "behavior", "comfort", "occupancy", "schedule", "rooms"],
         )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -511,6 +547,50 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             for entry in ent_reg.entities.values()
             if entry.config_entry_id == self.config_entry.entry_id
         ]
+
+    # ── Equipment ──────────────────────────────────────────────────
+
+    async def async_step_equipment(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Change thermostat or weather source without losing learned data."""
+        if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        # Read current values from entry data (initial setup)
+        data = self.config_entry.data
+
+        current_climate = self._options.get(
+            CONF_CLIMATE_ENTITY, data.get(CONF_CLIMATE_ENTITY)
+        )
+        current_weather = self._options.get(
+            CONF_WEATHER_ENTITIES,
+            data.get(CONF_WEATHER_ENTITIES, [data.get(CONF_WEATHER_ENTITY, "")]),
+        )
+
+        return self.async_show_form(
+            step_id="equipment",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_CLIMATE_ENTITY,
+                        default=current_climate,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(domain="climate"),
+                    ),
+                    vol.Required(
+                        CONF_WEATHER_ENTITIES,
+                        default=current_weather,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="weather", multiple=True
+                        ),
+                    ),
+                }
+            ),
+        )
 
     # ── Sensors ──────────────────────────────────────────────────────
 
@@ -643,6 +723,35 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             exclude_entities=exclude,
                         ),
                     ),
+                    vol.Optional(
+                        CONF_DOOR_WINDOW_ENTITIES,
+                        default=self._options.get(CONF_DOOR_WINDOW_ENTITIES, []),
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="binary_sensor",
+                            multiple=True,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_ATTIC_TEMP_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_ATTIC_TEMP_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="temperature",
+                            exclude_entities=exclude,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_CRAWLSPACE_TEMP_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_CRAWLSPACE_TEMP_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="temperature",
+                            exclude_entities=exclude,
+                        ),
+                    ),
                 }
             ),
             errors=errors,
@@ -654,10 +763,29 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Power monitoring, CO2, electricity rates, optimization weights."""
+        errors: dict[str, str] = {}
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
-            self._options.update(user_input)
-            return self.async_create_entry(title="", data=self._options)
+            # Validate TOU schedule JSON if provided
+            tou_raw = user_input.get(CONF_TOU_SCHEDULE, "").strip()
+            if tou_raw:
+                try:
+                    tou_data = json.loads(tou_raw)
+                    if not isinstance(tou_data, list):
+                        errors[CONF_TOU_SCHEDULE] = "tou_not_array"
+                    else:
+                        for entry in tou_data:
+                            if not isinstance(entry, dict):
+                                errors[CONF_TOU_SCHEDULE] = "tou_invalid_entry"
+                                break
+                            if "rate" not in entry:
+                                errors[CONF_TOU_SCHEDULE] = "tou_missing_rate"
+                                break
+                except json.JSONDecodeError:
+                    errors[CONF_TOU_SCHEDULE] = "tou_invalid_json"
+            if not errors:
+                self._options.update(user_input)
+                return self.async_create_entry(title="", data=self._options)
 
         # Discover power, solar, CO2, and rate sensors for smart defaults
         discovery = EntityDiscovery(self.hass)
@@ -701,7 +829,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         default=self._options.get(
                             CONF_HVAC_POWER_DEFAULT_WATTS, DEFAULT_HVAC_POWER_WATTS
                         ),
-                    ): vol.Coerce(float),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=500, max=20000, step=100,
+                            unit_of_measurement="W",
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        ),
+                    ),
                     vol.Optional(
                         CONF_CO2_ENTITY,
                         description={"suggested_value": co2_default},
@@ -723,7 +857,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_ELECTRICITY_FLAT_RATE,
                         default=self._options.get(CONF_ELECTRICITY_FLAT_RATE, 0.0),
-                    ): vol.Coerce(float),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.0, max=2.0, step=0.01,
+                            unit_of_measurement="$/kWh",
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
+                    ),
                     vol.Optional(
                         CONF_CARBON_WEIGHT,
                         default=self._options.get(
@@ -773,8 +913,24 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             exclude_entities=exclude,
                         ),
                     ),
+                    vol.Optional(
+                        CONF_TOU_SCHEDULE,
+                        description={"suggested_value": self._options.get(CONF_TOU_SCHEDULE, "")},
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(multiline=True),
+                    ),
+                    vol.Optional(
+                        CONF_DEMAND_RESPONSE_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_DEMAND_RESPONSE_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=["input_boolean", "binary_sensor"],
+                            exclude_entities=exclude,
+                        ),
+                    ),
                 }
             ),
+            errors=errors,
         )
 
     # ── Behavior ─────────────────────────────────────────────────────
@@ -783,12 +939,20 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Aggressiveness, override grace, reopt interval, model toggles."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            self._options.update(user_input)
-            return self.async_create_entry(title="", data=self._options)
+            if (
+                user_input.get(CONF_USE_GREYBOX_MODEL)
+                and not user_input.get(CONF_USE_ADAPTIVE_MODEL)
+            ):
+                errors[CONF_USE_GREYBOX_MODEL] = "greybox_requires_adaptive"
+            if not errors:
+                self._options.update(user_input)
+                return self.async_create_entry(title="", data=self._options)
 
         return self.async_show_form(
             step_id="behavior",
+            errors=errors,
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -878,17 +1042,21 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Reconfigure safety limits and optimization range."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            # Comfort settings go into config entry data, not options.
-            # Use options as a transport mechanism; __init__.py merges them.
-            self._options.update(user_input)
-            return self.async_create_entry(title="", data=self._options)
+            errors = _validate_comfort_ranges(user_input)
+            if not errors:
+                # Comfort settings go into config entry data, not options.
+                # Use options as a transport mechanism; __init__.py merges them.
+                self._options.update(user_input)
+                return self.async_create_entry(title="", data=self._options)
 
         # Read current values from entry data (set during initial setup)
         data = self.config_entry.data
 
         return self.async_show_form(
             step_id="comfort",
+            errors=errors,
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -1543,7 +1711,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ] = selector.EntitySelector(
                 selector.EntitySelectorConfig(
                     domain="binary_sensor",
-                    device_class=["motion", "occupancy"],
                     multiple=True,
                 ),
             )

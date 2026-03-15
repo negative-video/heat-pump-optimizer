@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 
 from homeassistant.components.weather import (
@@ -75,6 +76,11 @@ async def async_get_forecast(
         # Humidity
         humidity = entry.get("humidity")
 
+        # Weather condition and precipitation flag
+        condition = entry.get("condition")
+        _PRECIP_CONDITIONS = {"rainy", "pouring", "snowy", "lightning-rainy", "hail"}
+        is_precip = condition in _PRECIP_CONDITIONS if condition else False
+
         points.append(
             ForecastPoint(
                 time=forecast_time,
@@ -84,6 +90,8 @@ async def async_get_forecast(
                 wind_speed_mph=wind_speed_mph,
                 humidity=humidity,
                 cloud_cover=cloud_fraction,
+                weather_condition=condition,
+                precipitation=is_precip,
             )
         )
 
@@ -346,3 +354,51 @@ def has_forecast_deviated(
             return True
 
     return False
+
+
+def estimate_solar_elevation(
+    latitude: float,
+    longitude: float,
+    dt: datetime,
+) -> float:
+    """Estimate solar elevation angle from latitude, longitude, and UTC time.
+
+    Uses a simplified solar position algorithm. Returns degrees above horizon
+    (negative = below horizon / nighttime).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    # Convert to UTC for calculation
+    utc = dt.utctimetuple() if hasattr(dt, "utctimetuple") else dt.timetuple()
+    utc_hour = utc.tm_hour + utc.tm_min / 60.0
+    day_of_year = utc.tm_yday
+
+    # Solar declination (approximate)
+    declination = 23.45 * math.sin(math.radians(360.0 / 365.0 * (day_of_year - 81)))
+
+    # Hour angle: incorporate longitude for correct solar noon
+    hour_angle = (utc_hour - 12.0 + longitude / 15.0) * 15.0
+
+    # Solar elevation
+    lat_rad = math.radians(latitude)
+    dec_rad = math.radians(declination)
+    ha_rad = math.radians(hour_angle)
+
+    sin_elevation = (
+        math.sin(lat_rad) * math.sin(dec_rad)
+        + math.cos(lat_rad) * math.cos(dec_rad) * math.cos(ha_rad)
+    )
+
+    return math.degrees(math.asin(max(-1.0, min(1.0, sin_elevation))))
+
+
+def populate_sun_elevation(
+    forecast: list[ForecastPoint],
+    latitude: float,
+    longitude: float,
+) -> None:
+    """Fill in sun_elevation for all forecast points that don't already have it."""
+    for pt in forecast:
+        if pt.sun_elevation is None:
+            pt.sun_elevation = estimate_solar_elevation(latitude, longitude, pt.time)

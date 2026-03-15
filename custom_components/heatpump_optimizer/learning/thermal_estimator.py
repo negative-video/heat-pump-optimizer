@@ -4,15 +4,24 @@ Models the building as a two-node RC thermal circuit (air + thermal mass)
 and continuously estimates the physical parameters from thermostat readings:
 
   C_air · dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + Q_solar + Q_internal
+                        + Q_attic + Q_crawlspace
   C_mass · dT_mass/dt = (T_air - T_mass)/R_int
 
-State vector (8 elements):
-  [T_air, T_mass, R_inv, R_int_inv, C_inv, C_mass_inv, Q_cool_base, Q_heat_base]
+State vector (9 elements):
+  [T_air, T_mass, R_inv, R_int_inv, C_inv, C_mass_inv, Q_cool_base, Q_heat_base, solar_gain_btu]
 
 The filter estimates building envelope resistance (R), internal coupling (R_int),
-air and mass thermal capacitance (C, C_mass), and HVAC capacity at a reference
-temperature. These replace the static Beestat lookup tables with continuously
-adapting parameters.
+air and mass thermal capacitance (C, C_mass), HVAC capacity at a reference
+temperature, and peak solar heat gain. These replace the static Beestat lookup
+tables with continuously adapting parameters.
+
+Additional environmental inputs (all optional, gracefully degrade to no-op):
+- Occupancy count: scales internal heat gain (Q_internal)
+- Door/window open count: applies infiltration penalty, pauses parameter learning
+- Indoor humidity: adjusts sensible heat ratio in cooling mode
+- Attic temperature: models duct loss and ceiling heat transfer
+- Crawlspace temperature: models floor heat transfer
+- Precipitation: applies evaporative cooling correction to envelope
 """
 
 from __future__ import annotations
@@ -35,8 +44,12 @@ IDX_C_INV = 4       # 1/C_air — inverse air thermal capacitance
 IDX_C_MASS_INV = 5  # 1/C_mass — inverse mass thermal capacitance
 IDX_Q_COOL = 6      # Base cooling capacity at T_ref (BTU/hr)
 IDX_Q_HEAT = 7      # Base heating capacity at T_ref (BTU/hr)
+IDX_SOLAR_GAIN = 8  # Peak solar heat gain at clear-sky noon (BTU/hr)
 
-N_STATES = 8
+N_STATES = 9
+
+# Index of first learned parameter (used for learning-pause on open doors/windows)
+_IDX_FIRST_PARAM = IDX_R_INV
 
 # Reference temperature for HVAC capacity model
 T_REF_F = 75.0
@@ -57,6 +70,18 @@ DEFAULT_SOLAR_GAIN_BTU = 3000.0  # typical residential solar gain at peak
 # Internal heat gain from occupants, appliances, and lighting (BTU/hr).
 # Typical occupied home: 2 people (~400 BTU/hr) + appliances/electronics (~800 BTU/hr).
 DEFAULT_INTERNAL_GAIN_BTU = 1200.0
+# Occupancy-scaled components
+_INTERNAL_GAIN_BASE_BTU = 800.0   # appliances/electronics (always present)
+_INTERNAL_GAIN_PER_PERSON_BTU = 350.0  # ~350 BTU/hr per occupant
+
+# Attic and crawlspace boundary heat transfer coefficients (BTU/hr/°F)
+_K_ATTIC = 50.0       # ceiling conductance (typical insulated attic)
+_K_CRAWLSPACE = 25.0  # floor conductance (typically better insulated than attic)
+# Duct loss factor: fraction of HVAC capacity lost per °F of (T_attic - T_air)
+_DUCT_LOSS_PER_F = 0.003
+
+# Precipitation: evaporative cooling offset applied to outdoor temp (°F)
+_PRECIPITATION_OFFSET_F = 3.0
 
 # Physical bounds for parameter clamping
 BOUNDS = {
@@ -66,7 +91,18 @@ BOUNDS = {
     IDX_C_MASS_INV: (1e-6, 0.001),  # C_mass: 1,000 to 1,000,000
     IDX_Q_COOL: (5000, 80000),    # 5k to 80k BTU/hr
     IDX_Q_HEAT: (5000, 80000),
+    IDX_SOLAR_GAIN: (500, 15000), # 500 to 15k BTU/hr peak solar
 }
+
+
+def _expand_matrix(mat: np.ndarray, new_diag_val: float) -> np.ndarray:
+    """Expand an NxN matrix to (N+1)x(N+1) by appending a row/column of zeros
+    with the given diagonal value. Used for state vector migration."""
+    n = mat.shape[0]
+    expanded = np.zeros((n + 1, n + 1))
+    expanded[:n, :n] = mat
+    expanded[n, n] = new_diag_val
+    return expanded
 
 
 @dataclass
@@ -99,6 +135,12 @@ class ThermalEstimator:
     _current_wind_speed: float | None = None
     _current_humidity: float | None = None
     _current_pressure: float | None = None
+    _current_indoor_humidity: float | None = None
+    _current_people_count: int | None = None
+    _current_open_doors_windows: int = 0
+    _current_attic_temp: float | None = None
+    _current_crawlspace_temp: float | None = None
+    _current_precipitation: bool = False
 
     def __post_init__(self):
         if not self._initialized:
@@ -119,6 +161,7 @@ class ThermalEstimator:
             1e-12,   # C_mass_inv — extremely slow
             1.0,     # Q_cool_base — moderate (filter condition, refrigerant)
             1.0,     # Q_heat_base — moderate
+            1e-4,    # solar_gain_btu — moderate (changes with foliage/seasons)
         ])
         self.Q = np.diag(q_diag)
 
@@ -141,6 +184,7 @@ class ThermalEstimator:
             0.0001,       # C_mass_inv → C_mass ≈ 10,000 BTU/°F
             20000.0,      # Q_cool_base ≈ 20k BTU/hr (~1.7 ton)
             18000.0,      # Q_heat_base ≈ 18k BTU/hr
+            DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu ≈ 3000 BTU/hr
         ])
         # High initial uncertainty — let the filter find the truth
         est.P = np.diag([
@@ -152,6 +196,7 @@ class ThermalEstimator:
             1e-6,      # C_mass_inv
             1e8,       # Q_cool_base — very uncertain without data
             1e8,       # Q_heat_base
+            1e6,       # solar_gain_btu — uncertain without data
         ])
         est._P_initial = est.P.copy()
         est._initialized = True
@@ -223,6 +268,7 @@ class ThermalEstimator:
             1.0 / 10000.0,       # C_mass_inv (default)
             q_cool,
             q_heat,
+            DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu (Beestat has no solar data)
         ])
 
         # Lower uncertainty since we have informed priors
@@ -235,6 +281,7 @@ class ThermalEstimator:
             1e-7,      # C_mass_inv — low confidence
             q_cool * 0.3 * q_cool * 0.3,  # Q_cool — ±30% uncertainty
             q_heat * 0.3 * q_heat * 0.3,  # Q_heat — ±30% uncertainty
+            1e6,       # solar_gain_btu — uncertain (not in Beestat)
         ])
         est._P_initial = est.P.copy()
         est._initialized = True
@@ -255,6 +302,12 @@ class ThermalEstimator:
         wind_speed_mph: float | None = None,
         humidity: float | None = None,
         pressure_hpa: float | None = None,
+        indoor_humidity: float | None = None,
+        people_home_count: int | None = None,
+        open_door_window_count: int = 0,
+        attic_temp: float | None = None,
+        crawlspace_temp: float | None = None,
+        precipitation: bool = False,
     ) -> float:
         """Run one EKF predict-update cycle.
 
@@ -267,16 +320,28 @@ class ThermalEstimator:
             sun_elevation: Degrees above horizon, or None.
             dt_hours: Time step in hours (default 5 min).
             wind_speed_mph: Wind speed in mph, or None.
-            humidity: Relative humidity 0-100, or None.
+            humidity: Outdoor relative humidity 0-100, or None.
             pressure_hpa: Atmospheric pressure in hPa, or None.
+            indoor_humidity: Indoor relative humidity 0-100, or None.
+            people_home_count: Number of people currently home, or None.
+            open_door_window_count: Number of doors/windows currently open.
+            attic_temp: Attic temperature in °F, or None.
+            crawlspace_temp: Crawlspace temperature in °F, or None.
+            precipitation: Whether it is currently raining/snowing.
 
         Returns:
             Innovation (prediction error before update) in °F.
         """
-        # Store environmental conditions for _hvac_output to access
+        # Store environmental conditions for _hvac_output and _predict_state
         self._current_wind_speed = wind_speed_mph
         self._current_humidity = humidity
         self._current_pressure = pressure_hpa
+        self._current_indoor_humidity = indoor_humidity
+        self._current_people_count = people_home_count
+        self._current_open_doors_windows = open_door_window_count
+        self._current_attic_temp = attic_temp
+        self._current_crawlspace_temp = crawlspace_temp
+        self._current_precipitation = precipitation
 
         # ── PREDICT ──────────────────────────────────────────────
         x_pred = self._predict_state(
@@ -305,6 +370,16 @@ class ThermalEstimator:
 
         # Kalman gain
         K = P_pred @ H.T / S_scalar  # (N,1)
+
+        # Door/window learning pause: freeze parameter rows when doors/windows
+        # are open to prevent infiltration from corrupting building estimates.
+        # Temperature states (T_air, T_mass) still update normally.
+        if open_door_window_count > 0:
+            K[_IDX_FIRST_PARAM:, :] = 0.0
+            _LOGGER.debug(
+                "EKF learning paused: %d door(s)/window(s) open",
+                open_door_window_count,
+            )
 
         # State update
         self.x = x_pred + (K * innovation).flatten()
@@ -344,22 +419,98 @@ class ThermalEstimator:
         C_mass_inv = x[IDX_C_MASS_INV]
         Q_cool_base = x[IDX_Q_COOL]
         Q_heat_base = x[IDX_Q_HEAT]
+        solar_gain_btu = x[IDX_SOLAR_GAIN]
 
-        # Heat flows (BTU/hr)
-        Q_env = R_inv * (outdoor_temp - T_air)       # envelope
-        Q_int = R_int_inv * (T_mass - T_air)          # internal coupling
+        # ── Effective outdoor temp (precipitation correction) ────
+        effective_outdoor = outdoor_temp
+        if self._current_precipitation:
+            effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F
+
+        # ── Envelope heat flow ───────────────────────────────────
+        # Infiltration multiplier: open doors/windows increase leakage
+        infiltration = 1.0 + 2.0 * self._current_open_doors_windows
+        Q_env = R_inv * infiltration * (effective_outdoor - T_air)
+
+        # Internal coupling
+        Q_int = R_int_inv * (T_mass - T_air)
+
+        # ── HVAC output ──────────────────────────────────────────
         Q_hvac = self._hvac_output(hvac_mode, hvac_running, outdoor_temp,
                                     Q_cool_base, Q_heat_base)
-        Q_solar = self._solar_gain(cloud_cover, sun_elevation)
-        Q_internal = DEFAULT_INTERNAL_GAIN_BTU        # occupants + appliances
 
-        # Temperature updates
-        dT_air = C_inv * (Q_env + Q_int + Q_hvac + Q_solar + Q_internal) * dt_hours
-        dT_mass = C_mass_inv * (-Q_int) * dt_hours
+        # Attic duct loss: hot/cold attic reduces HVAC effectiveness
+        attic_temp = self._current_attic_temp
+        if attic_temp is not None and Q_hvac != 0:
+            delta = attic_temp - T_air
+            if hvac_mode == "cool" and delta > 0:
+                Q_hvac *= max(0.5, 1.0 - _DUCT_LOSS_PER_F * delta)
+            elif hvac_mode == "heat" and delta < 0:
+                Q_hvac *= max(0.5, 1.0 + _DUCT_LOSS_PER_F * delta)
+
+        # ── Solar gain (learned parameter) ───────────────────────
+        Q_solar = self._solar_gain(cloud_cover, sun_elevation, solar_gain_btu)
+
+        # ── Internal heat gain (occupancy-scaled) ────────────────
+        people = self._current_people_count
+        if people is not None:
+            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+        else:
+            Q_internal = DEFAULT_INTERNAL_GAIN_BTU
+
+        # ── Boundary zone heat transfer ──────────────────────────
+        Q_boundary = 0.0
+        k_boundary = 0.0  # total boundary conductance for exponential integrator
+        crawl_temp = self._current_crawlspace_temp
+        if attic_temp is not None:
+            Q_boundary += _K_ATTIC * (attic_temp - T_air)
+            k_boundary += _K_ATTIC
+        if crawl_temp is not None:
+            Q_boundary += _K_CRAWLSPACE * (crawl_temp - T_air)
+            k_boundary += _K_CRAWLSPACE
+
+        # ── Temperature updates (exponential decay integration) ──
+        # Unconditionally stable: avoids oscillation at extreme parameter
+        # bounds that forward Euler could produce when λ·dt approaches 2.
+        #
+        # Air node: dT_air/dt = C_inv * [-λ_air * T_air + forcing_air]
+        # where λ_air = total conductance away from air node
+        # and forcing_air = conductance-weighted source temps + non-temp heat
+        lambda_air = R_inv * infiltration + R_int_inv + k_boundary
+        alpha = lambda_air * C_inv * dt_hours
+        # Forcing: Q that doesn't depend on T_air
+        # Q_env(T_air=0) = R_inv * infiltration * effective_outdoor
+        # Q_int(T_air=0) = R_int_inv * T_mass
+        # Q_boundary(T_air=0) = k_attic*T_attic + k_crawl*T_crawl (if present)
+        forcing_air = (
+            R_inv * infiltration * effective_outdoor
+            + R_int_inv * T_mass
+            + Q_hvac + Q_solar + Q_internal
+        )
+        # Add boundary zone source terms (conductance × source temp)
+        if attic_temp is not None:
+            forcing_air += _K_ATTIC * attic_temp
+        if crawl_temp is not None:
+            forcing_air += _K_CRAWLSPACE * crawl_temp
+
+        if alpha > 1e-8:
+            exp_neg_alpha = math.exp(-alpha)
+            T_eq_air = forcing_air / lambda_air
+            T_air_new = T_air * exp_neg_alpha + T_eq_air * (1.0 - exp_neg_alpha)
+        else:
+            # Very small alpha: fall back to linear (avoids 0/0)
+            T_air_new = T_air + C_inv * (forcing_air - lambda_air * T_air) * dt_hours
+
+        # Mass node: dT_mass/dt = C_mass_inv * R_int_inv * (T_air - T_mass)
+        beta = R_int_inv * C_mass_inv * dt_hours
+        if beta > 1e-8:
+            exp_neg_beta = math.exp(-beta)
+            T_mass_new = T_mass * exp_neg_beta + T_air * (1.0 - exp_neg_beta)
+        else:
+            T_mass_new = T_mass + C_mass_inv * R_int_inv * (T_air - T_mass) * dt_hours
 
         x_new = x.copy()
-        x_new[IDX_T_AIR] = T_air + dT_air
-        x_new[IDX_T_MASS] = T_mass + dT_mass
+        x_new[IDX_T_AIR] = T_air_new
+        x_new[IDX_T_MASS] = T_mass_new
         # Parameters don't change in prediction (random walk model)
         return x_new
 
@@ -380,41 +531,100 @@ class ThermalEstimator:
         R_int_inv = x[IDX_R_INT_INV]
         C_inv = x[IDX_C_INV]
         C_mass_inv = x[IDX_C_MASS_INV]
-        Q_cool_base = x[IDX_Q_COOL]
-        Q_heat_base = x[IDX_Q_HEAT]
+        solar_gain_btu = x[IDX_SOLAR_GAIN]
 
-        # Total heat into air node
-        Q_env = R_inv * (outdoor_temp - T_air)
+        # Precipitation correction for effective outdoor temp
+        effective_outdoor = outdoor_temp
+        if self._current_precipitation:
+            effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F
+
+        # Infiltration multiplier
+        infiltration = 1.0 + 2.0 * self._current_open_doors_windows
+
+        # Total heat into air node (for C_inv Jacobian entry)
+        Q_env = R_inv * infiltration * (effective_outdoor - T_air)
         Q_int = R_int_inv * (T_mass - T_air)
         Q_hvac = self._hvac_output(hvac_mode, hvac_running, outdoor_temp,
-                                    Q_cool_base, Q_heat_base)
-        Q_solar = self._solar_gain(cloud_cover, sun_elevation)
-        Q_internal = DEFAULT_INTERNAL_GAIN_BTU
-        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal
+                                    x[IDX_Q_COOL], x[IDX_Q_HEAT])
+        Q_solar = self._solar_gain(cloud_cover, sun_elevation, solar_gain_btu)
+
+        people = self._current_people_count
+        if people is not None:
+            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+        else:
+            Q_internal = DEFAULT_INTERNAL_GAIN_BTU
+
+        # Boundary zone heat transfer
+        Q_boundary = 0.0
+        k_boundary = 0.0  # total boundary conductance affecting dT_air/dT_air
+        attic_temp = self._current_attic_temp
+        if attic_temp is not None:
+            Q_boundary += _K_ATTIC * (attic_temp - T_air)
+            k_boundary += _K_ATTIC
+        crawl_temp = self._current_crawlspace_temp
+        if crawl_temp is not None:
+            Q_boundary += _K_CRAWLSPACE * (crawl_temp - T_air)
+            k_boundary += _K_CRAWLSPACE
+
+        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal + Q_boundary
 
         F = np.eye(N_STATES)
         dt = dt_hours
 
         # ── dT_air_new / d(state) ──────────────────────────────
-        # T_air_new = T_air + C_inv * (Q_env + Q_int + Q_hvac + Q_solar) * dt
-        F[IDX_T_AIR, IDX_T_AIR] = 1.0 + C_inv * (-R_inv - R_int_inv) * dt
+        F[IDX_T_AIR, IDX_T_AIR] = 1.0 + C_inv * (
+            -R_inv * infiltration - R_int_inv - k_boundary
+        ) * dt
         F[IDX_T_AIR, IDX_T_MASS] = C_inv * R_int_inv * dt
-        F[IDX_T_AIR, IDX_R_INV] = C_inv * (outdoor_temp - T_air) * dt
+        F[IDX_T_AIR, IDX_R_INV] = C_inv * infiltration * (effective_outdoor - T_air) * dt
         F[IDX_T_AIR, IDX_R_INT_INV] = C_inv * (T_mass - T_air) * dt
         F[IDX_T_AIR, IDX_C_INV] = Q_total * dt
 
         # dT_air / dQ_cool_base and dQ_heat_base
+        # Include environmental corrections so Jacobian matches _hvac_output
         if hvac_running and hvac_mode == "cool":
             cop_factor = max(0.1, 1.0 - ALPHA_COOL * (outdoor_temp - T_REF_F))
+            # Outdoor humidity correction
+            humidity = getattr(self, "_current_humidity", None)
+            if humidity is not None and humidity > 50.0:
+                cop_factor *= max(0.8, 1.0 - (humidity - 50.0) / 500.0)
+            # Indoor humidity SHR correction
+            indoor_hum = getattr(self, "_current_indoor_humidity", None)
+            if indoor_hum is not None and indoor_hum > 50.0:
+                shr = max(0.65, 1.0 - (indoor_hum - 50.0) / 100.0)
+                cop_factor *= shr
+            # Pressure correction
+            pressure = getattr(self, "_current_pressure", None)
+            if pressure is not None:
+                cop_factor *= (pressure / 1013.25) ** 0.1
+            # Duct loss factor
+            jac_attic_temp = self._current_attic_temp
+            if jac_attic_temp is not None:
+                delta = jac_attic_temp - T_air
+                if delta > 0:
+                    cop_factor *= max(0.5, 1.0 - _DUCT_LOSS_PER_F * delta)
             F[IDX_T_AIR, IDX_Q_COOL] = C_inv * (-cop_factor) * dt
         elif hvac_running and hvac_mode == "heat":
             cop_factor = max(0.1, 1.0 - ALPHA_HEAT * (T_REF_F - outdoor_temp))
+            # Pressure correction
+            pressure = getattr(self, "_current_pressure", None)
+            if pressure is not None:
+                cop_factor *= (pressure / 1013.25) ** 0.1
+            # Duct loss factor
+            jac_attic_temp = self._current_attic_temp
+            if jac_attic_temp is not None:
+                delta = jac_attic_temp - T_air
+                if delta < 0:
+                    cop_factor *= max(0.5, 1.0 + _DUCT_LOSS_PER_F * delta)
             F[IDX_T_AIR, IDX_Q_HEAT] = C_inv * cop_factor * dt
 
-        # No dependency on C_mass_inv for T_air equation
+        # dT_air / d(solar_gain_btu): partial of Q_solar w.r.t. solar_gain_btu
+        if cloud_cover is not None and sun_elevation is not None and sun_elevation > 0:
+            clear_sky = 1.0 - cloud_cover
+            altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
+            F[IDX_T_AIR, IDX_SOLAR_GAIN] = C_inv * clear_sky * altitude_factor * dt
 
         # ── dT_mass_new / d(state) ─────────────────────────────
-        # T_mass_new = T_mass + C_mass_inv * (-(R_int_inv * (T_mass - T_air))) * dt
         F[IDX_T_MASS, IDX_T_AIR] = C_mass_inv * R_int_inv * dt
         F[IDX_T_MASS, IDX_T_MASS] = 1.0 - C_mass_inv * R_int_inv * dt
         F[IDX_T_MASS, IDX_R_INT_INV] = C_mass_inv * (-(T_mass - T_air)) * dt
@@ -447,28 +657,15 @@ class ThermalEstimator:
         if not running:
             return 0.0
 
-        # Effective outdoor temp for COP calculation (not for envelope Q_env)
-        cop_outdoor_temp = outdoor_temp
-
-        # Wind chill correction for heating mode
-        wind_speed = getattr(self, "_current_wind_speed", None)
-        if (
-            mode == "heat"
-            and wind_speed is not None
-            and outdoor_temp < 50.0
-            and wind_speed > 3.0
-        ):
-            effective_temp = (
-                35.74
-                + 0.6215 * outdoor_temp
-                - 35.75 * (wind_speed ** 0.16)
-                + 0.4275 * outdoor_temp * (wind_speed ** 0.16)
-            )
-            cop_outdoor_temp = min(outdoor_temp, effective_temp)
+        # Use dry-bulb outdoor temp for COP/capacity calculation.
+        # Wind chill (NWS formula) models perceived temp on exposed human skin
+        # and should NOT be applied to heat pump condensers — wind actually
+        # improves condenser heat exchange via forced convection. Wind effects
+        # on the building envelope are handled separately via infiltration.
 
         if mode == "cool":
             # Capacity decreases as outdoor temp rises above reference
-            raw_factor = 1.0 - ALPHA_COOL * (cop_outdoor_temp - T_REF_F)
+            raw_factor = 1.0 - ALPHA_COOL * (outdoor_temp - T_REF_F)
             cop_factor = max(0.1, raw_factor)
             if raw_factor <= 0.1:
                 _LOGGER.warning(
@@ -477,21 +674,29 @@ class ThermalEstimator:
                     outdoor_temp,
                 )
 
-            # Humidity correction for cooling: high humidity reduces COP
+            # Outdoor humidity correction for cooling: high humidity reduces COP
             humidity = getattr(self, "_current_humidity", None)
             if humidity is not None and humidity > 50.0:
                 cop_factor *= max(0.8, 1.0 - (humidity - 50.0) / 500.0)
 
+            # Indoor humidity: high indoor RH means more latent cooling
+            # (dehumidification) and less sensible cooling (temperature change).
+            # Apply Sensible Heat Ratio (SHR) correction.
+            indoor_hum = getattr(self, "_current_indoor_humidity", None)
+            if indoor_hum is not None and indoor_hum > 50.0:
+                shr = max(0.65, 1.0 - (indoor_hum - 50.0) / 100.0)
+                cop_factor *= shr
+
             # Pressure correction
             pressure = getattr(self, "_current_pressure", None)
             if pressure is not None:
-                cop_factor *= (pressure / 1013.25) ** 0.3
+                cop_factor *= (pressure / 1013.25) ** 0.1
 
             return -Q_cool_base * cop_factor
 
         if mode == "heat":
             # Capacity decreases as outdoor temp drops below reference
-            raw_factor = 1.0 - ALPHA_HEAT * (T_REF_F - cop_outdoor_temp)
+            raw_factor = 1.0 - ALPHA_HEAT * (T_REF_F - outdoor_temp)
             cop_factor = max(0.1, raw_factor)
             if raw_factor <= 0.1:
                 _LOGGER.warning(
@@ -503,7 +708,7 @@ class ThermalEstimator:
             # Pressure correction
             pressure = getattr(self, "_current_pressure", None)
             if pressure is not None:
-                cop_factor *= (pressure / 1013.25) ** 0.3
+                cop_factor *= (pressure / 1013.25) ** 0.1
 
             return Q_heat_base * cop_factor
 
@@ -513,15 +718,16 @@ class ThermalEstimator:
     def _solar_gain(
         cloud_cover: float | None,
         sun_elevation: float | None,
+        solar_gain_btu: float = DEFAULT_SOLAR_GAIN_BTU,
     ) -> float:
-        """Estimate solar heat gain (BTU/hr)."""
+        """Estimate solar heat gain (BTU/hr) using learned peak solar gain."""
         if cloud_cover is None or sun_elevation is None or sun_elevation <= 0:
             return 0.0
 
         clear_sky = 1.0 - cloud_cover
         altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
 
-        return DEFAULT_SOLAR_GAIN_BTU * clear_sky * altitude_factor
+        return solar_gain_btu * clear_sky * altitude_factor
 
     # ── Parameter Access ────────────────────────────────────────────
 
@@ -548,6 +754,11 @@ class ThermalEstimator:
     @property
     def C_mass_inv(self) -> float:
         return float(self.x[IDX_C_MASS_INV])
+
+    @property
+    def solar_gain_btu(self) -> float:
+        """Learned peak solar heat gain (BTU/hr at clear-sky noon)."""
+        return float(self.x[IDX_SOLAR_GAIN])
 
     @property
     def R_value(self) -> float:
@@ -595,9 +806,9 @@ class ThermalEstimator:
         if self._n_obs < 10:
             return 0.0
 
-        # Per-parameter relative variance reduction (indices 2-7)
-        current_diag = np.diag(self.P)[2:8]
-        initial_diag = np.diag(self._P_initial)[2:8]
+        # Per-parameter relative variance reduction (indices 2-8, all learned params)
+        current_diag = np.diag(self.P)[2:N_STATES]
+        initial_diag = np.diag(self._P_initial)[2:N_STATES]
 
         # For each parameter: how much has its variance shrunk?
         # ratio=1 means no learning, ratio→0 means well-converged
@@ -619,6 +830,7 @@ class ThermalEstimator:
             "C_mass_inv": float(stds[IDX_C_MASS_INV]),
             "Q_cool_base": float(stds[IDX_Q_COOL]),
             "Q_heat_base": float(stds[IDX_Q_HEAT]),
+            "solar_gain_btu": float(stds[IDX_SOLAR_GAIN]),
         }
 
     # ── Accuracy Reporting ──────────────────────────────────────────
@@ -695,7 +907,10 @@ class ThermalEstimator:
 
     @classmethod
     def from_dict(cls, data: dict) -> ThermalEstimator:
-        """Restore from persisted data — full state, no sample loss."""
+        """Restore from persisted data — full state, no sample loss.
+
+        Handles migration from 8-state (pre-solar-gain) to 9-state format.
+        """
         est = cls()
         est.x = np.array(data["state"])
         est.P = np.array(data["covariance"])
@@ -718,5 +933,19 @@ class ThermalEstimator:
             est._P_initial = np.diag([
                 0.1, 25.0, 0.01, 0.25, 1e-4, 1e-6, 1e8, 1e8,
             ])
+
+        # ── Migration: 8-state → 9-state (add solar_gain_btu) ────
+        if len(est.x) == 8:
+            _LOGGER.info(
+                "Migrating EKF state vector from 8 to 9 elements "
+                "(adding learned solar gain parameter)"
+            )
+            est.x = np.append(est.x, DEFAULT_SOLAR_GAIN_BTU)
+            # Expand P by appending a row and column with high initial uncertainty
+            est.P = _expand_matrix(est.P, 1e6)
+            est._P_initial = _expand_matrix(est._P_initial, 1e6)
+            # Expand Q (process noise) — use default noise for solar gain
+            est.Q = _expand_matrix(est.Q, 1e-4)
+
         est._initialized = True
         return est

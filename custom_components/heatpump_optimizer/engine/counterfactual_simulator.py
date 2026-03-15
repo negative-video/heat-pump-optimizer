@@ -35,9 +35,17 @@ from ..learning.thermal_estimator import (
     IDX_Q_HEAT,
     IDX_R_INT_INV,
     IDX_R_INV,
+    IDX_SOLAR_GAIN,
     T_REF_F,
     ThermalEstimator,
 )
+
+# Internal gain constants (match thermal_estimator.py)
+_INTERNAL_GAIN_BASE_BTU = 800.0
+_INTERNAL_GAIN_PER_PERSON_BTU = 350.0
+
+# Precipitation evaporative cooling offset (°F)
+_PRECIPITATION_OFFSET_F = 3.0
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +112,9 @@ class CounterfactualSimulator:
         carbon_intensity: float | None = None,
         electricity_rate: float | None = None,
         real_indoor_temp: float | None = None,
+        people_home_count: int | None = None,
+        precipitation: bool = False,
+        indoor_humidity: float | None = None,
     ) -> None:
         """Advance the virtual house by one time step.
 
@@ -119,6 +130,9 @@ class CounterfactualSimulator:
             carbon_intensity: Grid carbon intensity (gCO2/kWh).
             electricity_rate: Electricity rate ($/kWh).
             real_indoor_temp: Actual house temp (for periodic drift reset).
+            people_home_count: Current occupant count (for internal gain scaling).
+            precipitation: Whether it's currently raining/snowing.
+            indoor_humidity: Indoor relative humidity (0-100, for SHR correction).
         """
         hour_key = int(now.timestamp()) // 3600
 
@@ -161,15 +175,26 @@ class CounterfactualSimulator:
         Q_cool_base = float(x[IDX_Q_COOL])
         Q_heat_base = float(x[IDX_Q_HEAT])
 
+        # Learned solar gain (from EKF state vector, with fallback)
+        solar_gain_btu = float(x[IDX_SOLAR_GAIN]) if len(x) > IDX_SOLAR_GAIN else DEFAULT_SOLAR_GAIN_BTU
+
         # Heat flows
-        Q_env = R_inv * (outdoor_temp - self._T_air)
+        # Precipitation: evaporative cooling reduces effective outdoor temp
+        effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F if precipitation else outdoor_temp
+        Q_env = R_inv * (effective_outdoor - self._T_air)
         Q_int = R_int_inv * (self._T_mass - self._T_air)
         Q_hvac = self._hvac_output(
             baseline_mode, hvac_running, outdoor_temp,
             Q_cool_base, Q_heat_base,
+            indoor_humidity=indoor_humidity,
         )
-        Q_solar = self._solar_gain(cloud_cover, sun_elevation)
-        Q_internal = DEFAULT_INTERNAL_GAIN_BTU
+        Q_solar = self._solar_gain(cloud_cover, sun_elevation, solar_gain_btu)
+
+        # Internal heat gain: occupancy-scaled when available
+        if people_home_count is not None:
+            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people_home_count
+        else:
+            Q_internal = DEFAULT_INTERNAL_GAIN_BTU
 
         # Temperature updates (same physics as EKF _predict_state)
         dT_air = C_inv * (Q_env + Q_int + Q_hvac + Q_solar + Q_internal) * dt_hours
@@ -269,18 +294,24 @@ class CounterfactualSimulator:
         outdoor_temp: float,
         Q_cool_base: float,
         Q_heat_base: float,
+        indoor_humidity: float | None = None,
     ) -> float:
         """Calculate HVAC heat flow (BTU/hr) with COP degradation.
 
-        Same model as ThermalEstimator._hvac_output but without environmental
-        adjustments (wind/humidity/pressure) for simplicity — the counterfactual
-        doesn't need to be perfect, just representative.
+        Same model as ThermalEstimator._hvac_output but simplified — the
+        counterfactual doesn't need to be perfect, just representative.
+        Includes indoor humidity SHR correction for cooling accuracy.
         """
         if not running:
             return 0.0
 
         if mode == "cool":
             cop_factor = max(0.1, 1.0 - ALPHA_COOL * (outdoor_temp - T_REF_F))
+            # Indoor humidity SHR: high indoor RH means more latent cooling
+            # and less sensible temperature change
+            if indoor_humidity is not None and indoor_humidity > 50.0:
+                shr = max(0.65, 1.0 - (indoor_humidity - 50.0) / 100.0)
+                cop_factor *= shr
             return -Q_cool_base * cop_factor
         elif mode == "heat":
             cop_factor = max(0.1, 1.0 - ALPHA_HEAT * (T_REF_F - outdoor_temp))
@@ -328,13 +359,14 @@ class CounterfactualSimulator:
     def _solar_gain(
         cloud_cover: float | None,
         sun_elevation: float | None,
+        solar_gain_btu: float = DEFAULT_SOLAR_GAIN_BTU,
     ) -> float:
         """Estimate solar heat gain (BTU/hr) — mirrors ThermalEstimator."""
         if cloud_cover is None or sun_elevation is None or sun_elevation <= 0:
             return 0.0
         clear_sky = 1.0 - cloud_cover
         altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
-        return DEFAULT_SOLAR_GAIN_BTU * clear_sky * altitude_factor
+        return solar_gain_btu * clear_sky * altitude_factor
 
     def _finalize_hour(self) -> None:
         """Convert accumulated interval data into a BaselineHourResult."""
@@ -397,21 +429,29 @@ class CounterfactualSimulator:
         )
 
     def _drift_reset(self, real_indoor_temp: float) -> None:
-        """Blend virtual state toward real state to prevent unbounded drift.
+        """Reset thermal mass to prevent unbounded drift from model error.
 
-        The virtual house may diverge from reality over time due to model
-        errors. Periodically pulling it back keeps the counterfactual
-        grounded without destroying the comparison value.
+        Only T_mass is blended toward the real house state. T_air is left
+        governed entirely by the virtual thermostat physics so that the
+        counterfactual comparison remains unbiased — blending T_air toward
+        the optimized house's temperature would systematically skew the
+        runtime difference (and thus savings) in whichever direction the
+        optimizer shifts comfort.
+
+        T_mass drifts slowly and can accumulate significant error over a
+        week. Resetting it keeps the thermal inertia model grounded without
+        affecting the short-term thermostat cycling that drives runtime.
         """
-        old_air = self._T_air
-        self._T_air = (
-            self._T_air * (1 - DRIFT_RESET_BLEND_FACTOR)
+        old_mass = self._T_mass
+        # Use real indoor temp as best proxy for real thermal mass
+        self._T_mass = (
+            self._T_mass * (1 - DRIFT_RESET_BLEND_FACTOR)
             + real_indoor_temp * DRIFT_RESET_BLEND_FACTOR
         )
         _LOGGER.debug(
-            "Counterfactual drift reset: %.1f°F → %.1f°F (real=%.1f°F)",
-            old_air,
-            self._T_air,
+            "Counterfactual drift reset (mass only): %.1f°F → %.1f°F (real=%.1f°F)",
+            old_mass,
+            self._T_mass,
             real_indoor_temp,
         )
 

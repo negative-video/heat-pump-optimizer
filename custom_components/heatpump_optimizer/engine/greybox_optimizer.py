@@ -46,14 +46,24 @@ _IDX_C_INV = 4
 _IDX_C_MASS_INV = 5
 _IDX_Q_COOL = 6
 _IDX_Q_HEAT = 7
+_IDX_SOLAR_GAIN = 8
 
 # COP degradation slopes (must match thermal_estimator.py)
 _ALPHA_COOL = 0.012
 _ALPHA_HEAT = 0.015
 _T_REF = 75.0
 
-# Solar gain constant (BTU/hr at peak clear sky)
-_SOLAR_GAIN_BTU = 3000.0
+# Fallback solar gain constant (BTU/hr at peak clear sky) — used only
+# when the estimator doesn't have the solar gain parameter yet
+_SOLAR_GAIN_BTU_FALLBACK = 3000.0
+
+# Internal heat gain constants (must match thermal_estimator.py)
+_INTERNAL_GAIN_BASE_BTU = 800.0      # appliances/electronics (always present)
+_INTERNAL_GAIN_PER_PERSON_BTU = 350.0  # ~350 BTU/hr per occupant
+_DEFAULT_INTERNAL_GAIN_BTU = 1200.0    # fallback when occupancy unknown
+
+# Precipitation evaporative cooling offset (°F)
+_PRECIPITATION_OFFSET_F = 3.0
 
 # Default time step for the LP (1 hour)
 _LP_DT_HOURS = 1.0
@@ -79,6 +89,8 @@ class GreyBoxOptimizer:
         comfort_range: tuple[float, float],
         mode: str,
         weights: OptimizationWeights | None = None,
+        people_home_count: int | None = None,
+        indoor_humidity: float | None = None,
     ) -> OptimizedSchedule:
         """Find optimal HVAC schedule using linear programming.
 
@@ -88,12 +100,18 @@ class GreyBoxOptimizer:
             comfort_range: (min_temp, max_temp) in °F.
             mode: "cool" or "heat".
             weights: Multi-objective weights (energy, carbon, cost).
+            people_home_count: Current occupant count (for internal gain scaling).
+            indoor_humidity: Current indoor relative humidity (0-100).
 
         Returns:
             OptimizedSchedule with entries, savings estimate, and simulation.
         """
         if weights is None:
             weights = OptimizationWeights()
+
+        # Store environmental context for use in thermal model
+        self._people_home_count = people_home_count
+        self._indoor_humidity = indoor_humidity
 
         # Group forecast into hourly bins
         hourly_forecast = self._bin_forecast_hourly(forecast)
@@ -141,6 +159,20 @@ class GreyBoxOptimizer:
             cost, A, B, d, effective_min, effective_max, current_indoor_temp, n_hours
         )
 
+        # Re-iterate: recompute thermal mass trajectory using optimized duty
+        # cycles, then rebuild matrices and re-solve. This corrects the
+        # frozen-mass approximation for cases where aggressive pre-heating/
+        # cooling shifts T_mass significantly (e.g. lightweight construction).
+        T_mass_trajectory = self._recompute_thermal_mass_with_duty(
+            current_indoor_temp, hourly_forecast, params, u_opt, mode
+        )
+        A, B, d = self._build_thermal_matrices(
+            current_indoor_temp, hourly_forecast, T_mass_trajectory, params, mode
+        )
+        u_opt = self._solve_lp(
+            cost, A, B, d, effective_min, effective_max, current_indoor_temp, n_hours
+        )
+
         # Simulate forward with optimal duty cycles
         T_trajectory = self._simulate_trajectory(
             u_opt, A, B, d, current_indoor_temp, n_hours
@@ -174,8 +206,7 @@ class GreyBoxOptimizer:
         if baseline_runtime > 0:
             savings_pct = max(0.0, (baseline_runtime - optimized_runtime) / baseline_runtime * 100)
 
-        # Compute energy/cost/carbon estimates
-        power_watts = self._estimate_power_watts(params, mode)
+        # Compute energy/cost/carbon estimates (per-hour COP-aware)
         schedule = OptimizedSchedule(
             entries=entries,
             baseline_runtime_minutes=baseline_runtime,
@@ -185,8 +216,7 @@ class GreyBoxOptimizer:
             simulation=sim_points,
         )
 
-        # Add energy estimates if we have cost/carbon data
-        self._add_energy_estimates(schedule, u_opt, u_baseline, hourly_forecast, power_watts)
+        self._add_energy_estimates(schedule, u_opt, u_baseline, hourly_forecast, mode)
 
         _LOGGER.info(
             "Grey-box LP optimization [%s]: %d hours, baseline=%.0f min, "
@@ -202,6 +232,7 @@ class GreyBoxOptimizer:
     def _extract_params(self) -> dict:
         """Extract current thermal parameters from estimator."""
         x = self.estimator.x
+        solar_gain = float(x[_IDX_SOLAR_GAIN]) if len(x) > _IDX_SOLAR_GAIN else _SOLAR_GAIN_BTU_FALLBACK
         return {
             "R_inv": float(x[_IDX_R_INV]),
             "R_int_inv": float(x[_IDX_R_INT_INV]),
@@ -211,6 +242,7 @@ class GreyBoxOptimizer:
             "Q_heat_base": float(x[_IDX_Q_HEAT]),
             "T_air": self.estimator.T_air,
             "T_mass": self.estimator.T_mass,
+            "solar_gain_btu": solar_gain,
         }
 
     def _precompute_thermal_mass(
@@ -234,14 +266,70 @@ class GreyBoxOptimizer:
         R_inv = params["R_inv"]
         C_inv = params["C_inv"]
 
+        # Internal heat gain (use current occupancy as best estimate for horizon)
+        people = getattr(self, "_people_home_count", None)
+        if people is not None:
+            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+        else:
+            Q_internal = _DEFAULT_INTERNAL_GAIN_BTU
+
         for t in range(n):
             T_out = hourly_forecast[t]["temp"]
+            # Precipitation: evaporative cooling reduces effective outdoor temp
+            if hourly_forecast[t].get("precipitation", False):
+                T_out = T_out - _PRECIPITATION_OFFSET_F
             # Approximate air temp with passive drift
             Q_env = R_inv * (T_out - T_air)
             Q_int = R_int_inv * (T_mass[t] - T_air)
-            T_air += C_inv * (Q_env + Q_int) * _LP_DT_HOURS
+            T_air += C_inv * (Q_env + Q_int + Q_internal) * _LP_DT_HOURS
 
             # Mass temp update
+            Q_int_mass = R_int_inv * (T_air - T_mass[t])
+            T_mass[t + 1] = T_mass[t] + C_mass_inv * Q_int_mass * _LP_DT_HOURS
+
+        return T_mass
+
+    def _recompute_thermal_mass_with_duty(
+        self,
+        T_air_init: float,
+        hourly_forecast: list[dict],
+        params: dict,
+        u: np.ndarray,
+        mode: str,
+    ) -> np.ndarray:
+        """Re-compute thermal mass trajectory including HVAC duty cycles.
+
+        After the first LP solve, we know u[t]. Simulating T_air with that
+        duty and recomputing T_mass coupling gives a more accurate mass
+        trajectory for a second LP pass.
+        """
+        n = len(hourly_forecast)
+        T_mass = np.zeros(n + 1)
+        T_mass[0] = params["T_mass"]
+        T_air = T_air_init
+
+        R_int_inv = params["R_int_inv"]
+        C_mass_inv = params["C_mass_inv"]
+        R_inv = params["R_inv"]
+        C_inv = params["C_inv"]
+
+        people = getattr(self, "_people_home_count", None)
+        if people is not None:
+            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+        else:
+            Q_internal = _DEFAULT_INTERNAL_GAIN_BTU
+
+        for t in range(n):
+            T_out = hourly_forecast[t]["temp"]
+            if hourly_forecast[t].get("precipitation", False):
+                T_out = T_out - _PRECIPITATION_OFFSET_F
+
+            Q_env = R_inv * (T_out - T_air)
+            Q_int = R_int_inv * (T_mass[t] - T_air)
+            # Include HVAC contribution from optimized duty
+            Q_hvac = self._hvac_capacity(mode, hourly_forecast[t]["temp"], params)
+            T_air += C_inv * (Q_env + Q_int + Q_internal + u[t] * Q_hvac) * _LP_DT_HOURS
+
             Q_int_mass = R_int_inv * (T_air - T_mass[t])
             T_mass[t + 1] = T_mass[t] + C_mass_inv * Q_int_mass * _LP_DT_HOURS
 
@@ -277,6 +365,16 @@ class GreyBoxOptimizer:
 
         dt = _LP_DT_HOURS
 
+        # Internal heat gain (use current occupancy as best estimate for horizon)
+        people = getattr(self, "_people_home_count", None)
+        if people is not None:
+            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+        else:
+            Q_internal = _DEFAULT_INTERNAL_GAIN_BTU
+
+        # Indoor humidity for SHR correction
+        indoor_hum = getattr(self, "_indoor_humidity", None)
+
         for t in range(n):
             T_out = hourly_forecast[t]["temp"]
             T_eff = hourly_forecast[t].get("effective_temp") or T_out
@@ -285,6 +383,10 @@ class GreyBoxOptimizer:
             humidity = hourly_forecast[t].get("humidity")
             pressure = hourly_forecast[t].get("pressure_hpa")
             irradiance = hourly_forecast[t].get("solar_irradiance")
+            is_precip = hourly_forecast[t].get("precipitation", False)
+
+            # Precipitation: evaporative cooling reduces effective envelope temp
+            env_T_out = T_out - _PRECIPITATION_OFFSET_F if is_precip else T_out
 
             # State transition: how much of current T_air carries forward
             A[t] = 1.0 - C_inv * (R_inv + R_int_inv) * dt
@@ -292,17 +394,21 @@ class GreyBoxOptimizer:
             # HVAC effect: use effective temp for COP degradation
             Q_hvac = self._hvac_capacity(
                 mode, T_eff, params, humidity=humidity, pressure_hpa=pressure,
+                indoor_humidity=indoor_hum,
             )
             B[t] = C_inv * Q_hvac * dt
             # For cooling: Q_hvac is negative → B[t] is negative (lowers temp)
             # For heating: Q_hvac is positive → B[t] is positive (raises temp)
 
-            # Exogenous: raw outdoor temp for envelope + thermal mass + solar
-            Q_env = R_inv * T_out  # partial: R_inv * T_out (the -R_inv*T_air part is in A)
+            # Exogenous: outdoor temp (with precip correction) for envelope + thermal mass + solar + internal gain
+            Q_env = R_inv * env_T_out  # partial: R_inv * T_out (the -R_inv*T_air part is in A)
             Q_int = R_int_inv * T_mass[t]  # partial: coupling from mass
-            Q_solar = self._solar_gain(cloud, sun_elev, irradiance_w_m2=irradiance)
+            Q_solar = self._solar_gain(
+                cloud, sun_elev, irradiance_w_m2=irradiance,
+                solar_gain_btu=params.get("solar_gain_btu", _SOLAR_GAIN_BTU_FALLBACK),
+            )
 
-            d[t] = C_inv * (Q_env + Q_int + Q_solar) * dt
+            d[t] = C_inv * (Q_env + Q_int + Q_solar + Q_internal) * dt
             # Note: A already accounts for -R_inv*T_air and -R_int_inv*T_air
 
         return A, B, d
@@ -314,6 +420,7 @@ class GreyBoxOptimizer:
         params: dict,
         humidity: float | None = None,
         pressure_hpa: float | None = None,
+        indoor_humidity: float | None = None,
     ) -> float:
         """HVAC heat output in BTU/hr (negative for cooling, positive for heating).
 
@@ -321,8 +428,9 @@ class GreyBoxOptimizer:
             mode: "cool" or "heat".
             T_out: Outdoor temperature (or effective temp) for COP calculation.
             params: Thermal parameters dict.
-            humidity: Relative humidity 0-100, or None.
+            humidity: Outdoor relative humidity 0-100, or None.
             pressure_hpa: Atmospheric pressure in hPa, or None.
+            indoor_humidity: Indoor relative humidity 0-100 (for SHR correction).
         """
         if mode == "cool":
             raw_factor = 1.0 - _ALPHA_COOL * (T_out - _T_REF)
@@ -331,12 +439,17 @@ class GreyBoxOptimizer:
                 _LOGGER.warning(
                     "Grey-box COP at floor for cooling: outdoor=%.1f°F", T_out
                 )
-            # Humidity correction: high humidity reduces cooling COP
+            # Outdoor humidity correction: high humidity reduces cooling COP
             if humidity is not None and humidity > 50.0:
                 cop_factor *= max(0.8, 1.0 - (humidity - 50.0) / 500.0)
+            # Indoor humidity SHR: high indoor RH means more latent cooling
+            # (dehumidification) and less sensible cooling (temperature change)
+            if indoor_humidity is not None and indoor_humidity > 50.0:
+                shr = max(0.65, 1.0 - (indoor_humidity - 50.0) / 100.0)
+                cop_factor *= shr
             # Pressure correction
             if pressure_hpa is not None:
-                cop_factor *= (pressure_hpa / 1013.25) ** 0.3
+                cop_factor *= (pressure_hpa / 1013.25) ** 0.1
             return -params["Q_cool_base"] * cop_factor
         elif mode == "heat":
             raw_factor = 1.0 - _ALPHA_HEAT * (_T_REF - T_out)
@@ -347,7 +460,7 @@ class GreyBoxOptimizer:
                 )
             # Pressure correction
             if pressure_hpa is not None:
-                cop_factor *= (pressure_hpa / 1013.25) ** 0.3
+                cop_factor *= (pressure_hpa / 1013.25) ** 0.1
             return params["Q_heat_base"] * cop_factor
         return 0.0
 
@@ -356,11 +469,13 @@ class GreyBoxOptimizer:
         cloud_cover: float | None,
         sun_elevation: float | None,
         irradiance_w_m2: float | None = None,
+        solar_gain_btu: float = _SOLAR_GAIN_BTU_FALLBACK,
     ) -> float:
         """Solar heat gain in BTU/hr.
 
         When direct irradiance measurement is available, use it directly.
-        Otherwise fall back to the cloud_cover * elevation model.
+        Otherwise fall back to the cloud_cover * elevation model using the
+        learned solar gain parameter from the EKF.
         """
         if irradiance_w_m2 is not None:
             return irradiance_w_m2 * 3.412  # W/m² → BTU/hr/m² (solar_coefficient absorbs area)
@@ -368,7 +483,7 @@ class GreyBoxOptimizer:
             return 0.0
         clear_sky = 1.0 - cloud_cover
         altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
-        return _SOLAR_GAIN_BTU * clear_sky * altitude_factor
+        return solar_gain_btu * clear_sky * altitude_factor
 
     # ── Cost Vector ─────────────────────────────────────────────────
 
@@ -549,9 +664,42 @@ class GreyBoxOptimizer:
         # Step 4: Sort hours by marginal cost (cheapest first)
         sorted_hours = np.argsort(marginal_cost)
 
-        # Step 5: Greedy assignment — find max feasible duty at each hour
+        # Step 5: Greedy assignment — assign duty chronologically first
+        # to handle cascading thermal dynamics, then refine by cost.
+        #
+        # The chain structure T[t+1] = A[t]*T[t] + B[t]*u[t] + d[t] means
+        # duty at hour t only affects hours t+1 onward. We first walk
+        # forward in time assigning minimum duty to keep within bounds,
+        # then redistribute from expensive to cheap hours.
         u = np.zeros(n)
 
+        # Forward pass: assign minimum duty to keep trajectory in bounds
+        for t in range(n):
+            # Simulate trajectory with current u
+            T_current = self._simulate_trajectory(u, A, B, d, T_init, n)
+
+            # Check if hour t+1 would violate comfort without duty at t
+            if T_min[t + 1] <= T_current[t + 1] <= T_max[t + 1]:
+                continue  # No duty needed this hour
+
+            # Binary search for minimum duty at hour t to fix violation
+            lo, hi = 0.0, 1.0
+            for _ in range(12):
+                mid = (lo + hi) / 2
+                u_test = u.copy()
+                u_test[t] = mid
+                T_test = self._simulate_trajectory(u_test, A, B, d, T_init, n)
+                # Check if this fixes the immediate violation and doesn't
+                # create a new one (e.g., overcooling below T_min)
+                ok = T_min[t + 1] - 0.1 <= T_test[t + 1] <= T_max[t + 1] + 0.1
+                if ok:
+                    hi = mid  # Can use less
+                else:
+                    lo = mid  # Need more
+            u[t] = hi
+
+        # Greedy refinement: try to shift duty from expensive to cheap hours
+        all_satisfied = False
         for _iteration in range(3):
             for t in sorted_hours:
                 if u[t] >= 1.0:
@@ -562,7 +710,7 @@ class GreyBoxOptimizer:
                     u, t, A, B, d, T_min, T_max, T_init, n
                 )
 
-                if max_feasible > 0.01:
+                if max_feasible > u[t] + 0.01:
                     u[t] = max_feasible
 
                 # Check if all constraints are now satisfied
@@ -761,6 +909,7 @@ class GreyBoxOptimizer:
                 "humidity": None,
                 "solar_irradiance": None,
                 "pressure_hpa": None,
+                "precipitation": False,
             }
             # Average optional fields
             ci = [p.carbon_intensity for p in pts if p.carbon_intensity is not None]
@@ -791,6 +940,8 @@ class GreyBoxOptimizer:
             prs = [p.pressure_hpa for p in pts if p.pressure_hpa is not None]
             if prs:
                 entry["pressure_hpa"] = sum(prs) / len(prs)
+            # Precipitation: True if any point in this hour has precipitation
+            entry["precipitation"] = any(p.precipitation for p in pts)
             # Per-hour comfort bounds (from calendar occupancy timeline)
             cmin = [p.comfort_min for p in pts if p.comfort_min is not None]
             cmax = [p.comfort_max for p in pts if p.comfort_max is not None]
@@ -894,15 +1045,36 @@ class GreyBoxOptimizer:
 
     # ── Energy Estimates ────────────────────────────────────────────
 
-    def _estimate_power_watts(self, params: dict, mode: str) -> float:
-        """Estimate HVAC power draw from capacity (rough COP-based estimate)."""
+    def _cop_at_outdoor_temp(self, outdoor_temp: float, mode: str) -> float:
+        """Estimate COP at a given outdoor temperature.
+
+        COP degrades independently from capacity: as conditions worsen the
+        compressor works harder (lower COP) while also delivering less output
+        (lower capacity). Both effects must be modelled separately to get
+        accurate electrical power estimates.
+        """
         if mode == "cool":
-            # Typical cooling COP ≈ 3.0 → watts ≈ BTU/hr / (3.0 * 3.412)
-            return params["Q_cool_base"] / (3.0 * 3.412)
+            base_cop = 3.5
+            degradation = _ALPHA_COOL * (outdoor_temp - _T_REF)
+            return max(1.0, base_cop * (1.0 - degradation))
         elif mode == "heat":
-            # Typical heating COP ≈ 2.5 → watts ≈ BTU/hr / (2.5 * 3.412)
-            return params["Q_heat_base"] / (2.5 * 3.412)
-        return 0.0
+            base_cop = 3.0
+            degradation = _ALPHA_HEAT * (_T_REF - outdoor_temp)
+            return max(1.0, base_cop * (1.0 - degradation))
+        return 1.0
+
+    def _power_watts_at_outdoor_temp(
+        self, outdoor_temp: float, mode: str, params: dict,
+    ) -> float:
+        """Estimate electrical power draw (W) at a given outdoor temperature.
+
+        Power = capacity_delivered / COP, converted from BTU/hr to watts.
+        Capacity and COP degrade independently with outdoor temperature.
+        """
+        capacity_btu = abs(self._hvac_capacity(mode, outdoor_temp, params))
+        cop = self._cop_at_outdoor_temp(outdoor_temp, mode)
+        # 1 BTU/hr = 0.293071 W
+        return (capacity_btu / cop) * 0.293071
 
     def _add_energy_estimates(
         self,
@@ -910,38 +1082,52 @@ class GreyBoxOptimizer:
         u_opt: np.ndarray,
         u_baseline: np.ndarray,
         hourly_forecast: list[dict],
-        power_watts: float,
+        mode: str,
     ) -> None:
-        """Add kWh, CO2, and cost estimates to the schedule."""
-        # kWh = watts * hours / 1000
-        schedule.optimized_kwh = float(np.sum(u_opt)) * power_watts / 1000.0
-        schedule.baseline_kwh = float(np.sum(u_baseline)) * power_watts / 1000.0
+        """Add kWh, CO2, and cost estimates to the schedule.
 
-        # CO2 and cost (if data available)
+        Uses per-hour outdoor temperature to compute COP and power draw,
+        so that time-shifting HVAC to milder hours is properly credited.
+        """
+        params = self._extract_params()
+
+        opt_kwh_total = 0.0
+        base_kwh_total = 0.0
+        opt_co2 = 0.0
+        base_co2 = 0.0
+        opt_cost = 0.0
+        base_cost = 0.0
         has_carbon = any(h.get("carbon_intensity") for h in hourly_forecast)
         has_cost = any(h.get("electricity_rate") for h in hourly_forecast)
 
-        if has_carbon:
-            opt_co2 = 0.0
-            base_co2 = 0.0
-            for t, hf in enumerate(hourly_forecast):
+        for t, hf in enumerate(hourly_forecast):
+            T_out = hf["temp"]
+            power_w = self._power_watts_at_outdoor_temp(T_out, mode, params)
+            kwh_opt = u_opt[t] * power_w / 1000.0
+            kwh_base = (
+                u_baseline[t] * power_w / 1000.0 if t < len(u_baseline) else 0.0
+            )
+            opt_kwh_total += kwh_opt
+            base_kwh_total += kwh_base
+
+            if has_carbon:
                 ci = hf.get("carbon_intensity") or 0.0
-                kwh_opt = u_opt[t] * power_watts / 1000.0
-                kwh_base = u_baseline[t] * power_watts / 1000.0 if t < len(u_baseline) else 0.0
                 opt_co2 += kwh_opt * ci
                 base_co2 += kwh_base * ci
+
+            if has_cost:
+                rate = hf.get("electricity_rate") or 0.0
+                opt_cost += kwh_opt * rate
+                base_cost += kwh_base * rate
+
+        schedule.optimized_kwh = opt_kwh_total
+        schedule.baseline_kwh = base_kwh_total
+
+        if has_carbon:
             schedule.optimized_co2_grams = opt_co2
             schedule.baseline_co2_grams = base_co2
 
         if has_cost:
-            opt_cost = 0.0
-            base_cost = 0.0
-            for t, hf in enumerate(hourly_forecast):
-                rate = hf.get("electricity_rate") or 0.0
-                kwh_opt = u_opt[t] * power_watts / 1000.0
-                kwh_base = u_baseline[t] * power_watts / 1000.0 if t < len(u_baseline) else 0.0
-                opt_cost += kwh_opt * rate
-                base_cost += kwh_base * rate
             schedule.optimized_cost = opt_cost
             schedule.baseline_cost = base_cost
 
