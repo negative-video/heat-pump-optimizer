@@ -119,13 +119,16 @@ def make_forecast(
 
 def make_estimator(
     indoor_temp: float = 72.0,
-    R_inv: float = 2.0,
+    R_inv: float = 0.001,
     C_inv: float = 0.001,
     Q_cool: float = 5000.0,
     Q_heat: float = 5000.0,
     n_obs: int = 500,
 ) -> ThermalEstimator:
     """Create an estimator with known parameters for testing.
+
+    R_inv is per-area conductance (1/R_wall). With default envelope_area=2000,
+    UA = R_inv * area = 0.001 * 2000 = 2.0 BTU/(hr·°F) total building conductance.
 
     Parameters are chosen so that:
       - HVAC effect ~3-4 °F/hr per unit duty (B ≈ C_inv * Q * cop)

@@ -131,6 +131,11 @@ class ThermalEstimator:
     _initialized: bool = False
     _P_initial: np.ndarray = field(default_factory=lambda: np.eye(N_STATES))
 
+    # Envelope area (ft²) — scales per-area R_inv to whole-building conductance
+    _envelope_area: float = 2000.0
+    # Resist balance point from Beestat (°F), used to seed mode detection
+    _resist_balance_point: float | None = None
+
     # Current environmental conditions (set each update, used by _hvac_output)
     _current_wind_speed: float | None = None
     _current_humidity: float | None = None
@@ -216,18 +221,28 @@ class ThermalEstimator:
         """
         est = cls()
 
+        # Extract property square footage for area-dependent calculations
+        sqft = float(profile_data.get("property", {}).get("square_feet", 2000))
+        sqft = max(500.0, min(10000.0, sqft))  # sanity clamp
+        est._envelope_area = sqft
+
         # Extract resist (passive drift) trendline to estimate R and C
         resist = profile_data["temperature"]["resist"]
         resist_slope = resist["linear_trendline"]["slope"]  # °F/hr per °F outdoor
         # slope ≈ 1/(R*C), so R*C ≈ 1/slope
         rc_product = 1.0 / max(abs(resist_slope), 0.001)
 
-        # Use balance point to sanity-check
-        resist_balance = profile_data["balance_point"].get("resist", 50.0)
+        # Extract balance point for mode detection seeding
+        est._resist_balance_point = float(
+            profile_data["balance_point"].get("resist", 50.0)
+        )
 
-        # Estimate C from typical residential range, derive R
-        c_air = 1200.0  # BTU/°F — reasonable for 2000 sq ft
-        r_envelope = rc_product / c_air
+        # Estimate C_air from square footage (~0.6 BTU/°F per ft²)
+        c_air = 0.6 * sqft
+        # Derive per-area R-value: rc_product = R_total * C_air, R_total = R_per_area / area
+        # So R_per_area = rc_product * area / C_air = rc_product / (C_air / area)
+        # Simpler: R_per_area = rc_product * sqft / c_air (since R_total = R_per_area / sqft)
+        r_envelope = rc_product / c_air * sqft
         r_envelope = max(2.0, min(20.0, r_envelope))
 
         # Estimate cooling capacity from deltas
@@ -427,9 +442,12 @@ class ThermalEstimator:
             effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F
 
         # ── Envelope heat flow ───────────────────────────────────
+        # R_inv is per-area conductance (1/R_wall); multiply by envelope area
+        # to get total building conductance (UA value).
         # Infiltration multiplier: open doors/windows increase leakage
+        UA = R_inv * self._envelope_area
         infiltration = 1.0 + 2.0 * self._current_open_doors_windows
-        Q_env = R_inv * infiltration * (effective_outdoor - T_air)
+        Q_env = UA * infiltration * (effective_outdoor - T_air)
 
         # Internal coupling
         Q_int = R_int_inv * (T_mass - T_air)
@@ -475,14 +493,14 @@ class ThermalEstimator:
         # Air node: dT_air/dt = C_inv * [-λ_air * T_air + forcing_air]
         # where λ_air = total conductance away from air node
         # and forcing_air = conductance-weighted source temps + non-temp heat
-        lambda_air = R_inv * infiltration + R_int_inv + k_boundary
+        lambda_air = UA * infiltration + R_int_inv + k_boundary
         alpha = lambda_air * C_inv * dt_hours
         # Forcing: Q that doesn't depend on T_air
-        # Q_env(T_air=0) = R_inv * infiltration * effective_outdoor
+        # Q_env(T_air=0) = UA * infiltration * effective_outdoor
         # Q_int(T_air=0) = R_int_inv * T_mass
         # Q_boundary(T_air=0) = k_attic*T_attic + k_crawl*T_crawl (if present)
         forcing_air = (
-            R_inv * infiltration * effective_outdoor
+            UA * infiltration * effective_outdoor
             + R_int_inv * T_mass
             + Q_hvac + Q_solar + Q_internal
         )
@@ -541,8 +559,11 @@ class ThermalEstimator:
         # Infiltration multiplier
         infiltration = 1.0 + 2.0 * self._current_open_doors_windows
 
+        # UA = per-area R_inv × envelope area (total building conductance)
+        UA = R_inv * self._envelope_area
+
         # Total heat into air node (for C_inv Jacobian entry)
-        Q_env = R_inv * infiltration * (effective_outdoor - T_air)
+        Q_env = UA * infiltration * (effective_outdoor - T_air)
         Q_int = R_int_inv * (T_mass - T_air)
         Q_hvac = self._hvac_output(hvac_mode, hvac_running, outdoor_temp,
                                     x[IDX_Q_COOL], x[IDX_Q_HEAT])
@@ -573,10 +594,11 @@ class ThermalEstimator:
 
         # ── dT_air_new / d(state) ──────────────────────────────
         F[IDX_T_AIR, IDX_T_AIR] = 1.0 + C_inv * (
-            -R_inv * infiltration - R_int_inv - k_boundary
+            -UA * infiltration - R_int_inv - k_boundary
         ) * dt
         F[IDX_T_AIR, IDX_T_MASS] = C_inv * R_int_inv * dt
-        F[IDX_T_AIR, IDX_R_INV] = C_inv * infiltration * (effective_outdoor - T_air) * dt
+        # dT_air/dR_inv: R_inv appears as UA = R_inv * area, so derivative includes area
+        F[IDX_T_AIR, IDX_R_INV] = C_inv * self._envelope_area * infiltration * (effective_outdoor - T_air) * dt
         F[IDX_T_AIR, IDX_R_INT_INV] = C_inv * (T_mass - T_air) * dt
         F[IDX_T_AIR, IDX_C_INV] = Q_total * dt
 
@@ -766,6 +788,11 @@ class ThermalEstimator:
         return 1.0 / max(self.R_inv, 1e-6)
 
     @property
+    def envelope_area(self) -> float:
+        """Envelope area in ft²."""
+        return self._envelope_area
+
+    @property
     def thermal_mass(self) -> float:
         """Mass thermal capacitance (BTU/°F)."""
         return 1.0 / max(self.C_mass_inv, 1e-9)
@@ -903,6 +930,7 @@ class ThermalEstimator:
             "n_observations": self._n_obs,
             "last_update": self._last_update.isoformat() if self._last_update else None,
             "initial_covariance": self._P_initial.tolist(),
+            "envelope_area": self._envelope_area,
         }
 
     @classmethod
@@ -933,6 +961,9 @@ class ThermalEstimator:
             est._P_initial = np.diag([
                 0.1, 25.0, 0.01, 0.25, 1e-4, 1e-6, 1e8, 1e8,
             ])
+
+        # Restore envelope area (default 2000 for legacy data)
+        est._envelope_area = data.get("envelope_area", 2000.0)
 
         # ── Migration: 8-state → 9-state (add solar_gain_btu) ────
         if len(est.x) == 8:

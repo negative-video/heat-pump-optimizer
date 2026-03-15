@@ -607,7 +607,7 @@ class SavingsKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "savings_kwh_today", "Energy Saved Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:lightning-bolt"
 
@@ -653,7 +653,7 @@ class SavingsCostTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "savings_cost_today", "Cost Saved Today")
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_native_unit_of_measurement = "$"
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:currency-usd"
 
@@ -698,7 +698,7 @@ class SavingsCO2TodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "savings_co2_today", "CO2 Avoided Today")
         self._attr_native_unit_of_measurement = "g"
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 0
         self._attr_icon = "mdi:molecule-co2"
 
@@ -748,7 +748,7 @@ class BaselineKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "baseline_kwh_today", "Baseline Energy Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:gauge"
 
@@ -769,7 +769,7 @@ class WorstCaseKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "worst_case_kwh_today", "Worst Case Energy Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:gauge-full"
 
@@ -937,22 +937,11 @@ class WeightedIndoorTempSensor(OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        area_data = self.coordinator.data.get("area_occupancy")
-        if area_data is None:
-            # Not configured — show raw thermostat temp
-            return self.coordinator.data.get("current_indoor_temp")
-        # Compute weighted from area data
-        total = 0.0
-        total_weight = 0.0
-        for a in area_data:
-            temp = a.get("temp")
-            weight = a.get("weight", 0.0)
-            if temp is not None:
-                total += temp * weight
-                total_weight += weight
-        if total_weight == 0.0:
-            return self.coordinator.data.get("current_indoor_temp")
-        return round(total / total_weight, 1)
+        # Use the effective indoor temp (multi-sensor averaged) from coordinator
+        weighted = self.coordinator.data.get("weighted_indoor_temp")
+        if weighted is not None:
+            return round(weighted, 1)
+        return self.coordinator.data.get("current_indoor_temp")
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -1040,7 +1029,7 @@ class CopSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "cop_savings_today", "COP Savings Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:speedometer"
 
@@ -1060,7 +1049,7 @@ class RateSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "rate_savings_today", "Rate Arbitrage Savings Today")
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_native_unit_of_measurement = "$"
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:cash-clock"
 
@@ -1079,7 +1068,7 @@ class CarbonShiftSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "carbon_shift_savings_today", "Carbon Shift Savings Today")
         self._attr_native_unit_of_measurement = "g"
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 0
         self._attr_icon = "mdi:leaf"
 
@@ -1149,7 +1138,7 @@ class ComfortHoursGainedSensor(_DailyResetMixin, OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "comfort_hours_gained", "Comfort Hours Gained")
         self._attr_native_unit_of_measurement = "h"
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
         self._attr_icon = "mdi:home-thermometer"
 
@@ -1167,7 +1156,7 @@ class BaselineComfortViolationsSensor(_DailyResetMixin, OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "baseline_comfort_violations", "Baseline Comfort Violations")
-        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 0
         self._attr_icon = "mdi:thermometer-alert"
 

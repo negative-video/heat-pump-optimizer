@@ -243,6 +243,7 @@ class GreyBoxOptimizer:
             "T_air": self.estimator.T_air,
             "T_mass": self.estimator.T_mass,
             "solar_gain_btu": solar_gain,
+            "envelope_area": self.estimator.envelope_area,
         }
 
     def _precompute_thermal_mass(
@@ -265,6 +266,7 @@ class GreyBoxOptimizer:
         C_mass_inv = params["C_mass_inv"]
         R_inv = params["R_inv"]
         C_inv = params["C_inv"]
+        UA = R_inv * params.get("envelope_area", 2000.0)
 
         # Internal heat gain (use current occupancy as best estimate for horizon)
         people = getattr(self, "_people_home_count", None)
@@ -279,7 +281,7 @@ class GreyBoxOptimizer:
             if hourly_forecast[t].get("precipitation", False):
                 T_out = T_out - _PRECIPITATION_OFFSET_F
             # Approximate air temp with passive drift
-            Q_env = R_inv * (T_out - T_air)
+            Q_env = UA * (T_out - T_air)
             Q_int = R_int_inv * (T_mass[t] - T_air)
             T_air += C_inv * (Q_env + Q_int + Q_internal) * _LP_DT_HOURS
 
@@ -312,6 +314,7 @@ class GreyBoxOptimizer:
         C_mass_inv = params["C_mass_inv"]
         R_inv = params["R_inv"]
         C_inv = params["C_inv"]
+        UA = R_inv * params.get("envelope_area", 2000.0)
 
         people = getattr(self, "_people_home_count", None)
         if people is not None:
@@ -324,7 +327,7 @@ class GreyBoxOptimizer:
             if hourly_forecast[t].get("precipitation", False):
                 T_out = T_out - _PRECIPITATION_OFFSET_F
 
-            Q_env = R_inv * (T_out - T_air)
+            Q_env = UA * (T_out - T_air)
             Q_int = R_int_inv * (T_mass[t] - T_air)
             # Include HVAC contribution from optimized duty
             Q_hvac = self._hvac_capacity(mode, hourly_forecast[t]["temp"], params)
@@ -358,6 +361,7 @@ class GreyBoxOptimizer:
         R_inv = params["R_inv"]
         R_int_inv = params["R_int_inv"]
         C_inv = params["C_inv"]
+        UA = R_inv * params.get("envelope_area", 2000.0)
 
         A = np.zeros(n)
         B = np.zeros(n)
@@ -389,7 +393,7 @@ class GreyBoxOptimizer:
             env_T_out = T_out - _PRECIPITATION_OFFSET_F if is_precip else T_out
 
             # State transition: how much of current T_air carries forward
-            A[t] = 1.0 - C_inv * (R_inv + R_int_inv) * dt
+            A[t] = 1.0 - C_inv * (UA + R_int_inv) * dt
 
             # HVAC effect: use effective temp for COP degradation
             Q_hvac = self._hvac_capacity(
@@ -401,7 +405,7 @@ class GreyBoxOptimizer:
             # For heating: Q_hvac is positive → B[t] is positive (raises temp)
 
             # Exogenous: outdoor temp (with precip correction) for envelope + thermal mass + solar + internal gain
-            Q_env = R_inv * env_T_out  # partial: R_inv * T_out (the -R_inv*T_air part is in A)
+            Q_env = UA * env_T_out  # partial: UA * T_out (the -UA*T_air part is in A)
             Q_int = R_int_inv * T_mass[t]  # partial: coupling from mass
             Q_solar = self._solar_gain(
                 cloud, sun_elev, irradiance_w_m2=irradiance,
@@ -409,7 +413,7 @@ class GreyBoxOptimizer:
             )
 
             d[t] = C_inv * (Q_env + Q_int + Q_solar + Q_internal) * dt
-            # Note: A already accounts for -R_inv*T_air and -R_int_inv*T_air
+            # Note: A already accounts for -UA*T_air and -R_int_inv*T_air
 
         return A, B, d
 
@@ -589,18 +593,20 @@ class GreyBoxOptimizer:
         sigma_T_sq = P[0, 0]  # initial temperature uncertainty
 
         T_air = params["T_air"]
+        area = params.get("envelope_area", 2000.0)
+        UA = params["R_inv"] * area
 
         for t in range(n_hours):
             T_out = hourly_forecast[t]["temp"]
             Q_hvac_abs = abs(self._hvac_capacity(mode, T_out, params))
 
-            # Sensitivity of T_air[t+1] to each parameter
-            J_R = params["C_inv"] * (T_out - T_air) * dt  # ∂T/∂R_inv
-            J_C = (params["R_inv"] * (T_out - T_air) + Q_hvac_abs) * dt  # ∂T/∂C_inv
+            # Sensitivity of T_air[t+1] to each parameter (R_inv enters as UA = R_inv * area)
+            J_R = params["C_inv"] * area * (T_out - T_air) * dt  # ∂T/∂R_inv
+            J_C = (UA * (T_out - T_air) + Q_hvac_abs) * dt  # ∂T/∂C_inv
             J_Q = params["C_inv"] * dt  # ∂T/∂Q_hvac
 
             # Propagated variance (sum of parameter contributions)
-            A_coeff = 1.0 - params["C_inv"] * (params["R_inv"] + params["R_int_inv"]) * dt
+            A_coeff = 1.0 - params["C_inv"] * (UA + params["R_int_inv"]) * dt
             sigma_T_sq = (
                 A_coeff**2 * sigma_T_sq
                 + J_R**2 * sigma_R_inv**2

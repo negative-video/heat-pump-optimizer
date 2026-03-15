@@ -88,12 +88,16 @@ def simulate_building(
     initial_indoor: float = 72.0,
     dt_hours: float = DT_HOURS,
     noise_std: float = 0.1,
+    envelope_area: float = 2000.0,
 ) -> list[float]:
     """Generate synthetic indoor temperature readings from known parameters.
 
     Uses a simplified single-node RC model (no thermal mass) for clarity.
+    R is per-area R-value (°F·hr·ft²/BTU), matching the EKF's convention.
+    Total conductance UA = (1/R) * envelope_area.
     """
     R_inv = 1.0 / R
+    UA = R_inv * envelope_area
     C_inv = 1.0 / C
     indoor = initial_indoor
     readings = []
@@ -102,8 +106,8 @@ def simulate_building(
         # Add measurement noise
         readings.append(indoor + np.random.normal(0, noise_std))
 
-        # Physics update
-        Q_env = R_inv * (outdoor_temps[i] - indoor)
+        # Physics update (UA = R_inv * area, matching EKF)
+        Q_env = UA * (outdoor_temps[i] - indoor)
 
         Q_hvac = 0.0
         if hvac_running[i]:

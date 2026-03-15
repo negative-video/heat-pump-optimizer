@@ -578,6 +578,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             indoor_temp_reading.value if indoor_temp_reading
             else thermo_state.indoor_temp
         )
+        self._effective_indoor_temp = effective_indoor_temp
 
         # Calculate apparent temperature (humidity-adjusted feels-like temp)
         if (
@@ -1513,8 +1514,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             if abs((closest_pt.time - now).total_seconds()) < 7200:
                 is_precipitation = closest_pt.precipitation
 
+        # Use multi-sensor averaged temp for better EKF convergence
+        observed = getattr(self, "_effective_indoor_temp", None) or thermo_state.indoor_temp
         innovation = self.estimator.update(
-            observed_temp=thermo_state.indoor_temp,
+            observed_temp=observed,
             outdoor_temp=outdoor_temp,
             hvac_mode=hvac_mode,
             hvac_running=hvac_running,
@@ -2143,6 +2146,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
             # Thermostat
             "current_indoor_temp": thermo_state.indoor_temp if thermo_state else None,
+            "weighted_indoor_temp": getattr(self, "_effective_indoor_temp", None),
             "humidity": thermo_state.humidity if thermo_state else None,
 
             # Apparent temperature (humidity-adjusted)
