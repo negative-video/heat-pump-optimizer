@@ -1,4 +1,4 @@
-"""Tests for service handlers — all 8 services, coordinator dispatch, and unload."""
+"""Tests for service handlers — all 9 services, coordinator dispatch, and unload."""
 
 from __future__ import annotations
 
@@ -74,21 +74,38 @@ def _handler(hass, name):
 
 
 class TestServiceRegistration:
-    def test_registers_all_8_services(self, mock_hass, mock_coordinator):
+    def test_registers_all_services(self, mock_hass, mock_coordinator):
         _setup(mock_hass, mock_coordinator)
         registered = [a[0][1] for a in mock_hass.services.async_register.call_args_list]
         expected = [
-            "force_reoptimize", "pause", "resume", "set_occupancy",
-            "demand_response", "export_model", "import_model", "set_constraint",
+            "rebootstrap", "force_reoptimize", "pause", "resume",
+            "set_occupancy", "demand_response", "export_model",
+            "import_model", "set_constraint",
         ]
         for name in expected:
             assert name in registered
-        assert len(registered) == 8
+        assert len(registered) == 9
 
-    def test_unload_removes_all_8(self, mock_hass):
+    def test_unload_removes_all(self, mock_hass):
         _run(services_mod.async_unload_services(mock_hass))
         removed = [a[0][1] for a in mock_hass.services.async_remove.call_args_list]
-        assert len(removed) == 8
+        assert len(removed) == 9
+
+
+# ── rebootstrap ──────────────────────────────────────────────────────
+
+
+class TestRebootstrap:
+    def test_calls_coordinator_bootstrap(self, mock_hass, mock_coordinator):
+        mock_coordinator._history_bootstrap_completed = True
+        mock_coordinator._try_history_bootstrap = AsyncMock()
+        mock_coordinator.async_request_refresh = AsyncMock()
+        _setup(mock_hass, mock_coordinator)
+        _run(_handler(mock_hass, "rebootstrap")(_call()))
+        # Should reset the flag and trigger bootstrap
+        assert mock_coordinator._history_bootstrap_completed is False
+        mock_coordinator._try_history_bootstrap.assert_called_once()
+        mock_coordinator.async_request_refresh.assert_called_once()
 
 
 # ── force_reoptimize ─────────────────────────────────────────────────

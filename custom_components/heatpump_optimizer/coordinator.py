@@ -190,6 +190,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._reoptimize_interval_hours: int = behavior.get("reoptimize_interval_hours", 4)
         self._max_setpoint_change_per_hour: float = behavior.get("max_setpoint_change_per_hour", 4.0)
         self._away_comfort_delta: float = behavior.get("away_comfort_delta", 4.0)
+        self._thermostat_deadband: float = behavior.get("thermostat_deadband", 0.5)
+        self._dwell_time_minutes: int = behavior.get("dwell_time_minutes", 15)
 
         # Savings tracking config (from options flow)
         opts = options or {}
@@ -232,7 +234,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.area_manager: AreaOccupancyManager | None = None
         weighting_mode = opts.get(CONF_INDOOR_WEIGHTING_MODE, DEFAULT_INDOOR_WEIGHTING_MODE)
         area_config_json = opts.get(CONF_AREA_SENSOR_CONFIG, "")
-        if weighting_mode != DEFAULT_INDOOR_WEIGHTING_MODE and area_config_json:
+        if area_config_json:
             area_config = AreaOccupancyManager.deserialize_area_config(area_config_json)
             self.area_manager = AreaOccupancyManager(
                 hass,
@@ -381,7 +383,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Savings tracking
         self.savings_tracker = SavingsTracker()
         self.baseline_capture = BaselineCapture()
-        self.counterfactual = CounterfactualSimulator()
+        self.counterfactual = CounterfactualSimulator(
+            deadband=self._thermostat_deadband
+        )
         self.profiler = PerformanceProfiler()
 
         # Coordinator state
@@ -398,6 +402,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._last_model_alert: bool = False
         self._last_accuracy_tier: str = TIER_LEARNING
         self._baseline_complete_fired: bool = False
+        self._history_bootstrap_completed: bool = False
+        self._history_bootstrap_result: str | None = None  # "ok", reason, or None
         self._demand_response_active: bool = False
         self._demand_response_delta: float = 0.0
         self._demand_response_end: datetime | None = None
@@ -417,7 +423,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Rate limiter state
         self._last_written_setpoint_time: datetime | None = None
-        self._min_dwell_seconds: int = 900  # 15 minutes
+        self._min_dwell_seconds: int = self._dwell_time_minutes * 60
 
         # Storage
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -431,10 +437,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         stored = await self._store.async_load()
         if stored:
             self._restore_learning_state(stored)
+            # Track whether a previous bootstrap succeeded (persisted flag)
+            self._history_bootstrap_completed = stored.get(
+                "_history_bootstrap_completed", False
+            )
 
-        # Bootstrap from recorder history if no persisted learning state
-        if not stored or "thermal_estimator" not in stored:
-            await self._try_history_bootstrap()
+        # NOTE: History bootstrap moved to async_at_started callback
+        # (called from __init__.py) where the recorder is guaranteed ready.
 
         # Layer 3: Watchdog — listen for thermostat state changes
         self._unsub_state_listener = async_track_state_change_event(
@@ -591,6 +600,64 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         else:
             self._current_apparent_temp = None
 
+        # ── Sensor health checks (HA issue reporting) ────────────────
+
+        # Outdoor temp staleness
+        outdoor_reading = self.sensor_hub.read_outdoor_temp(
+            self._forecast_cache if hasattr(self, "_forecast_cache") else None
+        )
+        if outdoor_reading and outdoor_reading.stale:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "outdoor_temp_stale",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="outdoor_temp_stale",
+            )
+        else:
+            ir.async_delete_issue(self.hass, DOMAIN, "outdoor_temp_stale")
+
+        # Indoor sensor divergence (>3°F spread across multiple sensors)
+        if indoor_temp_reading and indoor_temp_reading.sensor_count > 1:
+            if indoor_temp_reading.max_spread > 3.0:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    "indoor_sensors_diverging",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="indoor_sensors_diverging",
+                    translation_placeholders={
+                        "spread": f"{indoor_temp_reading.max_spread:.1f}",
+                    },
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, "indoor_sensors_diverging")
+
+        # Door/window sensor unavailability
+        dw_entities = self.sensor_hub._door_window_entities
+        if dw_entities:
+            unavailable_dw = [
+                eid for eid in dw_entities
+                if (s := self.hass.states.get(eid)) is None
+                or s.state in ("unknown", "unavailable")
+            ]
+            if unavailable_dw:
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    "door_window_sensor_unavailable",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="door_window_sensor_unavailable",
+                    translation_placeholders={
+                        "entities": ", ".join(unavailable_dw),
+                    },
+                )
+            else:
+                ir.async_delete_issue(self.hass, DOMAIN, "door_window_sensor_unavailable")
+
         # ── Watchdog checks ─────────────────────────────────────────
 
         # Override detection
@@ -745,6 +812,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         co2_intensity = self.sensor_hub.read_co2_intensity()
         elec_rate = self.sensor_hub.read_electricity_rate()
         solar_reading = self.sensor_hub.read_solar_production()
+        grid_import_reading = self.sensor_hub.read_grid_import()
 
         # Compute actual COP for this interval (for savings decomposition)
         actual_cop = None
@@ -763,6 +831,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             electricity_rate=elec_rate,
             mode=self.strategic.mode or "off",
             solar_production_watts=solar_reading.value if solar_reading else None,
+            grid_import_watts=grid_import_reading.value if grid_import_reading else None,
             actual_cop=actual_cop,
         )
 
@@ -1834,6 +1903,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "baseline_capture": self.baseline_capture.to_dict(),
             "counterfactual": self.counterfactual.to_dict(),
             "performance_profiler": self.profiler.to_dict(),
+            "_history_bootstrap_completed": self._history_bootstrap_completed,
         }
         await self._store.async_save(data)
 
@@ -1897,12 +1967,22 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.profiler.confidence() * 100,
             )
 
+    async def async_try_history_bootstrap_if_needed(self) -> None:
+        """Public entry point: attempt history bootstrap if not already done.
+
+        Called from the async_at_started callback in __init__.py where the
+        recorder is guaranteed to be ready.
+        """
+        if self._history_bootstrap_completed:
+            _LOGGER.debug("History bootstrap already completed — skipping")
+            return
+        await self._try_history_bootstrap()
+
     async def _try_history_bootstrap(self) -> None:
         """Attempt to bootstrap learning subsystems from recorder history.
 
-        Runs at first startup when no persisted state exists. Batch-replays
-        up to 10 days of historical thermostat/sensor data through the EKF
-        to achieve meaningful model convergence immediately.
+        Batch-replays up to 10 days of historical thermostat/sensor data
+        through the EKF to achieve meaningful model convergence immediately.
         """
         from .learning.history_bootstrap import async_bootstrap_from_history
         from .const import DEFAULT_HISTORY_BOOTSTRAP_DAYS
@@ -1920,7 +2000,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             max_days=DEFAULT_HISTORY_BOOTSTRAP_DAYS,
         )
 
+        self._history_bootstrap_result = result.reason if not result.success else "ok"
+
         if result.success:
+            self._history_bootstrap_completed = True
+
             # Rebuild dependent objects with updated estimator state
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
             self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
@@ -1936,10 +2020,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 result.profiler_observations,
             )
 
-            # Persist immediately so we don't re-bootstrap on next restart
+            # Persist immediately (includes bootstrap flag)
             await self._persist_state()
         else:
-            _LOGGER.info("History bootstrap skipped: %s", result.reason)
+            _LOGGER.warning("History bootstrap failed: %s", result.reason)
 
     # ── HVAC state helpers ──────────────────────────────────────────
 
@@ -2199,6 +2283,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ),
             "learning_active": self._is_learning_active(),
             "initialization_mode": self._initialization_mode,
+            "history_bootstrap_completed": self._history_bootstrap_completed,
+            "history_bootstrap_result": self._history_bootstrap_result,
 
             # Overrides
             "override_count_30d": override_stats.get("total_overrides_30d", 0),
@@ -2210,6 +2296,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ).value,
 
             # Diagnostics
+            "forecast_age_minutes": (
+                round((now - self._last_forecast_time).total_seconds() / 60.0, 1)
+                if self._last_forecast_time else None
+            ),
             "forecast_deviation": self._compute_forecast_deviation(),
             "schedule_detail": self._build_schedule_detail(schedule),
             "forecast_detail": self._build_forecast_detail(schedule),
@@ -2355,6 +2445,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ),
             "solar_irradiance": (
                 r.value if (r := self.sensor_hub.read_solar_irradiance())
+                else None
+            ),
+            "grid_import_watts": (
+                r.value if (r := self.sensor_hub.read_grid_import())
                 else None
             ),
 

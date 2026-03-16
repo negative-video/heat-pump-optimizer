@@ -94,6 +94,14 @@ class AreaOccupancyManager:
         # Spike detection: keyed by entity_id
         self._sensor_history: dict[str, _SensorHistory] = {}
 
+        # Build sensor type map for spike detection thresholds
+        self._sensor_type: dict[str, str] = {}  # entity_id -> "temp" | "humidity"
+        for area in self._areas:
+            for eid in area.temp_entities:
+                self._sensor_type[eid] = "temp"
+            for eid in area.humidity_entities:
+                self._sensor_type[eid] = "humidity"
+
     @property
     def mode(self) -> IndoorWeightingMode:
         return self._mode
@@ -369,11 +377,9 @@ class AreaOccupancyManager:
 
         change = abs(current.value - oldest_in_window.value)
 
-        # Determine threshold: humidity sensors are 0-100, temp sensors are higher
-        # Use humidity threshold if value is in humidity range
-        if oldest_in_window.value <= 100.0 and current.value <= 100.0:
-            # Could be humidity — check both thresholds, use the more lenient one
-            # We can't definitively distinguish here, so check against both
+        # Use known sensor type for accurate threshold selection
+        sensor_type = self._sensor_type.get(entity_id, "temp")
+        if sensor_type == "humidity":
             return change >= DEFAULT_SPIKE_HUMIDITY_THRESHOLD
         return change >= DEFAULT_SPIKE_TEMP_THRESHOLD
 

@@ -39,6 +39,23 @@
           "model_import_data": "Paste the JSON from the export_model service."
         }
       },
+      "air_sensors": {
+        "title": "Air Sensors",
+        "description": "Optional indoor and outdoor sensors that significantly improve the optimizer's accuracy. Detected sensors are pre-filled — adjust as needed. You can skip this step and configure sensors later.",
+        "data": {
+          "indoor_temp_entities": "Indoor temperature sensors",
+          "indoor_humidity_entities": "Indoor humidity sensors",
+          "outdoor_temp_entities": "Outdoor temperature sensors",
+          "outdoor_humidity_entities": "Outdoor humidity sensors"
+        }
+      },
+      "presence_setup": {
+        "title": "Presence Detection",
+        "description": "Optional person or presence entities for home/away detection. When everyone is away, the optimizer widens the comfort range to save more energy.",
+        "data": {
+          "occupancy_entities": "Presence entities"
+        }
+      },
       "comfort": {
         "title": "Temperature Boundaries",
         "description": "The optimizer saves energy by shifting when your HVAC runs. During cheap/efficient hours it pre-cools or pre-heats toward one end of your range; during expensive/inefficient hours it coasts toward the other end.\n\nA wider optimization range means more savings. Safety limits are absolute guardrails that are never exceeded.",
@@ -61,6 +78,7 @@
       }
     },
     "error": {
+      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor — please remove the duplicate",
       "profile_not_found": "File not found — check the path is accessible inside your HA container (no quotes needed around spaces)",
       "profile_parse_error": "Could not parse file as JSON — verify the file is a valid Beestat temperature profile export",
       "profile_missing_keys": "Missing required data — the file needs temperature deltas (cool_1, heat_1, resist) with linear trendlines and balance points",
@@ -76,13 +94,13 @@
       "init": {
         "menu_options": {
           "equipment": "Thermostat & weather source",
-          "sensors": "Environmental & indoor sensors",
+          "outdoor_sensors": "Outdoor & building sensors",
+          "indoor_sensing": "Indoor sensing",
+          "presence": "Presence & away",
           "energy": "Energy & cost tracking",
           "behavior": "Optimizer behavior",
           "comfort": "Temperature boundaries",
-          "occupancy": "Occupancy & presence",
-          "schedule": "Calendar scheduling & pre-conditioning",
-          "rooms": "Room-aware sensing"
+          "schedule": "Calendar scheduling & pre-conditioning"
         }
       },
       "equipment": {
@@ -93,9 +111,9 @@
           "weather_entities": "Weather entities (first = primary, rest = fallback)"
         }
       },
-      "sensors": {
-        "title": "Environmental & Indoor Sensors",
-        "description": "Optional sensors that improve prediction accuracy. Detected sensors are pre-filled — adjust as needed. The optimizer works without these but gets smarter with more data.",
+      "outdoor_sensors": {
+        "title": "Outdoor & Building Sensors",
+        "description": "Optional outdoor and building envelope sensors that improve prediction accuracy. Detected sensors are pre-filled — adjust as needed.",
         "data": {
           "outdoor_temp_entities": "Outdoor temperature sensors",
           "outdoor_humidity_entities": "Outdoor humidity sensors",
@@ -103,8 +121,6 @@
           "solar_irradiance_entity": "Solar irradiance sensor (W/m²)",
           "barometric_pressure_entity": "Barometric pressure sensor",
           "sun_entity": "Sun entity",
-          "indoor_temp_entities": "Indoor temperature sensors",
-          "indoor_humidity_entities": "Indoor humidity sensors",
           "door_window_entities": "Door/window contact sensors",
           "attic_temp_entity": "Attic temperature sensor",
           "crawlspace_temp_entity": "Crawlspace temperature sensor"
@@ -150,7 +166,9 @@
           "reoptimize_interval_hours": "Re-optimization interval",
           "max_setpoint_change_per_hour": "Maximum temperature change rate",
           "use_adaptive_model": "Use adaptive thermal model (Kalman filter)",
-          "use_greybox_model": "Use grey-box LP optimizer"
+          "use_greybox_model": "Use grey-box LP optimizer",
+          "thermostat_deadband": "Thermostat deadband (°F)",
+          "dwell_time_minutes": "Minimum time between setpoint changes"
         },
         "data_description": {
           "optimization_aggressiveness": "Conservative uses the inner 60% of your comfort range. Balanced uses the full range. Aggressive reoptimizes more often and allows larger corrections.",
@@ -158,7 +176,9 @@
           "reoptimize_interval_hours": "How often to rebuild the schedule from the latest forecast.",
           "max_setpoint_change_per_hour": "Limits how quickly the optimizer can change your setpoint to avoid jarring temperature swings.",
           "use_adaptive_model": "Enables online learning of your home's thermal characteristics via Extended Kalman Filter.",
-          "use_greybox_model": "Uses a physics-based LP optimizer with learned parameters. Requires the adaptive model."
+          "use_greybox_model": "Uses a physics-based LP optimizer with learned parameters. Requires the adaptive model.",
+          "thermostat_deadband": "The temperature deadband (hysteresis) your thermostat uses. Used by the counterfactual simulator to model baseline behavior. Most thermostats use 0.5°F.",
+          "dwell_time_minutes": "Minimum time between setpoint writes (5-30 min). Increase if your thermostat reacts poorly to frequent changes."
         }
       },
       "comfort": {
@@ -181,11 +201,11 @@
           "comfort_heat_max": "During efficient hours, the optimizer pre-heats toward this temperature."
         }
       },
-      "occupancy": {
-        "title": "Occupancy & Presence",
+      "presence": {
+        "title": "Presence & Away",
         "description": "Configure presence detection to widen the optimization range when you're away.",
         "data": {
-          "occupancy_entities": "Occupancy/presence sensors",
+          "occupancy_entities": "Presence entities",
           "occupancy_debounce_minutes": "Presence debounce (minutes)",
           "away_comfort_delta": "Away mode temperature delta"
         },
@@ -232,34 +252,49 @@
           "calendar_home_keywords": "Comma-separated keywords in event titles that mean someone is home (e.g., 'WFH, Remote, Home'). Only useful if your default mode is 'away'."
         }
       },
-      "rooms": {
-        "title": "Room-Aware Sensing",
-        "description": "Weight indoor temperature and humidity by room occupancy. When configured, the optimizer uses sensors from rooms you're actually in rather than a flat whole-house average. After choosing a mode, you'll see discovered rooms and can fine-tune their motion sensors.",
+      "indoor_sensing": {
+        "title": "Indoor Sensing",
+        "description": "Configure how the optimizer reads indoor temperature and humidity. Simple mode uses a flat list of sensors. Room-Aware mode discovers rooms from your Home Assistant areas and lets you assign sensors per room with occupancy-based weighting.",
+        "data": {
+          "indoor_sensing_mode": "Sensing mode"
+        }
+      },
+      "indoor_simple": {
+        "title": "Indoor Sensors",
+        "description": "Select indoor temperature and humidity sensors. The optimizer averages all selected sensors for a whole-house reading.",
+        "data": {
+          "indoor_temp_entities": "Indoor temperature sensors",
+          "indoor_humidity_entities": "Indoor humidity sensors"
+        }
+      },
+      "indoor_rooms": {
+        "title": "Room-Aware Settings",
+        "description": "Configure how room occupancy affects temperature weighting. After setting the mode, you'll select rooms and assign sensors.",
         "data": {
           "indoor_weighting_mode": "Weighting mode",
           "room_occupancy_debounce_minutes": "Room occupancy debounce (minutes)",
           "occupied_weight_multiplier": "Occupied room weight multiplier"
         },
         "data_description": {
-          "indoor_weighting_mode": "Equal: all sensors averaged equally (default). Occupied only: only rooms with detected motion contribute. Weighted: occupied rooms count more but unoccupied rooms still contribute.",
+          "indoor_weighting_mode": "Equal: all rooms averaged equally. Occupied only: only rooms with detected motion contribute. Weighted: occupied rooms count more but unoccupied rooms still contribute.",
           "room_occupancy_debounce_minutes": "How long a room stays 'occupied' after the last motion is detected. Longer values prevent flickering from hallway sensors.",
           "occupied_weight_multiplier": "How much more occupied rooms count vs unoccupied. Only used in Weighted mode."
         }
       },
-      "rooms_discover": {
+      "indoor_rooms_discover": {
         "title": "Select Rooms",
-        "description": "These rooms were discovered from your Home Assistant area registry. Each room shows its detected sensors. Select the rooms to include, then fine-tune motion sensors on the next page.",
+        "description": "These rooms were discovered from your Home Assistant area registry. Each room shows its detected sensors. Select the rooms to include, then assign sensors on the next page.",
         "data": {
           "selected_areas": "Rooms to include"
         }
       },
-      "rooms_no_areas": {
+      "indoor_rooms_no_areas": {
         "title": "No Rooms Found",
         "description": "No areas with temperature sensors were found in your Home Assistant area registry.\n\nTo use room-aware sensing:\n1. Go to Settings → Areas in Home Assistant\n2. Create areas for your rooms (e.g., Living Room, Bedroom)\n3. Assign your temperature sensors to the correct areas\n4. Return here to configure room-aware sensing\n\nPress Submit to continue without room-aware sensing."
       },
-      "rooms_edit": {
-        "title": "Room Motion Sensors",
-        "description": "Assign motion or occupancy sensors to each room. The optimizer uses these to detect which rooms are occupied and weight temperatures accordingly. Rooms without motion sensors are always treated as occupied.\n\n{room_details}",
+      "indoor_rooms_edit": {
+        "title": "Room Sensors",
+        "description": "Assign temperature, humidity, and motion sensors to each room. Discovered sensors are pre-filled from your area registry — adjust as needed. Rooms: {room_details}",
         "data": {}
       }
     },
@@ -362,6 +397,18 @@
     "model_not_progressing": {
       "title": "Thermal model not learning",
       "description": "The thermal model has been learning for {days} days but confidence is only {confidence}%. This usually means the HVAC system hasn't run enough heating/cooling cycles.\n\nThis can happen during mild weather when neither heating nor cooling is needed. The model will resume learning when your HVAC system becomes active again."
+    },
+    "outdoor_temp_stale": {
+      "title": "Outdoor temperature sensor stale",
+      "description": "Your outdoor temperature sensor hasn't reported a fresh reading recently. The optimizer is using forecast data as a fallback.\n\nCheck the sensor's battery or connectivity in **Settings \u2192 Devices & Services**."
+    },
+    "indoor_sensors_diverging": {
+      "title": "Indoor temperature sensors disagree",
+      "description": "Your indoor temperature sensors disagree by {spread}\u00b0F. This may indicate a faulty sensor or a sensor placed near a heat source.\n\nCheck your sensors in **Settings \u2192 Devices & Services** and verify their placement."
+    },
+    "door_window_sensor_unavailable": {
+      "title": "Door/window sensor unavailable",
+      "description": "One or more configured door/window sensors are unavailable: {entities}. The optimizer cannot detect infiltration from these openings until connectivity is restored.\n\nCheck the sensor's battery or connectivity in **Settings \u2192 Devices & Services**."
     }
   }
 }

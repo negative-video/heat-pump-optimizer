@@ -112,6 +112,7 @@ class SavingsTracker:
         electricity_rate: float | None,
         mode: str,
         solar_production_watts: float | None = None,
+        grid_import_watts: float | None = None,
         actual_cop: float | None = None,
     ) -> None:
         """Record a single update interval (typically 5 minutes).
@@ -136,6 +137,7 @@ class SavingsTracker:
             self._hour_cop_readings = []
             self._hour_mode = mode
             self._hour_solar_offset_kwh = 0.0
+            self._hour_grid_import_kwh = 0.0
 
         # Accumulate this interval
         if hvac_running:
@@ -149,8 +151,16 @@ class SavingsTracker:
             if actual_cop is not None:
                 self._hour_cop_readings.append(actual_cop)
 
-            # Track solar offset
-            if solar_production_watts is not None and power_watts is not None:
+            # Track solar offset — prefer grid import for accuracy when available
+            if grid_import_watts is not None and power_watts is not None:
+                # Self-consumption = total power - grid import
+                self_consumption = max(0.0, power_watts - grid_import_watts)
+                solar_offset_kwh = self_consumption * (interval_minutes / 60.0) / 1000.0
+                self._hour_solar_offset_kwh += solar_offset_kwh
+                self._hour_grid_import_kwh += (
+                    grid_import_watts * (interval_minutes / 60.0) / 1000.0
+                )
+            elif solar_production_watts is not None and power_watts is not None:
                 solar_offset_watts = min(solar_production_watts, power_watts)
                 solar_offset_kwh = solar_offset_watts * (interval_minutes / 60.0) / 1000.0
                 self._hour_solar_offset_kwh += solar_offset_kwh

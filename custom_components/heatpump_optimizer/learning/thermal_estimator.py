@@ -83,6 +83,10 @@ _DUCT_LOSS_PER_F = 0.003
 # Precipitation: evaporative cooling offset applied to outdoor temp (°F)
 _PRECIPITATION_OFFSET_F = 3.0
 
+# Wind infiltration coefficient: fractional increase in envelope leakage per mph.
+# Typical residential: 2-3% per mph at moderate speeds, diminishing at high speeds.
+_WIND_INFILTRATION_COEFF = 0.025
+
 # Physical bounds for parameter clamping
 BOUNDS = {
     IDX_R_INV: (0.01, 2.0),       # R: 0.5 to 100 °F·hr/BTU
@@ -444,9 +448,12 @@ class ThermalEstimator:
         # ── Envelope heat flow ───────────────────────────────────
         # R_inv is per-area conductance (1/R_wall); multiply by envelope area
         # to get total building conductance (UA value).
-        # Infiltration multiplier: open doors/windows increase leakage
+        # Infiltration multiplier: open doors/windows and wind increase leakage
         UA = R_inv * self._envelope_area
-        infiltration = 1.0 + 2.0 * self._current_open_doors_windows
+        wind_infiltration = 0.0
+        if self._current_wind_speed is not None and self._current_wind_speed > 0:
+            wind_infiltration = _WIND_INFILTRATION_COEFF * self._current_wind_speed
+        infiltration = 1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration
         Q_env = UA * infiltration * (effective_outdoor - T_air)
 
         # Internal coupling
@@ -556,8 +563,11 @@ class ThermalEstimator:
         if self._current_precipitation:
             effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F
 
-        # Infiltration multiplier
-        infiltration = 1.0 + 2.0 * self._current_open_doors_windows
+        # Infiltration multiplier (must match _predict_state)
+        wind_infiltration = 0.0
+        if self._current_wind_speed is not None and self._current_wind_speed > 0:
+            wind_infiltration = _WIND_INFILTRATION_COEFF * self._current_wind_speed
+        infiltration = 1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration
 
         # UA = per-area R_inv × envelope area (total building conductance)
         UA = R_inv * self._envelope_area

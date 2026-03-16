@@ -250,7 +250,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             if weather_entities:
                 user_input[CONF_WEATHER_ENTITY] = weather_entities[0]
             self._config_data.update(user_input)
-            return await self.async_step_thermal_profile()
+            return await self.async_step_air_sensors()
 
         # Auto-discover entities for smart defaults
         discovery = EntityDiscovery(self.hass)
@@ -299,7 +299,143 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(schema),
         )
 
-    # ── Step 2: Thermal Profile ──────────────────────────────────────
+    # ── Step 2: Air Sensors ─────────────────────────────────────────
+
+    async def async_step_air_sensors(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 2: Optional indoor/outdoor air sensors (recommended)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            user_input = {k: v for k, v in user_input.items() if v != "" and v != []}
+
+            # Prevent same sensor from being used as both indoor and outdoor
+            outdoor_temps = set(user_input.get(CONF_OUTDOOR_TEMP_ENTITIES, []))
+            indoor_temps = set(user_input.get(CONF_INDOOR_TEMP_ENTITIES, []))
+            outdoor_hum = set(user_input.get(CONF_OUTDOOR_HUMIDITY_ENTITIES, []))
+            indoor_hum = set(user_input.get(CONF_INDOOR_HUMIDITY_ENTITIES, []))
+            if outdoor_temps & indoor_temps or outdoor_hum & indoor_hum:
+                errors["base"] = "sensor_overlap"
+
+            if not errors:
+                self._config_data.update(user_input)
+                return await self.async_step_presence_setup()
+
+        # Auto-discover sensors for smart defaults
+        discovery = EntityDiscovery(self.hass)
+
+        def _suggest(conf_key, suggestions, max_count=2):
+            existing = self._config_data.get(conf_key, [])
+            if existing:
+                return existing
+            high = [s.entity_id for s in suggestions if s.confidence == "high"]
+            return high[:max_count]
+
+        indoor_temp_default = _suggest(
+            CONF_INDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=False)
+        )
+        indoor_humidity_default = _suggest(
+            CONF_INDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=False)
+        )
+        outdoor_temp_default = _suggest(
+            CONF_OUTDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=True)
+        )
+        outdoor_humidity_default = _suggest(
+            CONF_OUTDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=True)
+        )
+
+        return self.async_show_form(
+            step_id="air_sensors",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_INDOOR_TEMP_ENTITIES,
+                        default=indoor_temp_default,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="temperature",
+                            multiple=True,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_INDOOR_HUMIDITY_ENTITIES,
+                        default=indoor_humidity_default,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="humidity",
+                            multiple=True,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_OUTDOOR_TEMP_ENTITIES,
+                        default=outdoor_temp_default,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="temperature",
+                            multiple=True,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_OUTDOOR_HUMIDITY_ENTITIES,
+                        default=outdoor_humidity_default,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="humidity",
+                            multiple=True,
+                        ),
+                    ),
+                }
+            ),
+        )
+
+    # ── Step 3: Presence ──────────────────────────────────────────────
+
+    async def async_step_presence_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 3: Optional presence/person entities for home/away (recommended)."""
+        if user_input is not None:
+            user_input = {k: v for k, v in user_input.items() if v != "" and v != []}
+            self._config_data.update(user_input)
+            return await self.async_step_thermal_profile()
+
+        # Auto-discover person entities
+        discovery = EntityDiscovery(self.hass)
+        person_suggestions = discovery.discover_person_entities()
+        occupancy_default = [
+            s.entity_id for s in person_suggestions
+            if s.confidence == "high"
+        ]
+
+        return self.async_show_form(
+            step_id="presence_setup",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_OCCUPANCY_ENTITIES,
+                        default=occupancy_default,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=[
+                                "person",
+                                "binary_sensor",
+                                "input_select",
+                                "device_tracker",
+                            ],
+                            multiple=True,
+                        ),
+                    ),
+                }
+            ),
+        )
+
+    # ── Step 4: Thermal Profile ──────────────────────────────────────
 
     async def async_step_thermal_profile(
         self, user_input: dict[str, Any] | None = None
@@ -415,12 +551,12 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    # ── Step 3: Temperature Boundaries ───────────────────────────────
+    # ── Step 5: Temperature Boundaries ───────────────────────────────
 
     async def async_step_comfort(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 3: Configure safety limits and optimization range."""
+        """Step 5: Configure safety limits and optimization range."""
         errors: dict[str, str] = {}
         if user_input is not None:
             errors = _validate_comfort_ranges(user_input)
@@ -529,7 +665,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["equipment", "sensors", "energy", "behavior", "comfort", "occupancy", "schedule", "rooms"],
+            menu_options=["equipment", "outdoor_sensors", "indoor_sensing", "presence", "energy", "behavior", "comfort", "schedule"],
         )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -592,28 +728,16 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    # ── Sensors ──────────────────────────────────────────────────────
+    # ── Outdoor & Building Sensors ───────────────────────────────────
 
-    async def async_step_sensors(
+    async def async_step_outdoor_sensors(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Environmental and indoor sensor configuration."""
-        errors: dict[str, str] = {}
-
+        """Outdoor and building envelope sensor configuration."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
-
-            # Prevent the same sensor from being used as both indoor and outdoor
-            outdoor_temps = set(user_input.get(CONF_OUTDOOR_TEMP_ENTITIES, []))
-            indoor_temps = set(user_input.get(CONF_INDOOR_TEMP_ENTITIES, []))
-            outdoor_hum = set(user_input.get(CONF_OUTDOOR_HUMIDITY_ENTITIES, []))
-            indoor_hum = set(user_input.get(CONF_INDOOR_HUMIDITY_ENTITIES, []))
-            if outdoor_temps & indoor_temps or outdoor_hum & indoor_hum:
-                errors["base"] = "sensor_overlap"
-
-            if not errors:
-                self._options.update(user_input)
-                return self.async_create_entry(title="", data=self._options)
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
 
         # Run discovery for smart defaults on empty fields
         discovery = EntityDiscovery(self.hass)
@@ -633,15 +757,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         outdoor_humidity_default = _suggest_multi(
             CONF_OUTDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=True)
         )
-        indoor_temp_default = _suggest_multi(
-            CONF_INDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=False)
-        )
-        indoor_humidity_default = _suggest_multi(
-            CONF_INDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=False)
-        )
 
         return self.async_show_form(
-            step_id="sensors",
+            step_id="outdoor_sensors",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -702,28 +820,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         selector.EntitySelectorConfig(domain="sun"),
                     ),
                     vol.Optional(
-                        CONF_INDOOR_TEMP_ENTITIES,
-                        default=indoor_temp_default,
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain="sensor",
-                            device_class="temperature",
-                            multiple=True,
-                            exclude_entities=exclude,
-                        ),
-                    ),
-                    vol.Optional(
-                        CONF_INDOOR_HUMIDITY_ENTITIES,
-                        default=indoor_humidity_default,
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain="sensor",
-                            device_class="humidity",
-                            multiple=True,
-                            exclude_entities=exclude,
-                        ),
-                    ),
-                    vol.Optional(
                         CONF_DOOR_WINDOW_ENTITIES,
                         default=self._options.get(CONF_DOOR_WINDOW_ENTITIES, []),
                     ): selector.EntitySelector(
@@ -754,7 +850,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
-            errors=errors,
         )
 
     # ── Energy & Cost ────────────────────────────────────────────────
@@ -1143,10 +1238,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Occupancy ────────────────────────────────────────────────────
 
-    async def async_step_occupancy(
+    async def async_step_presence(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Occupancy entities, debounce, and away delta."""
+        """Presence entities, debounce, and away delta."""
         if user_input is not None:
             self._options.update(user_input)
             return self.async_create_entry(title="", data=self._options)
@@ -1165,7 +1260,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             occupancy_default = existing_occupancy
 
         return self.async_show_form(
-            step_id="occupancy",
+            step_id="presence",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -1491,19 +1586,114 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    # ── Room-aware sensing ────────────────────────────────────────────
+    # ── Indoor Sensing ───────────────────────────────────────────────
 
-    async def async_step_rooms(
+    async def async_step_indoor_sensing(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Room-aware occupancy-weighted indoor sensing configuration."""
+        """Choose between simple indoor sensors or room-aware sensing."""
         if user_input is not None:
-            self._options.update(user_input)
-            # Always proceed to room discovery so users can see/configure rooms
-            return await self.async_step_rooms_discover()
+            mode = user_input.get("indoor_sensing_mode", "simple")
+            if mode == "room_aware":
+                return await self.async_step_indoor_rooms()
+            return await self.async_step_indoor_simple()
+
+        # Default: room_aware if rooms are already configured
+        existing_config = self._options.get(CONF_AREA_SENSOR_CONFIG, "")
+        has_rooms = bool(existing_config and existing_config != "[]")
+        default_mode = "room_aware" if has_rooms else "simple"
 
         return self.async_show_form(
-            step_id="rooms",
+            step_id="indoor_sensing",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "indoor_sensing_mode",
+                        default=default_mode,
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value="simple",
+                                    label="Simple (flat sensor list)",
+                                ),
+                                selector.SelectOptionDict(
+                                    value="room_aware",
+                                    label="Room-Aware (per-room sensors with occupancy weighting)",
+                                ),
+                            ],
+                        ),
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_indoor_simple(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Simple flat list of indoor temperature and humidity sensors."""
+        if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
+            self._options.update(user_input)
+            # Clear room config when switching to simple mode
+            self._options[CONF_AREA_SENSOR_CONFIG] = ""
+            self._options[CONF_INDOOR_WEIGHTING_MODE] = WEIGHTING_MODE_EQUAL
+            return self.async_create_entry(title="", data=self._options)
+
+        # Run discovery for smart defaults
+        discovery = EntityDiscovery(self.hass)
+        exclude = self._get_own_entity_ids()
+
+        existing_temp = self._options.get(CONF_INDOOR_TEMP_ENTITIES, [])
+        if not existing_temp:
+            high = [s.entity_id for s in discovery.discover_temp_sensors(outdoor=False) if s.confidence == "high"]
+            existing_temp = high[:2]
+
+        existing_hum = self._options.get(CONF_INDOOR_HUMIDITY_ENTITIES, [])
+        if not existing_hum:
+            high = [s.entity_id for s in discovery.discover_humidity_sensors(outdoor=False) if s.confidence == "high"]
+            existing_hum = high[:2]
+
+        return self.async_show_form(
+            step_id="indoor_simple",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_INDOOR_TEMP_ENTITIES,
+                        default=existing_temp,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="temperature",
+                            multiple=True,
+                            exclude_entities=exclude,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_INDOOR_HUMIDITY_ENTITIES,
+                        default=existing_hum,
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="humidity",
+                            multiple=True,
+                            exclude_entities=exclude,
+                        ),
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_indoor_rooms(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Room-aware occupancy-weighted indoor sensing settings."""
+        if user_input is not None:
+            self._options.update(user_input)
+            return await self.async_step_indoor_rooms_discover()
+
+        return self.async_show_form(
+            step_id="indoor_rooms",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -1517,7 +1707,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             options=[
                                 selector.SelectOptionDict(
                                     value=WEIGHTING_MODE_EQUAL,
-                                    label="Equal (current behavior)",
+                                    label="Equal (all rooms weighted the same)",
                                 ),
                                 selector.SelectOptionDict(
                                     value=WEIGHTING_MODE_OCCUPIED_ONLY,
@@ -1562,32 +1752,27 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_rooms_discover(
+    async def async_step_indoor_rooms_discover(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Discover and select rooms from HA area registry."""
         if user_input is not None:
             selected_area_ids = user_input.get("selected_areas", [])
-            # Reuse areas from display-time discovery (stored on self)
             self._selected_area_ids = selected_area_ids
             if selected_area_ids:
-                return await self.async_step_rooms_edit()
+                return await self.async_step_indoor_rooms_edit()
             # No rooms selected — save empty config and return
             self._options[CONF_AREA_SENSOR_CONFIG] = (
                 AreaOccupancyManager.serialize_area_config([])
             )
             return self.async_create_entry(title="", data=self._options)
 
-        # Discover ALL areas with temp sensors — don't filter by configured
-        # indoor entities so that users can set up room-aware sensing even
-        # if their global indoor sensors aren't assigned to HA areas yet.
         discovered = await AreaOccupancyManager.async_discover_areas(self.hass)
-        # Store for reuse in submit handler and rooms_edit
         self._discovered_areas = discovered
 
         if not discovered:
             return self.async_show_form(
-                step_id="rooms_no_areas",
+                step_id="indoor_rooms_no_areas",
                 data_schema=vol.Schema({}),
             )
 
@@ -1618,7 +1803,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             area_options.append(
                 selector.SelectOptionDict(value=area.area_id, label=label)
             )
-            # Pre-select: either previously configured or all discovered
             if existing_area_ids:
                 if area.area_id in existing_area_ids:
                     default_selected.append(area.area_id)
@@ -1626,7 +1810,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 default_selected.append(area.area_id)
 
         return self.async_show_form(
-            step_id="rooms_discover",
+            step_id="indoor_rooms_discover",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
@@ -1642,26 +1826,24 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_rooms_no_areas(
+    async def async_step_indoor_rooms_no_areas(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle case where no areas with temp sensors were found."""
         if user_input is not None:
-            # Clear any stale room config and return to options
             self._options[CONF_AREA_SENSOR_CONFIG] = (
                 AreaOccupancyManager.serialize_area_config([])
             )
             return self.async_create_entry(title="", data=self._options)
-        # Shouldn't get here (form is shown from rooms_discover), but handle it
         return self.async_show_form(
-            step_id="rooms_no_areas",
+            step_id="indoor_rooms_no_areas",
             data_schema=vol.Schema({}),
         )
 
-    async def async_step_rooms_edit(
+    async def async_step_indoor_rooms_edit(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Edit per-room motion/occupancy sensors."""
+        """Edit per-room temperature, humidity, and motion sensors."""
         from .engine.data_types import AreaSensorGroup
 
         areas = getattr(self, "_discovered_areas", [])
@@ -1670,39 +1852,92 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         if user_input is not None:
             # Build final area config from user edits
             final_areas = []
+            all_temp_entities: list[str] = []
+            all_humidity_entities: list[str] = []
             for area in areas:
                 if area.area_id not in selected_ids:
                     continue
+                temp_key = f"temp_{area.area_id}"
+                hum_key = f"humidity_{area.area_id}"
                 motion_key = f"motion_{area.area_id}"
+                edited_temp = user_input.get(temp_key, area.temp_entities)
+                edited_hum = user_input.get(hum_key, area.humidity_entities)
                 edited_motion = user_input.get(motion_key, area.motion_entities)
                 final_areas.append(AreaSensorGroup(
                     area_id=area.area_id,
                     area_name=area.area_name,
-                    temp_entities=area.temp_entities,
-                    humidity_entities=area.humidity_entities,
+                    temp_entities=edited_temp,
+                    humidity_entities=edited_hum,
                     motion_entities=edited_motion,
                 ))
+                # Collect for global derivation
+                for e in edited_temp:
+                    if e not in all_temp_entities:
+                        all_temp_entities.append(e)
+                for e in edited_hum:
+                    if e not in all_humidity_entities:
+                        all_humidity_entities.append(e)
+
             self._options[CONF_AREA_SENSOR_CONFIG] = (
                 AreaOccupancyManager.serialize_area_config(final_areas)
             )
+            # Derive global indoor entities from room union
+            self._options[CONF_INDOOR_TEMP_ENTITIES] = all_temp_entities
+            self._options[CONF_INDOOR_HUMIDITY_ENTITIES] = all_humidity_entities
             return self.async_create_entry(title="", data=self._options)
 
-        # Load existing config for pre-filling edited motion sensors
-        existing_motion: dict[str, list[str]] = {}
+        # Load existing config for pre-filling
+        existing_config_data: dict[str, dict[str, list[str]]] = {}
         existing_config = self._options.get(CONF_AREA_SENSOR_CONFIG)
         if existing_config:
             for ac in AreaOccupancyManager.deserialize_area_config(existing_config):
-                existing_motion[ac["area_id"]] = ac.get("motion_entities", [])
+                existing_config_data[ac["area_id"]] = {
+                    "temp_entities": ac.get("temp_entities", []),
+                    "humidity_entities": ac.get("humidity_entities", []),
+                    "motion_entities": ac.get("motion_entities", []),
+                }
 
+        exclude = self._get_own_entity_ids()
         schema_dict: dict[Any, Any] = {}
         for area in areas:
             if area.area_id not in selected_ids:
                 continue
-            motion_key = f"motion_{area.area_id}"
-            # Use existing edited config if available, otherwise discovery
-            default_motion = existing_motion.get(area.area_id, area.motion_entities)
+            existing = existing_config_data.get(area.area_id, {})
 
-            # Use suggested_value so empty list doesn't block submission
+            temp_key = f"temp_{area.area_id}"
+            default_temp = existing.get("temp_entities", area.temp_entities)
+            schema_dict[
+                vol.Optional(
+                    temp_key,
+                    description={"suggested_value": default_temp},
+                )
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="temperature",
+                    multiple=True,
+                    exclude_entities=exclude,
+                ),
+            )
+
+            hum_key = f"humidity_{area.area_id}"
+            default_hum = existing.get("humidity_entities", area.humidity_entities)
+            schema_dict[
+                vol.Optional(
+                    hum_key,
+                    description={"suggested_value": default_hum},
+                )
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="humidity",
+                    multiple=True,
+                    exclude_entities=exclude,
+                ),
+            )
+
+            motion_key = f"motion_{area.area_id}"
+            default_motion = existing.get("motion_entities", area.motion_entities)
             schema_dict[
                 vol.Optional(
                     motion_key,
@@ -1716,25 +1951,22 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             )
 
         if not schema_dict:
-            # No rooms matched selection — save what we have and return
             self._options[CONF_AREA_SENSOR_CONFIG] = (
                 AreaOccupancyManager.serialize_area_config([])
             )
             return self.async_create_entry(title="", data=self._options)
 
-        # Build description placeholders showing temp/humidity info per room
+        # Build description showing room names
         room_summaries = []
         for area in areas:
             if area.area_id not in selected_ids:
                 continue
-            temps = ", ".join(e.split(".")[-1] for e in area.temp_entities) or "none"
-            hums = ", ".join(e.split(".")[-1] for e in area.humidity_entities) or "none"
-            room_summaries.append(f"**{area.area_name}** — temp: {temps}, humidity: {hums}")
+            room_summaries.append(f"**{area.area_name}**")
 
         return self.async_show_form(
-            step_id="rooms_edit",
+            step_id="indoor_rooms_edit",
             data_schema=vol.Schema(schema_dict),
             description_placeholders={
-                "room_details": "\n".join(room_summaries),
+                "room_details": ", ".join(room_summaries),
             },
         )

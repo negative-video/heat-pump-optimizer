@@ -1,3 +1,11 @@
+rebootstrap:
+  name: Re-bootstrap from History
+  description: >-
+    Re-run the history bootstrap process, replaying up to 10 days of recorder
+    history through the thermal model. Useful if the initial bootstrap failed
+    (e.g., recorder wasn't ready at startup) or if you want to refresh the
+    model with recent historical data.
+
 force_reoptimize:
   name: Force Re-optimization
   description: Immediately re-run the schedule optimizer with the latest forecast.

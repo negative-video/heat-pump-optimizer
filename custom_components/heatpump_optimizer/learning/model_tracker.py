@@ -9,6 +9,12 @@ to the performance model's delta lookups. This handles:
   - Gradual system degradation (dirty filter, refrigerant leak)
   - Seasonal changes not captured in the base profile
   - Building envelope changes (new windows, insulation)
+
+TODO: Per-mode error corrections are now largely superseded by the EKF's
+online learning (thermal_estimator.py). The EKF continuously adapts all
+parameters, making bin-based correction factors redundant for most users.
+Consider deprecating once the EKF has proven reliable across a full
+heating+cooling season.
 """
 
 from __future__ import annotations

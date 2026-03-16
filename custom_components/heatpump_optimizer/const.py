@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -57,9 +57,13 @@ CONF_OPTIMIZATION_AGGRESSIVENESS = "optimization_aggressiveness"
 CONF_REOPTIMIZE_INTERVAL_HOURS = "reoptimize_interval_hours"
 CONF_AWAY_COMFORT_DELTA = "away_comfort_delta"
 CONF_MAX_SETPOINT_CHANGE_PER_HOUR = "max_setpoint_change_per_hour"
+CONF_THERMOSTAT_DEADBAND = "thermostat_deadband"
+CONF_DWELL_TIME_MINUTES = "dwell_time_minutes"
 
 DEFAULT_AWAY_COMFORT_DELTA = 4.0
 DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR = 4.0
+DEFAULT_THERMOSTAT_DEADBAND = 0.5  # °F
+DEFAULT_DWELL_TIME_MINUTES = 15  # minutes between setpoint writes
 
 # Aggressiveness presets
 AGGRESSIVENESS_CONSERVATIVE = "conservative"
@@ -193,6 +197,15 @@ DEFAULT_SPIKE_HISTORY_MINUTES = 30
 # History bootstrap
 CONF_HISTORY_BOOTSTRAP_DAYS = "history_bootstrap_days"
 DEFAULT_HISTORY_BOOTSTRAP_DAYS = 10
+
+# EMA temperature smoothing
+DEFAULT_EMA_ALPHA = 0.2  # weight for new reading (lower = more smoothing)
+
+# Door/window debounce
+DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS = 120  # 2 minutes
+
+# Setpoint switching penalty
+DEFAULT_SWITCHING_PENALTY_WEIGHT = 0.3  # soft penalty for consecutive setpoint changes
 
 # Resilience constants
 CONF_WEATHER_ENTITIES = "weather_entities"

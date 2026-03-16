@@ -513,6 +513,11 @@ function renderSavingsCard(states, hass) {
     `<span class="tier-dot${i < tierInfo.dots ? " filled" : ""}"></span>`
   ).join("");
 
+  // Tier accuracy note for sub-calibrated tiers
+  const tierNote = tierVal !== "calibrated"
+    ? `<div class="tier-note">Savings are ${tierInfo.label.toLowerCase()}-grade — accuracy improves as the model learns your home.</div>`
+    : "";
+
   // Context bar: savings as % of baseline
   let contextBar = "";
   if (hasValue(baselineKwh) && hasValue(savingsKwh)) {
@@ -562,6 +567,7 @@ function renderSavingsCard(states, hass) {
         <h2>Savings Today</h2>
         <span class="tier-indicator">${dots} <span class="tier-label-text">${tierInfo.label}</span></span>
       </div>
+      ${tierNote}
       <div class="savings-grid">
         ${hasValue(savingsCost) ? `<div class="savings-item"><span class="savings-value">$${fmt(savingsCost, 2)}</span><span class="savings-unit">saved</span></div>` : ""}
         ${hasValue(savingsKwh) ? `<div class="savings-item"><span class="savings-value">${fmt(savingsKwh, 2)}</span><span class="savings-unit">kWh</span></div>` : ""}
@@ -1250,6 +1256,12 @@ const PANEL_CSS = `
   }
   .tier-dot.filled { background: var(--green); }
   .tier-label-text { margin-left: 4px; }
+  .tier-note {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    font-style: italic;
+  }
 
   .savings-grid {
     display: flex;

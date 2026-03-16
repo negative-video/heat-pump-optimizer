@@ -311,7 +311,7 @@ class TestBeestatPathQuoteStripping:
 
 
 class TestSensorOverlap:
-    """Test the overlap detection logic used in async_step_sensors."""
+    """Test the overlap detection logic used in air_sensors and outdoor_sensors steps."""
 
     @staticmethod
     def _check_overlap(user_input: dict) -> bool:

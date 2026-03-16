@@ -26,7 +26,11 @@ from homeassistant.util.unit_conversion import (
     TemperatureConverter,
 )
 
-from ..const import DEFAULT_SENSOR_STALE_MINUTES
+from ..const import (
+    DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS,
+    DEFAULT_EMA_ALPHA,
+    DEFAULT_SENSOR_STALE_MINUTES,
+)
 from ..engine.data_types import ForecastPoint
 
 # Avoid circular import — AreaOccupancyManager is only used for type hints
@@ -46,6 +50,8 @@ class SensorReading:
     source: str  # e.g. "entity:sensor.outdoor_temp", "forecast", "average:3"
     timestamp: datetime
     stale: bool = False  # True if > DEFAULT_SENSOR_STALE_MINUTES old
+    sensor_count: int = 1  # Number of sensors contributing to this reading
+    max_spread: float = 0.0  # Max difference between sensors (for divergence detection)
 
 
 class SensorHub:
@@ -118,6 +124,16 @@ class SensorHub:
         self._last_outdoor_temp: SensorReading | None = None
         self._last_outdoor_humidity: SensorReading | None = None
 
+        # EMA smoothing state
+        self._ema_indoor_temp: float | None = None
+        self._ema_outdoor_temp: float | None = None
+        self._ema_alpha: float = DEFAULT_EMA_ALPHA
+
+        # Door/window debounce state (per-entity)
+        self._dw_debounce_seconds: int = DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS
+        self._dw_last_raw: dict[str, tuple[bool, datetime]] = {}
+        self._dw_debounced: dict[str, bool] = {}
+
     # ── Core validation ─────────────────────────────────────────────
 
     def _read_entity(
@@ -177,6 +193,15 @@ class SensorHub:
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
 
+    # ── EMA smoothing ────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_ema(current: float, previous: float | None, alpha: float) -> float:
+        """Apply exponential moving average. Cold-starts on first call."""
+        if previous is None:
+            return current
+        return alpha * current + (1.0 - alpha) * previous
+
     # ── Multi-sensor averaging ─────────────────────────────────────
 
     def _read_multi_temp(
@@ -184,13 +209,18 @@ class SensorHub:
         entity_ids: list[str],
         label: str,
     ) -> SensorReading | None:
-        """Read multiple temperature sensors, average valid ones, auto-convert to °F."""
+        """Read multiple temperature sensors, average valid ones, auto-convert to °F.
+
+        Fresh readings are preferred. Stale readings are only included if no
+        fresh readings are available, preventing old values from dominating.
+        """
         if not entity_ids:
             return None
 
-        values: list[float] = []
-        entities_used: list[str] = []
-        any_stale = False
+        fresh_values: list[float] = []
+        fresh_entities: list[str] = []
+        stale_values: list[float] = []
+        stale_entities: list[str] = []
 
         for eid in entity_ids:
             value, unit = self._read_entity_with_unit(eid, -80.0, 200.0, label)
@@ -203,14 +233,22 @@ class SensorHub:
                 )
             state = self.hass.states.get(eid)
             if self._is_stale(state):
-                any_stale = True
-            values.append(value)
-            entities_used.append(eid)
+                stale_values.append(value)
+                stale_entities.append(eid)
+            else:
+                fresh_values.append(value)
+                fresh_entities.append(eid)
 
-        if not values:
+        # Prefer fresh readings; fall back to stale if no fresh available
+        if fresh_values:
+            values, entities_used, is_stale = fresh_values, fresh_entities, False
+        elif stale_values:
+            values, entities_used, is_stale = stale_values, stale_entities, True
+        else:
             return None
 
         avg = sum(values) / len(values)
+        spread = (max(values) - min(values)) if len(values) > 1 else 0.0
         source = (
             f"entity:{entities_used[0]}" if len(values) == 1
             else f"average:{len(values)}"
@@ -219,7 +257,9 @@ class SensorHub:
             value=avg,
             source=source,
             timestamp=self._now(),
-            stale=any_stale,
+            stale=is_stale,
+            sensor_count=len(values),
+            max_spread=spread,
         )
 
     def _read_multi_humidity(
@@ -227,13 +267,17 @@ class SensorHub:
         entity_ids: list[str],
         label: str,
     ) -> SensorReading | None:
-        """Read multiple humidity sensors, average valid ones."""
+        """Read multiple humidity sensors, average valid ones.
+
+        Fresh readings preferred; stale only used as fallback.
+        """
         if not entity_ids:
             return None
 
-        values: list[float] = []
-        entities_used: list[str] = []
-        any_stale = False
+        fresh_values: list[float] = []
+        fresh_entities: list[str] = []
+        stale_values: list[float] = []
+        stale_entities: list[str] = []
 
         for eid in entity_ids:
             value = self._read_entity(eid, 0.0, 100.0, label)
@@ -241,11 +285,17 @@ class SensorHub:
                 continue
             state = self.hass.states.get(eid)
             if self._is_stale(state):
-                any_stale = True
-            values.append(value)
-            entities_used.append(eid)
+                stale_values.append(value)
+                stale_entities.append(eid)
+            else:
+                fresh_values.append(value)
+                fresh_entities.append(eid)
 
-        if not values:
+        if fresh_values:
+            values, entities_used, is_stale = fresh_values, fresh_entities, False
+        elif stale_values:
+            values, entities_used, is_stale = stale_values, stale_entities, True
+        else:
             return None
 
         avg = sum(values) / len(values)
@@ -257,7 +307,8 @@ class SensorHub:
             value=avg,
             source=source,
             timestamp=self._now(),
-            stale=any_stale,
+            stale=is_stale,
+            sensor_count=len(values),
         )
 
     # ── Outdoor temperature ──────────────────────────────────────────
@@ -266,10 +317,23 @@ class SensorHub:
         self,
         forecast_snapshot: list[ForecastPoint] | None = None,
     ) -> SensorReading | None:
-        """Outdoor temp: entity average → forecast current hour → last known."""
+        """Outdoor temp: entity average → forecast current hour → last known.
+
+        Applies EMA smoothing to reduce noise-driven setpoint corrections.
+        """
         # 1. Standalone sensor entities
         reading = self._read_multi_temp(self._outdoor_temp_entities, "Outdoor temp")
         if reading and not reading.stale:
+            self._ema_outdoor_temp = self._apply_ema(
+                reading.value, self._ema_outdoor_temp, self._ema_alpha
+            )
+            reading = SensorReading(
+                value=self._ema_outdoor_temp,
+                source=reading.source,
+                timestamp=reading.timestamp,
+                stale=False,
+                sensor_count=reading.sensor_count,
+            )
             self._last_outdoor_temp = reading
             return reading
 
@@ -361,33 +425,47 @@ class SensorHub:
         self,
         thermostat_temp: float | None = None,
     ) -> SensorReading | None:
-        """Indoor temp: entity average → thermostat."""
+        """Indoor temp: entity average → thermostat.
+
+        Applies EMA smoothing to reduce noise-driven setpoint corrections.
+        """
+        raw_value: float | None = None
+        source = "thermostat"
+        sensor_count = 1
+
         # 1. Additional room sensors
         reading = self._read_multi_temp(self._indoor_temp_entities, "Indoor temp")
         if reading and not reading.stale:
             # If thermostat also available, include it in the average
             if thermostat_temp is not None:
-                count = int(reading.source.split(":")[1]) if "average:" in reading.source else 1
+                count = reading.sensor_count
                 total = reading.value * count + thermostat_temp
-                avg = total / (count + 1)
-                return SensorReading(
-                    value=avg,
-                    source=f"average:{count + 1}",
-                    timestamp=self._now(),
-                    stale=False,
-                )
-            return reading
+                raw_value = total / (count + 1)
+                source = f"average:{count + 1}"
+                sensor_count = count + 1
+            else:
+                raw_value = reading.value
+                source = reading.source
+                sensor_count = reading.sensor_count
+        elif thermostat_temp is not None:
+            # 2. Thermostat only
+            raw_value = thermostat_temp
 
-        # 2. Thermostat only
-        if thermostat_temp is not None:
-            return SensorReading(
-                value=thermostat_temp,
-                source="thermostat",
-                timestamp=self._now(),
-                stale=False,
-            )
+        if raw_value is None:
+            return None
 
-        return None
+        # Apply EMA smoothing
+        self._ema_indoor_temp = self._apply_ema(
+            raw_value, self._ema_indoor_temp, self._ema_alpha
+        )
+
+        return SensorReading(
+            value=self._ema_indoor_temp,
+            source=source,
+            timestamp=self._now(),
+            stale=False,
+            sensor_count=sensor_count,
+        )
 
     # ── Indoor humidity ───────────────────────────────────────────────
 
@@ -610,23 +688,58 @@ class SensorHub:
     # ── Door/window contact sensors ─────────────────────────────────────
 
     def read_door_window_open_count(self) -> tuple[int, int]:
-        """Count open doors/windows.
+        """Count open doors/windows with debouncing.
+
+        A door/window must remain in its new state for at least
+        ``_dw_debounce_seconds`` before the change is accepted. This
+        prevents brief events (letting the dog out, passing through)
+        from triggering infiltration penalties or pausing EKF learning.
 
         Returns:
-            Tuple of (open_count, total_configured).
+            Tuple of (debounced_open_count, total_configured).
             If no entities configured, returns (0, 0).
         """
         if not self._door_window_entities:
             return 0, 0
 
+        now = self._now()
         open_count = 0
         total = 0
+
         for eid in self._door_window_entities:
             state = self.hass.states.get(eid)
-            if state and state.state not in ("unknown", "unavailable"):
-                total += 1
-                if state.state == "on":  # binary_sensor: on = open
-                    open_count += 1
+            if not state or state.state in ("unknown", "unavailable"):
+                continue
+
+            total += 1
+            raw_open = state.state == "on"  # binary_sensor: on = open
+
+            # Initialize debounced state on first encounter
+            if eid not in self._dw_debounced:
+                self._dw_debounced[eid] = raw_open
+
+            if raw_open != self._dw_debounced[eid]:
+                # State differs from debounced — track when it first changed
+                if eid not in self._dw_last_raw or self._dw_last_raw[eid][0] != raw_open:
+                    # First time seeing this new state — start debounce timer
+                    self._dw_last_raw[eid] = (raw_open, now)
+                else:
+                    # Still in the new state — check if debounce period elapsed
+                    _, change_time = self._dw_last_raw[eid]
+                    elapsed = (now - change_time).total_seconds()
+                    if elapsed >= self._dw_debounce_seconds:
+                        _LOGGER.debug(
+                            "Door/window %s confirmed %s after %ds debounce",
+                            eid, "open" if raw_open else "closed", int(elapsed),
+                        )
+                        self._dw_debounced[eid] = raw_open
+                        del self._dw_last_raw[eid]
+            else:
+                # Raw matches debounced — clear any pending timer
+                self._dw_last_raw.pop(eid, None)
+
+            if self._dw_debounced[eid]:
+                open_count += 1
 
         return open_count, total
 

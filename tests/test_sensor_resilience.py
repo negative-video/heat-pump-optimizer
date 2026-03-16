@@ -434,7 +434,7 @@ class TestMultiSensorResilience:
         assert r.value == pytest.approx(expected, abs=0.1)
 
     def test_one_stale_one_fresh(self):
-        """If any sensor is stale, the reading is flagged stale."""
+        """Fresh-first: when some sensors are fresh and some stale, use only fresh."""
         hass = _make_hass({
             "sensor.t1": _make_state(70, unit="\u00b0F", age_minutes=1),
             "sensor.t2": _make_state(74, unit="\u00b0F", age_minutes=DEFAULT_SENSOR_STALE_MINUTES + 5),
@@ -442,8 +442,9 @@ class TestMultiSensorResilience:
         hub = _make_hub(hass, outdoor_temp_entities=["sensor.t1", "sensor.t2"])
         r = hub._read_multi_temp(["sensor.t1", "sensor.t2"], "Test")
         assert r is not None
-        assert r.stale is True
-        assert r.value == pytest.approx(72.0)
+        assert r.stale is False  # fresh-first: stale sensor excluded
+        assert r.value == pytest.approx(70.0)  # only fresh sensor used
+        assert r.sensor_count == 1
 
 
 class TestCacheBehavior:
@@ -483,15 +484,16 @@ class TestCacheBehavior:
         hass.states.get = MagicMock(side_effect=lambda eid: state_map.get(eid))
 
         r2 = hub.read_outdoor_temp()
-        assert r2.value == pytest.approx(90.0)
+        # EMA smoothing: 0.2*90 + 0.8*80 = 82.0
+        assert r2.value == pytest.approx(82.0)
 
-        # Now entity goes away — cache should have the 90.0 value
+        # Now entity goes away — cache should have the EMA-smoothed value
         state_map["sensor.ot"] = _make_state("unavailable")
         hass.states.get = MagicMock(side_effect=lambda eid: state_map.get(eid))
 
         r3 = hub.read_outdoor_temp()
         assert r3.source == "last_known"
-        assert r3.value == pytest.approx(90.0)
+        assert r3.value == pytest.approx(82.0)
 
     def test_forecast_updates_cache(self):
         """When forecast is used, it should update the last_known cache."""

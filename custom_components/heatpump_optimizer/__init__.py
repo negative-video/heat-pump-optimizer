@@ -14,6 +14,7 @@ from homeassistant.components.frontend import async_register_built_in_panel, asy
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.start import async_at_started
 
 from .const import (
@@ -23,17 +24,23 @@ from .const import (
     CONF_COMFORT_COOL_MIN,
     CONF_COMFORT_HEAT_MAX,
     CONF_COMFORT_HEAT_MIN,
+    CONF_INDOOR_HUMIDITY_ENTITIES,
+    CONF_INDOOR_TEMP_ENTITIES,
     CONF_INITIALIZATION_MODE,
     CONF_MAX_SETPOINT_CHANGE_PER_HOUR,
     CONF_MODEL_IMPORT_DATA,
     CONF_OCCUPANCY_ENTITIES,
     CONF_OCCUPANCY_ENTITY,
     CONF_OPTIMIZATION_AGGRESSIVENESS,
+    CONF_OUTDOOR_HUMIDITY_ENTITIES,
+    CONF_OUTDOOR_TEMP_ENTITIES,
     CONF_OVERRIDE_GRACE_PERIOD_HOURS,
     CONF_PROFILE_PATH,
     CONF_REOPTIMIZE_INTERVAL_HOURS,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
+    CONF_DWELL_TIME_MINUTES,
+    CONF_THERMOSTAT_DEADBAND,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
     DEFAULT_AGGRESSIVENESS,
@@ -47,6 +54,8 @@ from .const import (
     DEFAULT_REOPTIMIZE_INTERVAL_HOURS,
     DEFAULT_SAFETY_COOL_MAX,
     DEFAULT_SAFETY_HEAT_MIN,
+    DEFAULT_DWELL_TIME_MINUTES,
+    DEFAULT_THERMOSTAT_DEADBAND,
     DOMAIN,
     INIT_MODE_BEESTAT,
     INIT_MODE_LEARNING,
@@ -99,6 +108,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Comfort ranges — options flow overrides take precedence over initial data
     opts = dict(entry.options)
+
+    # Merge onboarding sensor data into opts (options take precedence)
+    for _key in (
+        CONF_OUTDOOR_TEMP_ENTITIES, CONF_OUTDOOR_HUMIDITY_ENTITIES,
+        CONF_INDOOR_TEMP_ENTITIES, CONF_INDOOR_HUMIDITY_ENTITIES,
+    ):
+        if _key not in opts:
+            _val = entry.data.get(_key)
+            if _val:
+                opts[_key] = _val
     comfort_cool = (
         opts.get(CONF_COMFORT_COOL_MIN, entry.data.get(CONF_COMFORT_COOL_MIN, DEFAULT_COMFORT_COOL_MIN)),
         opts.get(CONF_COMFORT_COOL_MAX, entry.data.get(CONF_COMFORT_COOL_MAX, DEFAULT_COMFORT_COOL_MAX)),
@@ -121,6 +140,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "reoptimize_interval_hours": opts.get(CONF_REOPTIMIZE_INTERVAL_HOURS, DEFAULT_REOPTIMIZE_INTERVAL_HOURS),
         "max_setpoint_change_per_hour": opts.get(CONF_MAX_SETPOINT_CHANGE_PER_HOUR, DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR),
         "away_comfort_delta": opts.get(CONF_AWAY_COMFORT_DELTA, DEFAULT_AWAY_COMFORT_DELTA),
+        "thermostat_deadband": opts.get(CONF_THERMOSTAT_DEADBAND, DEFAULT_THERMOSTAT_DEADBAND),
+        "dwell_time_minutes": opts.get(CONF_DWELL_TIME_MINUTES, DEFAULT_DWELL_TIME_MINUTES),
     }
 
     # Pre-read beestat profile off the event loop (blocking I/O)
@@ -157,9 +178,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # First data refresh
     await coordinator.async_config_entry_first_refresh()
 
+    # Guard: if the climate entity isn't available yet, defer setup so HA
+    # retries with exponential backoff rather than running with broken metrics.
+    thermo_state = coordinator.thermostat.read_state()
+    if not thermo_state.available:
+        raise ConfigEntryNotReady(
+            f"Climate entity '{climate_entity}' not yet available — "
+            "will retry automatically"
+        )
+
     # Once HA is fully started (all integrations loaded), trigger a refresh
-    # so the coordinator can pick up weather entities that weren't ready yet.
+    # so the coordinator can pick up weather entities that weren't ready yet,
+    # and attempt history bootstrap (recorder guaranteed ready at this point).
     async def _on_ha_started(_hass):
+        await coordinator.async_try_history_bootstrap_if_needed()
         await coordinator.async_request_refresh()
 
     async_at_started(hass, _on_ha_started)

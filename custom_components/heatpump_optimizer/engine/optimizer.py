@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from ..const import DEFAULT_SWITCHING_PENALTY_WEIGHT
 from .data_types import (
     ForecastPoint,
     HourScore,
@@ -418,6 +419,43 @@ class ScheduleOptimizer:
             )
 
         entries.sort(key=lambda e: e.start_time)
+
+        # Apply switching penalty: smooth out gratuitous oscillation
+        entries = self._smooth_switching(entries)
+
+        return entries
+
+    @staticmethod
+    def _smooth_switching(
+        entries: list[ScheduleEntry],
+        weight: float = DEFAULT_SWITCHING_PENALTY_WEIGHT,
+        threshold: float = 1.0,
+    ) -> list[ScheduleEntry]:
+        """Smooth consecutive setpoint changes to reduce compressor cycling.
+
+        For each consecutive pair of hours, if the setpoint delta exceeds
+        ``threshold`` (°F), the later entry is nudged toward the earlier
+        one proportionally to ``weight``. This is a soft penalty — large
+        efficiency-driven changes still pass through.
+        """
+        if len(entries) < 2 or weight <= 0:
+            return entries
+
+        for i in range(1, len(entries)):
+            delta = entries[i].target_temp - entries[i - 1].target_temp
+            abs_delta = abs(delta)
+            if abs_delta > threshold:
+                # Correction is proportional to overshoot beyond threshold,
+                # but capped so we never override a >2°F efficiency gap
+                correction = weight * (abs_delta - threshold)
+                correction = min(correction, abs_delta * 0.5)  # never more than half
+                if delta > 0:
+                    entries[i].target_temp -= correction
+                else:
+                    entries[i].target_temp += correction
+                # Re-round to thermostat resolution
+                entries[i].target_temp = round(entries[i].target_temp * 2) / 2
+
         return entries
 
     # ── Display helpers ────────────────────────────────────────────

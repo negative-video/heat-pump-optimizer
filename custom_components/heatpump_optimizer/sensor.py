@@ -88,6 +88,11 @@ async def async_setup_entry(
         ProfilerActiveSensor(coordinator, entry),
         ProfilerObservationsSensor(coordinator, entry),
         LearningProgressSensor(coordinator, entry),
+        # New diagnostic sensors
+        TacticalStateSensor(coordinator, entry),
+        ModelBiasSensor(coordinator, entry),
+        ForecastAgeSensor(coordinator, entry),
+        SolarCoefficientSensor(coordinator, entry),
     ]
     async_add_entities(entities)
 
@@ -1321,9 +1326,100 @@ class LearningProgressSensor(OptimizerBaseSensor):
     def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
             return {}
-        return {
+        learning = self.coordinator.data.get("learning_active", True)
+        attrs = {
             "sample_days": self.coordinator.data.get("baseline_sample_days"),
             "model_confidence": self.coordinator.data.get("kalman_confidence"),
             "accuracy_tier": self.coordinator.data.get("savings_accuracy_tier"),
             "initialization_mode": self.coordinator.data.get("initialization_mode"),
+            "history_bootstrap_completed": self.coordinator.data.get(
+                "history_bootstrap_completed"
+            ),
+            "history_bootstrap_result": self.coordinator.data.get(
+                "history_bootstrap_result"
+            ),
         }
+        if learning:
+            attrs["comfort_band_note"] = (
+                "During learning, setpoints use the inner 60% of your comfort "
+                "range to stay conservative while the model calibrates. Full "
+                "range unlocks after learning completes (~2-3 weeks)."
+            )
+        return attrs
+
+
+class TacticalStateSensor(OptimizerBaseSensor):
+    """Current state of the tactical controller (NORMAL/DISTURBED/THROTTLED)."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "tactical_state", "Tactical State")
+        self._attr_icon = "mdi:shield-check-outline"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("tactical_state")
+
+
+class ModelBiasSensor(OptimizerBaseSensor):
+    """Mean signed error — positive = model over-predicts, negative = under-predicts."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "model_bias", "Model Bias")
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 2
+        self._attr_icon = "mdi:swap-vertical"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("model_bias")
+
+
+class ForecastAgeSensor(OptimizerBaseSensor):
+    """Minutes since the last fresh weather forecast was received."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "forecast_age", "Forecast Age")
+        self._attr_native_unit_of_measurement = "min"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_icon = "mdi:clock-alert-outline"
+        self._attr_suggested_display_precision = 0
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("forecast_age_minutes")
+
+
+class SolarCoefficientSensor(OptimizerBaseSensor):
+    """Learned cloud-cover / solar gain coefficient from SolarAdjuster."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "solar_coefficient", "Solar Coefficient"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 3
+        self._attr_icon = "mdi:white-balance-sunny"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("solar_coefficient")

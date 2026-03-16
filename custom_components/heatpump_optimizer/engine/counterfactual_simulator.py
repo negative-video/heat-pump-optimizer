@@ -49,7 +49,7 @@ _PRECIPITATION_OFFSET_F = 3.0
 
 _LOGGER = logging.getLogger(__name__)
 
-# Standard thermostat hysteresis (deadband)
+# Default thermostat hysteresis (deadband) — now configurable via behavior options
 THERMOSTAT_DEADBAND_F = 0.5
 
 # Virtual state drift reset: blend toward real state weekly
@@ -69,10 +69,13 @@ class CounterfactualSimulator:
     but different control logic.
     """
 
-    def __init__(self, initial_temp: float = 72.0) -> None:
+    def __init__(
+        self, initial_temp: float = 72.0, deadband: float = THERMOSTAT_DEADBAND_F
+    ) -> None:
         # Virtual house state
         self._T_air: float = initial_temp
         self._T_mass: float = initial_temp
+        self._deadband: float = deadband
 
         # Intra-hour accumulators
         self._current_hour_key: int | None = None
@@ -281,10 +284,10 @@ class CounterfactualSimulator:
         """
         if mode == "cool":
             # Turn on cooling when temp rises above setpoint + deadband
-            return indoor_temp > setpoint + THERMOSTAT_DEADBAND_F
+            return indoor_temp > setpoint + self._deadband
         elif mode == "heat":
             # Turn on heating when temp drops below setpoint - deadband
-            return indoor_temp < setpoint - THERMOSTAT_DEADBAND_F
+            return indoor_temp < setpoint - self._deadband
         return False
 
     @staticmethod
@@ -514,6 +517,7 @@ class CounterfactualSimulator:
         return {
             "T_air": self._T_air,
             "T_mass": self._T_mass,
+            "deadband": self._deadband,
             "hours_since_reset": self._hours_since_reset,
             "comfort_bounds": list(self._comfort_bounds),
         }
@@ -521,7 +525,10 @@ class CounterfactualSimulator:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CounterfactualSimulator:
         """Restore from persisted data."""
-        sim = cls(initial_temp=data.get("T_air", 72.0))
+        sim = cls(
+            initial_temp=data.get("T_air", 72.0),
+            deadband=data.get("deadband", THERMOSTAT_DEADBAND_F),
+        )
         sim._T_mass = data.get("T_mass", sim._T_air)
         sim._hours_since_reset = data.get("hours_since_reset", 0)
         bounds = data.get("comfort_bounds", [64.0, 78.0])
