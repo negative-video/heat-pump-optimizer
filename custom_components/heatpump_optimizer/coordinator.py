@@ -412,6 +412,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._last_model_alert: bool = False
         self._last_accuracy_tier: str = TIER_LEARNING
         self._baseline_complete_fired: bool = False
+        self._last_profiler_status: str = "pending"
         self._history_bootstrap_completed: bool = False
         self._history_bootstrap_result: str | None = None  # "ok", reason, or None
         self._demand_response_active: bool = False
@@ -815,7 +816,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     "observations": self.estimator._n_obs,
                 })
 
-        # ── Savings tracking ──────────────────────────────────────────
+        # ── Shared sensor reads (used by savings, counterfactual, profiler) ──
 
         hvac_running = self._is_hvac_running(thermo_state)
         power_watts = self.sensor_hub.read_power_draw()
@@ -823,81 +824,95 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         elec_rate = self.sensor_hub.read_electricity_rate()
         solar_reading = self.sensor_hub.read_solar_production()
         grid_import_reading = self.sensor_hub.read_grid_import()
-
-        # Compute actual COP for this interval (for savings decomposition)
-        actual_cop = None
-        outdoor_reading = self.sensor_hub.read_outdoor_temp()
-        outdoor_temp = outdoor_reading.value if outdoor_reading else None
-        if outdoor_temp is not None and (self._use_adaptive or self._use_greybox):
-            mode = self.strategic.mode or "off"
-            actual_cop = self.counterfactual._cop_at_outdoor_temp(outdoor_temp, mode)
-
-        self.savings_tracker.record_interval(
-            now=now,
-            hvac_running=hvac_running,
-            interval_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
-            power_watts=power_watts,
-            carbon_intensity=co2_intensity,
-            electricity_rate=elec_rate,
-            mode=self.strategic.mode or "off",
-            solar_production_watts=solar_reading.value if solar_reading else None,
-            grid_import_watts=grid_import_reading.value if grid_import_reading else None,
-            actual_cop=actual_cop,
+        outdoor_reading = self.sensor_hub.read_outdoor_temp(
+            self.strategic.forecast_snapshot
         )
+        outdoor_temp = outdoor_reading.value if outdoor_reading else None
+
+        # ── Savings tracking ──────────────────────────────────────────
+
+        try:
+            actual_cop = None
+            if outdoor_temp is not None and (self._use_adaptive or self._use_greybox):
+                mode = self.strategic.mode or "off"
+                actual_cop = self.counterfactual._cop_at_outdoor_temp(outdoor_temp, mode)
+
+            self.savings_tracker.record_interval(
+                now=now,
+                hvac_running=hvac_running,
+                interval_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                power_watts=power_watts,
+                carbon_intensity=co2_intensity,
+                electricity_rate=elec_rate,
+                mode=self.strategic.mode or "off",
+                solar_production_watts=solar_reading.value if solar_reading else None,
+                grid_import_watts=grid_import_reading.value if grid_import_reading else None,
+                actual_cop=actual_cop,
+            )
+        except Exception:
+            _LOGGER.warning("Savings tracking failed", exc_info=True)
 
         # ── Baseline capture (during learning phase) ───────────────
-        if self._is_learning_active() and thermo_state.target_temp is not None:
-            self.baseline_capture.record_observation(
-                now=now,
-                setpoint=thermo_state.target_temp,
-                mode=self.strategic.mode or "off",
-            )
-            # Build template when ready
-            if self.baseline_capture.is_ready and self.baseline_capture.template is None:
-                self.baseline_capture.build_template()
-                _LOGGER.info("Baseline schedule captured after %d days",
-                             self.baseline_capture.sample_days)
+
+        try:
+            if self._is_learning_active() and thermo_state.target_temp is not None:
+                self.baseline_capture.record_observation(
+                    now=now,
+                    setpoint=thermo_state.target_temp,
+                    mode=self.strategic.mode or "off",
+                )
+                if self.baseline_capture.is_ready and self.baseline_capture.template is None:
+                    self.baseline_capture.build_template()
+                    _LOGGER.info("Baseline schedule captured after %d days",
+                                 self.baseline_capture.sample_days)
+        except Exception:
+            _LOGGER.warning("Baseline capture failed", exc_info=True)
 
         # ── Counterfactual simulation step ─────────────────────────
-        if self.baseline_capture.template is not None and outdoor_temp is not None:
-            baseline_setpoint = self.baseline_capture.get_baseline_setpoint(now)
-            baseline_mode = self.baseline_capture.get_baseline_mode(now)
-            if baseline_setpoint is not None and baseline_mode is not None:
-                cloud_cover = None
-                sun_elevation = None
-                if new_forecast:
-                    cloud_cover = new_forecast[0].cloud_cover
-                    sun_elevation = new_forecast[0].sun_elevation
 
-                # Precipitation flag from current forecast
-                is_precip = new_forecast[0].precipitation if new_forecast else False
+        try:
+            if self.baseline_capture.template is not None and outdoor_temp is not None:
+                baseline_setpoint = self.baseline_capture.get_baseline_setpoint(now)
+                baseline_mode = self.baseline_capture.get_baseline_mode(now)
+                if baseline_setpoint is not None and baseline_mode is not None:
+                    cloud_cover = None
+                    sun_elevation = None
+                    if new_forecast:
+                        cloud_cover = new_forecast[0].cloud_cover
+                        sun_elevation = new_forecast[0].sun_elevation
 
-                self.counterfactual.step(
-                    now=now,
-                    outdoor_temp=outdoor_temp,
-                    baseline_setpoint=baseline_setpoint,
-                    baseline_mode=baseline_mode,
-                    estimator=self.estimator,
-                    dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
-                    cloud_cover=cloud_cover,
-                    sun_elevation=sun_elevation,
-                    carbon_intensity=co2_intensity,
-                    electricity_rate=elec_rate,
-                    real_indoor_temp=thermo_state.indoor_temp,
-                    people_home_count=self.occupancy.get_people_home_count(),
-                    precipitation=is_precip,
-                    indoor_humidity=self._current_indoor_humidity,
-                )
+                    is_precip = new_forecast[0].precipitation if new_forecast else False
+
+                    self.counterfactual.step(
+                        now=now,
+                        outdoor_temp=outdoor_temp,
+                        baseline_setpoint=baseline_setpoint,
+                        baseline_mode=baseline_mode,
+                        estimator=self.estimator,
+                        dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                        cloud_cover=cloud_cover,
+                        sun_elevation=sun_elevation,
+                        carbon_intensity=co2_intensity,
+                        electricity_rate=elec_rate,
+                        real_indoor_temp=thermo_state.indoor_temp,
+                        people_home_count=self.occupancy.get_people_home_count(),
+                        precipitation=is_precip,
+                        indoor_humidity=self._current_indoor_humidity,
+                    )
+        except Exception:
+            _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
 
         # ── Performance profiler feed ─────────────────────────────
+        # The profiler handles hvac_mode="off" internally (sets _previous_*
+        # for interval tracking but doesn't record a delta). We must call it
+        # even when off so that the next non-off observation has valid timing.
+
         try:
             if (
                 thermo_state.indoor_temp is not None
                 and outdoor_temp is not None
-                and thermo_state.hvac_mode != "off"
             ):
-                solar_reading = self.sensor_hub.read_solar_production()
-                self.profiler.record_observation(
+                self._last_profiler_status = self.profiler.record_observation(
                     indoor_temp=thermo_state.indoor_temp,
                     outdoor_temp=outdoor_temp,
                     hvac_action=thermo_state.hvac_action,
@@ -906,20 +921,29 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     solar_irradiance=solar_reading.value if solar_reading else None,
                     now=now,
                 )
+            else:
+                self._last_profiler_status = "skipped_no_temps"
+                _LOGGER.warning(
+                    "Profiler skipped — missing temps: indoor=%s, outdoor=%s",
+                    thermo_state.indoor_temp, outdoor_temp,
+                )
         except Exception:
-            _LOGGER.debug("Profiler observation failed, skipping", exc_info=True)
+            self._last_profiler_status = "error"
+            _LOGGER.warning("Profiler observation failed", exc_info=True)
 
         # ── Update accuracy tier ───────────────────────────────────
+
         try:
             self._update_accuracy_tier()
         except Exception:
-            _LOGGER.debug("Accuracy tier update failed", exc_info=True)
+            _LOGGER.warning("Accuracy tier update failed", exc_info=True)
 
         # ── Model progress check (repair issue) ──────────────────
+
         try:
             self._check_model_progress()
         except Exception:
-            _LOGGER.debug("Model progress check failed", exc_info=True)
+            _LOGGER.warning("Model progress check failed", exc_info=True)
 
         # ── Periodic learning persistence ───────────────────────────
 
@@ -2454,6 +2478,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "profiler_confidence": round(self.profiler.confidence() * 100, 0),
             "profiler_active": self.profiler.confidence() >= 0.7,
             "profiler_observations": self.profiler.total_observations,
+            "profiler_status": self._last_profiler_status,
 
             # Calendar occupancy / pre-conditioning
             "occupancy_forecast_source": (

@@ -101,34 +101,29 @@ class PerformanceProfiler:
         aux_heat_active: bool = False,
         solar_irradiance: float | None = None,
         now: datetime | None = None,
-    ) -> None:
+    ) -> str:
         """Record a single observation from the coordinator update cycle.
 
-        Args:
-            indoor_temp: Current indoor temperature (°F).
-            outdoor_temp: Current outdoor temperature (°F).
-            hvac_action: Climate entity hvac_action ("cooling", "heating", "idle", etc).
-            hvac_mode: Climate entity hvac_mode ("cool", "heat", "heat_cool", "off").
-            aux_heat_active: Whether auxiliary/emergency heat is running.
-            solar_irradiance: Solar irradiance (W/m²), if available.
-            now: Current timestamp (UTC).
+        Returns a status string describing what happened:
+        "recorded", "skipped_off", "skipped_first", "skipped_interval",
+        "skipped_outlier_temp", "skipped_outlier_rate", "skipped_unclassified".
         """
         if now is None:
             now = datetime.now(timezone.utc)
 
         # Gate: discard when HVAC is off entirely
         if hvac_mode == "off":
-            _LOGGER.debug("Profiler: skipped — hvac_mode is 'off'")
+            _LOGGER.info("Profiler: skipped — hvac_mode is 'off'")
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
-            return
+            return "skipped_off"
 
         # Need a previous reading to compute delta
         if self._previous_indoor_temp is None or self._previous_timestamp is None:
-            _LOGGER.debug("Profiler: skipped — no previous reading (first observation)")
+            _LOGGER.info("Profiler: first observation — setting baseline")
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
-            return
+            return "skipped_first"
 
         # Compute interval
         interval_seconds = (now - self._previous_timestamp).total_seconds()
@@ -138,13 +133,13 @@ class PerformanceProfiler:
         min_interval = self._expected_interval * (1 - INTERVAL_TOLERANCE)
         max_interval = self._expected_interval * (1 + INTERVAL_TOLERANCE)
         if interval_minutes < min_interval or interval_minutes > max_interval:
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Profiler: skipped — interval %.1f min outside [%.1f, %.1f]",
                 interval_minutes, min_interval, max_interval,
             )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
-            return
+            return "skipped_interval"
 
         # Compute delta
         temp_change = indoor_temp - self._previous_indoor_temp
@@ -152,34 +147,45 @@ class PerformanceProfiler:
 
         # Outlier rejection
         if abs(temp_change) > OUTLIER_TEMP_CHANGE:
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Profiler: skipped — temp change %.2f°F exceeds threshold",
                 temp_change,
             )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
-            return
+            return "skipped_outlier_temp"
         if abs(delta_f_per_hr) > OUTLIER_DELTA_THRESHOLD:
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Profiler: skipped — delta rate %.1f°F/hr exceeds threshold",
                 delta_f_per_hr,
             )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
-            return
+            return "skipped_outlier_rate"
 
         # Classify mode
         mode = self._classify_mode(hvac_action, hvac_mode, aux_heat_active)
 
-        if mode is not None:
-            temp_bin = round(outdoor_temp)
-            if temp_bin not in self._bins[mode]:
-                self._bins[mode][temp_bin] = BinAccumulator()
-            self._bins[mode][temp_bin].add(delta_f_per_hr, solar_irradiance)
-            self._total_observations += 1
-
         self._previous_indoor_temp = indoor_temp
         self._previous_timestamp = now
+
+        if mode is None:
+            _LOGGER.info(
+                "Profiler: skipped — unclassified (action=%s, mode=%s)",
+                hvac_action, hvac_mode,
+            )
+            return "skipped_unclassified"
+
+        temp_bin = round(outdoor_temp)
+        if temp_bin not in self._bins[mode]:
+            self._bins[mode][temp_bin] = BinAccumulator()
+        self._bins[mode][temp_bin].add(delta_f_per_hr, solar_irradiance)
+        self._total_observations += 1
+        _LOGGER.info(
+            "Profiler: recorded %s observation at %d°F outdoor (total=%d)",
+            mode, temp_bin, self._total_observations,
+        )
+        return "recorded"
 
     @staticmethod
     def _classify_mode(
@@ -436,6 +442,11 @@ class PerformanceProfiler:
             "bins": bins_data,
             "total_observations": self._total_observations,
             "expected_interval": self._expected_interval,
+            "previous_indoor_temp": self._previous_indoor_temp,
+            "previous_timestamp": (
+                self._previous_timestamp.isoformat()
+                if self._previous_timestamp else None
+            ),
         }
 
     @classmethod
@@ -445,6 +456,13 @@ class PerformanceProfiler:
             expected_interval_minutes=data.get("expected_interval", 5.0),
         )
         profiler._total_observations = data.get("total_observations", 0)
+        profiler._previous_indoor_temp = data.get("previous_indoor_temp")
+        ts_str = data.get("previous_timestamp")
+        if ts_str:
+            try:
+                profiler._previous_timestamp = datetime.fromisoformat(ts_str)
+            except (ValueError, TypeError):
+                pass
 
         for mode in MODES:
             mode_bins = data.get("bins", {}).get(mode, {})

@@ -87,6 +87,7 @@ async def async_setup_entry(
         ProfilerConfidenceSensor(coordinator, entry),
         ProfilerActiveSensor(coordinator, entry),
         ProfilerObservationsSensor(coordinator, entry),
+        ProfilerStatusSensor(coordinator, entry),
         LearningProgressSensor(coordinator, entry),
         # New diagnostic sensors
         TacticalStateSensor(coordinator, entry),
@@ -1292,6 +1293,22 @@ class ProfilerObservationsSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("profiler_observations")
+
+
+class ProfilerStatusSensor(OptimizerBaseSensor):
+    """Last profiler observation result — shows why observations are or aren't recording."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "profiler_status", "Profiler Status")
+        self._attr_icon = "mdi:list-status"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("profiler_status")
 
 
 class LearningProgressSensor(OptimizerBaseSensor):
