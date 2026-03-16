@@ -90,7 +90,7 @@ _WIND_INFILTRATION_COEFF = 0.025
 # Physical bounds for parameter clamping
 BOUNDS = {
     IDX_R_INV: (0.01, 2.0),       # R: 0.5 to 100 °F·hr/BTU
-    IDX_R_INT_INV: (0.05, 5.0),   # R_int: 0.2 to 20
+    IDX_R_INT_INV: (0.5, 500.0),  # R_int: 0.002 to 2 — allows mass τ from ~20 hr to ~20,000 hr
     IDX_C_INV: (1e-5, 0.01),      # C_air: 100 to 100,000 BTU/°F
     IDX_C_MASS_INV: (1e-6, 0.001),  # C_mass: 1,000 to 1,000,000
     IDX_Q_COOL: (5000, 80000),    # 5k to 80k BTU/hr
@@ -163,7 +163,7 @@ class ThermalEstimator:
         """
         q_diag = np.array([
             0.01,    # T_air — moderate (sensor noise + model error)
-            0.005,   # T_mass — less noisy (thermal mass is stable)
+            0.01,    # T_mass — moderate (tracks air temp via coupling)
             1e-8,    # R_inv — very slow drift
             1e-8,    # R_int_inv — very slow drift
             1e-10,   # C_inv — extremely slow (thermal mass doesn't change)
@@ -188,7 +188,7 @@ class ThermalEstimator:
             indoor_temp,  # T_air
             indoor_temp,  # T_mass (assume equilibrium at start)
             0.10,         # R_inv → R ≈ 10 °F·hr/BTU (moderate insulation)
-            1.50,         # R_int_inv → R_int ≈ 0.67 (strong air↔mass coupling)
+            50.0,         # R_int_inv → R_int ≈ 0.02 (mass τ ≈ 200 hr at default C_mass)
             0.001,        # C_inv → C ≈ 1000 BTU/°F
             0.0001,       # C_mass_inv → C_mass ≈ 10,000 BTU/°F
             20000.0,      # Q_cool_base ≈ 20k BTU/hr (~1.7 ton)
@@ -200,7 +200,7 @@ class ThermalEstimator:
             0.1,       # T_air — we trust the thermostat
             25.0,      # T_mass — very uncertain (hidden state)
             0.01,      # R_inv — wide range possible
-            0.25,      # R_int_inv
+            100.0,     # R_int_inv — wide range to explore coupling strength
             1e-4,      # C_inv
             1e-6,      # C_mass_inv
             1e8,       # Q_cool_base — very uncertain without data
@@ -282,7 +282,7 @@ class ThermalEstimator:
             indoor_temp,
             indoor_temp,
             1.0 / r_envelope,    # R_inv
-            1.5,                  # R_int_inv — stronger air↔mass coupling default
+            50.0,                 # R_int_inv — physically plausible coupling (mass τ ≈ 200 hr)
             1.0 / c_air,         # C_inv
             1.0 / 10000.0,       # C_mass_inv (default)
             q_cool,
@@ -295,7 +295,7 @@ class ThermalEstimator:
             0.1,       # T_air
             10.0,      # T_mass — still uncertain
             0.002,     # R_inv — moderate confidence
-            0.1,       # R_int_inv — low confidence (not in Beestat)
+            50.0,      # R_int_inv — wide range (not in Beestat data)
             1e-5,      # C_inv — moderate confidence
             1e-7,      # C_mass_inv — low confidence
             q_cool * 0.3 * q_cool * 0.3,  # Q_cool — ±30% uncertainty

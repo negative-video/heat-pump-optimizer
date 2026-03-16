@@ -261,10 +261,18 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
         self._use_greybox = opts.get(CONF_USE_GREYBOX_MODEL, False)
 
+        # Read current indoor temp for EKF initialization (may not be available yet)
+        _init_state = ThermostatAdapter(hass, climate_entity_id).read_state()
+        _init_indoor = (
+            _init_state.indoor_temp
+            if _init_state.available and _init_state.indoor_temp is not None
+            else 72.0
+        )
+
         if initialization_mode == "learning":
             # Cold start: synthetic defaults, EKF learns from scratch
             self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start()
+            self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
             _LOGGER.info("Initialized in learning mode — model will calibrate over 2-3 weeks")
         elif initialization_mode == "import" and model_import_data:
             # Restore from exported model
@@ -281,7 +289,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.error("Failed to import model (%s) — falling back to defaults", type(err).__name__, exc_info=True)
                 self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start()
+                self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
         elif profile_path:
             # Beestat mode (default, backward compatible)
             try:
@@ -289,21 +297,23 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     self.model = PerformanceModel.from_file_data(profile_json)
                 else:
                     self.model = PerformanceModel.from_file(profile_path)
-                self.estimator = ThermalEstimator.from_beestat(self.model._raw)
+                self.estimator = ThermalEstimator.from_beestat(
+                    self.model._raw, indoor_temp=_init_indoor
+                )
             except (FileNotFoundError, OSError, KeyError, ValueError) as err:
                 _LOGGER.error(
                     "Failed to load Beestat profile '%s' (%s) — falling back to learning mode",
                     profile_path, err,
                 )
                 self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start()
+                self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
         else:
             # Beestat mode selected but no profile path — fall back to learning
             _LOGGER.warning(
                 "Beestat mode selected but no profile path configured — using learning mode"
             )
             self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start()
+            self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
 
         self.simulator = ThermalSimulator(self.model)
         self.optimizer = ScheduleOptimizer(self.model, self.simulator)
@@ -880,27 +890,36 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 )
 
         # ── Performance profiler feed ─────────────────────────────
-        if (
-            thermo_state.indoor_temp is not None
-            and outdoor_temp is not None
-            and thermo_state.hvac_mode != "off"
-        ):
-            solar_reading = self.sensor_hub.read_solar_production()
-            self.profiler.record_observation(
-                indoor_temp=thermo_state.indoor_temp,
-                outdoor_temp=outdoor_temp,
-                hvac_action=thermo_state.hvac_action,
-                hvac_mode=thermo_state.hvac_mode,
-                aux_heat_active=self._is_aux_heat_running(thermo_state),
-                solar_irradiance=solar_reading.value if solar_reading else None,
-                now=now,
-            )
+        try:
+            if (
+                thermo_state.indoor_temp is not None
+                and outdoor_temp is not None
+                and thermo_state.hvac_mode != "off"
+            ):
+                solar_reading = self.sensor_hub.read_solar_production()
+                self.profiler.record_observation(
+                    indoor_temp=thermo_state.indoor_temp,
+                    outdoor_temp=outdoor_temp,
+                    hvac_action=thermo_state.hvac_action,
+                    hvac_mode=thermo_state.hvac_mode,
+                    aux_heat_active=self._is_aux_heat_running(thermo_state),
+                    solar_irradiance=solar_reading.value if solar_reading else None,
+                    now=now,
+                )
+        except Exception:
+            _LOGGER.debug("Profiler observation failed, skipping", exc_info=True)
 
         # ── Update accuracy tier ───────────────────────────────────
-        self._update_accuracy_tier()
+        try:
+            self._update_accuracy_tier()
+        except Exception:
+            _LOGGER.debug("Accuracy tier update failed", exc_info=True)
 
         # ── Model progress check (repair issue) ──────────────────
-        self._check_model_progress()
+        try:
+            self._check_model_progress()
+        except Exception:
+            _LOGGER.debug("Model progress check failed", exc_info=True)
 
         # ── Periodic learning persistence ───────────────────────────
 
@@ -1064,6 +1083,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Restore original model references
             self.optimizer.model = original_model
             self.simulator.model = original_sim_model
+
+        # During learning mode, replace the simulation with a passive-only
+        # version so tactical predictions reflect reality (no HVAC control).
+        if schedule and self._is_learning_active() and schedule.simulation:
+            passive_sim = self.simulator.simulate(
+                thermo_state.indoor_temp,
+                forecast,
+                schedule.entries,
+                passive_only=True,
+            )
+            schedule.simulation = passive_sim
+            _LOGGER.debug(
+                "Learning mode: replaced schedule simulation with passive-only forecast"
+            )
 
         if schedule:
             self._active = True

@@ -24,6 +24,7 @@ class ThermalSimulator:
         forecast: list[ForecastPoint],
         schedule: list[ScheduleEntry],
         dt_minutes: float = 5.0,
+        passive_only: bool = False,
     ) -> list[SimulationPoint]:
         """Simulate indoor temp over the schedule period.
 
@@ -32,6 +33,8 @@ class ThermalSimulator:
             forecast: Outdoor temperature timeline
             schedule: Target temps and modes over time
             dt_minutes: Time step (default 5 min to match Beestat data)
+            passive_only: If True, use passive_drift() for all steps regardless
+                of schedule (for learning mode where HVAC is not controlled)
 
         Returns:
             List of SimulationPoints at each time step
@@ -52,7 +55,7 @@ class ThermalSimulator:
             outdoor_temp = self._interpolate_forecast(current_time, forecast)
             entry = self._get_schedule_entry(current_time, schedule)
 
-            if entry is None or entry.mode == "off":
+            if passive_only or entry is None or entry.mode == "off":
                 # No HVAC - passive drift only
                 hvac_running = False
                 rate = self.model.passive_drift(outdoor_temp)

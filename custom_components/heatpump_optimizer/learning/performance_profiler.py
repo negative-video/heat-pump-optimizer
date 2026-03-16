@@ -118,12 +118,14 @@ class PerformanceProfiler:
 
         # Gate: discard when HVAC is off entirely
         if hvac_mode == "off":
+            _LOGGER.debug("Profiler: skipped — hvac_mode is 'off'")
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return
 
         # Need a previous reading to compute delta
         if self._previous_indoor_temp is None or self._previous_timestamp is None:
+            _LOGGER.debug("Profiler: skipped — no previous reading (first observation)")
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return
@@ -136,6 +138,10 @@ class PerformanceProfiler:
         min_interval = self._expected_interval * (1 - INTERVAL_TOLERANCE)
         max_interval = self._expected_interval * (1 + INTERVAL_TOLERANCE)
         if interval_minutes < min_interval or interval_minutes > max_interval:
+            _LOGGER.debug(
+                "Profiler: skipped — interval %.1f min outside [%.1f, %.1f]",
+                interval_minutes, min_interval, max_interval,
+            )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return
@@ -146,10 +152,18 @@ class PerformanceProfiler:
 
         # Outlier rejection
         if abs(temp_change) > OUTLIER_TEMP_CHANGE:
+            _LOGGER.debug(
+                "Profiler: skipped — temp change %.2f°F exceeds threshold",
+                temp_change,
+            )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return
         if abs(delta_f_per_hr) > OUTLIER_DELTA_THRESHOLD:
+            _LOGGER.debug(
+                "Profiler: skipped — delta rate %.1f°F/hr exceeds threshold",
+                delta_f_per_hr,
+            )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return
@@ -182,7 +196,8 @@ class PerformanceProfiler:
                 return "auxiliary_heat_1"
             return "heat_1"
 
-        if hvac_action == "idle" and hvac_mode != "off":
+        # idle, None, or any unrecognized action with HVAC not off → passive drift
+        if hvac_mode != "off":
             return "resist"
 
         return None

@@ -156,9 +156,24 @@ class TestModeClassification:
         # but if it reaches here, idle + off should return None
         assert p._classify_mode("idle", "off", False) is None
 
-    def test_unknown_action(self):
+    def test_none_action_not_off(self):
+        """hvac_action=None with active hvac_mode → resist (passive drift)."""
         p = PerformanceProfiler()
-        assert p._classify_mode("drying", "cool", False) is None
+        assert p._classify_mode(None, "heat_cool", False) == "resist"
+
+    def test_none_action_off(self):
+        """hvac_action=None with hvac_mode='off' → None."""
+        p = PerformanceProfiler()
+        assert p._classify_mode(None, "off", False) is None
+
+    def test_unknown_action_not_off(self):
+        """Unrecognized hvac_action with active mode → resist (passive drift)."""
+        p = PerformanceProfiler()
+        assert p._classify_mode("drying", "cool", False) == "resist"
+
+    def test_unknown_action_off(self):
+        p = PerformanceProfiler()
+        assert p._classify_mode("drying", "off", False) is None
 
 
 class TestRecordObservation:
