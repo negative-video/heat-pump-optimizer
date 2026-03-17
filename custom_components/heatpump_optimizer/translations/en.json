@@ -280,7 +280,6 @@
           "active_states": "Active states",
           "power_entity": "Power sensor (optional)",
           "estimated_watts": "Power draw (W)",
-          "thermal_btu": "Thermal impact (BTU/hr)",
           "thermal_factor": "Thermal factor (BTU/W)"
         },
         "data_description": {
@@ -289,8 +288,7 @@
           "active_states": "Comma-separated state values that mean \"running\". Default: on. For sensors with specific states, use the exact string (e.g., \"compressor_running\").",
           "power_entity": "A sensor reporting real-time power in watts (e.g., from a smart plug). When available, live readings drive the thermal model for more accurate predictions.",
           "estimated_watts": "Power draw when running. This is the primary input for thermal impact calculation. If you have a power sensor, this serves as a fallback.",
-          "thermal_btu": "Thermal impact on your home in BTU/hr when active. Negative = cooling, positive = heating. Pre-filled from your selected type.",
-          "thermal_factor": "BTU per watt of thermal impact. 3.412 is correct for any appliance fully inside your home (all electricity becomes heat). Presets handle special cases like vented dryers automatically."
+          "thermal_factor": "BTU per watt of thermal impact. 3.412 is correct for any appliance fully inside your home (all electricity becomes heat). Negative values mean cooling (e.g., -9.14 for a heat pump water heater). Presets handle special cases automatically."
         }
       },
       "indoor_sensing": {

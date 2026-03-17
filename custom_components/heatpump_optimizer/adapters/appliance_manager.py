@@ -174,11 +174,16 @@ class ApplianceManager:
                 raw_factor = item.get("thermal_factor")
                 if raw_factor is not None:
                     thermal_factor = float(raw_factor)
-                elif item.get("power_entity") or item.get("estimated_watts"):
-                    # Watts-based appliance saved before thermal_factor existed
-                    thermal_factor = 3.412
                 else:
-                    thermal_factor = None
+                    # Legacy config without thermal_factor — back-calculate it
+                    btu = float(item.get("thermal_impact_btu", 0))
+                    watts = item.get("estimated_watts")
+                    if watts and float(watts) > 0:
+                        thermal_factor = btu / float(watts)
+                    elif item.get("power_entity"):
+                        thermal_factor = 3.412
+                    else:
+                        thermal_factor = None
                 configs.append(ApplianceConfig(
                     id=item["id"],
                     name=item["name"],
