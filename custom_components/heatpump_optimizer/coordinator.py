@@ -1383,26 +1383,35 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         baseline capture, and counterfactual simulator. Re-runs history bootstrap
         afterward so the fresh model starts learning immediately.
         """
-        _LOGGER.warning(
-            "Resetting learned model — clearing %d EKF observations, "
-            "profiler (%.0f%% confidence), and all learning state",
-            self.estimator._n_obs,
-            self.profiler.confidence * 100,
-        )
+        try:
+            _LOGGER.warning(
+                "Resetting learned model — clearing %d EKF observations, "
+                "profiler (%.0f%% confidence), and all learning state",
+                self.estimator._n_obs,
+                self.profiler.confidence() * 100,
+            )
+        except Exception:
+            _LOGGER.warning("Resetting learned model — clearing all learning state")
 
         # Read current indoor temp for cold start
-        thermo_state = self.thermostat.read_state()
-        init_indoor = (
-            thermo_state.indoor_temp
-            if thermo_state and thermo_state.available and thermo_state.indoor_temp
-            else 72.0
-        )
+        try:
+            thermo_state = self.thermostat.read_state()
+            init_indoor = (
+                thermo_state.indoor_temp
+                if thermo_state and thermo_state.available and thermo_state.indoor_temp
+                else 72.0
+            )
+        except Exception:
+            init_indoor = 72.0
 
         # Reset EKF thermal estimator
         self.estimator = ThermalEstimator.cold_start(indoor_temp=init_indoor)
         self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-        self.adaptive_model.cool_differential = self.model.cool_differential
-        self.adaptive_model.heat_differential = self.model.heat_differential
+        try:
+            self.adaptive_model.cool_differential = self.model.cool_differential
+            self.adaptive_model.heat_differential = self.model.heat_differential
+        except AttributeError:
+            pass
         self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
         self.strategic.greybox_optimizer = self.greybox_optimizer
 
@@ -1431,8 +1440,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Persist the clean state
         await self._persist_state()
 
-        # Kick off bootstrap + reoptimize
-        await self._try_history_bootstrap()
+        # Kick off bootstrap + reoptimize (best-effort)
+        try:
+            await self._try_history_bootstrap()
+        except Exception:
+            _LOGGER.warning("History bootstrap after reset failed", exc_info=True)
         await self.async_request_refresh()
 
         _LOGGER.info("Model reset complete — learning from scratch with fresh EKF")
