@@ -29,6 +29,7 @@ from .const import (
     CONF_CALENDAR_HOME_KEYWORDS,
     CONF_CARBON_WEIGHT,
     CONF_ATTIC_TEMP_ENTITY,
+    CONF_AUX_HEAT_OVERRIDE_ENTITY,
     CONF_CLIMATE_ENTITY,
     CONF_CO2_ENTITY,
     CONF_COMFORT_COOL_MAX,
@@ -723,6 +724,14 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain="weather", multiple=True
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_AUX_HEAT_OVERRIDE_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_AUX_HEAT_OVERRIDE_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=["binary_sensor", "input_boolean", "switch"],
                         ),
                     ),
                 }

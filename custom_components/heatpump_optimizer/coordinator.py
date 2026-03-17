@@ -39,6 +39,7 @@ from .const import (
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
     CONF_ATTIC_TEMP_ENTITY,
+    CONF_AUX_HEAT_OVERRIDE_ENTITY,
     CONF_CARBON_WEIGHT,
     CONF_CO2_ENTITY,
     CONF_COST_WEIGHT,
@@ -207,6 +208,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._tou_schedule: list[dict] | None = opts.get(CONF_TOU_SCHEDULE) or None
         self._carbon_weight: float = opts.get(CONF_CARBON_WEIGHT, DEFAULT_CARBON_WEIGHT)
         self._cost_weight: float = opts.get(CONF_COST_WEIGHT, DEFAULT_COST_WEIGHT)
+        self._aux_heat_override_entity_id: str | None = opts.get(CONF_AUX_HEAT_OVERRIDE_ENTITY) or None
 
         # SensorHub — centralized sensor reads with fallback chains
         self.sensor_hub = SensorHub(
@@ -2189,6 +2191,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     def _is_aux_heat_running(self, thermo_state) -> bool:
         """Check if auxiliary/emergency heat is currently running."""
+        # User-provided override entity takes priority
+        if self._aux_heat_override_entity_id:
+            state = self.hass.states.get(self._aux_heat_override_entity_id)
+            if state and state.state not in ("unavailable", "unknown"):
+                return state.state == "on"
+            # Override unavailable — fall through to thermostat detection
+
         if thermo_state is None or not thermo_state.available:
             return False
         action = getattr(thermo_state, "hvac_action", None)

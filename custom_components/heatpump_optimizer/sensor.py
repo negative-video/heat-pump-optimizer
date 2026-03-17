@@ -42,11 +42,7 @@ async def async_setup_entry(
         CoolingCapacitySensor(coordinator, entry),
         HeatingCapacitySensor(coordinator, entry),
         ThermalMassTempSensor(coordinator, entry),
-        # Grey-box model sensor
-        GreyBoxActiveSensor(coordinator, entry),
         # Diagnostic sensors
-        TacticalCorrectionSensor(coordinator, entry),
-        ForecastDeviationSensor(coordinator, entry),
         ScheduleSensor(coordinator, entry),
         # SensorHub diagnostic sensors
         OutdoorTempSourceSensor(coordinator, entry),
@@ -69,8 +65,6 @@ async def async_setup_entry(
         # Room-aware sensing (only meaningful when configured)
         OccupiedRoomsSensor(coordinator, entry),
         WeightedIndoorTempSensor(coordinator, entry),
-        # Resilience diagnostics
-        SourceHealthSensor(coordinator, entry),
         # Counterfactual digital twin savings sensors
         RuntimeSavingsTodaySensor(coordinator, entry),
         CopSavingsTodaySensor(coordinator, entry),
@@ -84,16 +78,8 @@ async def async_setup_entry(
         BaselineAvgIndoorTempSensor(coordinator, entry),
         BaselineConfidenceSensor(coordinator, entry),
         SavingsAccuracyTierSensor(coordinator, entry),
-        ProfilerConfidenceSensor(coordinator, entry),
-        ProfilerActiveSensor(coordinator, entry),
-        ProfilerObservationsSensor(coordinator, entry),
         ProfilerStatusSensor(coordinator, entry),
         LearningProgressSensor(coordinator, entry),
-        # New diagnostic sensors
-        TacticalStateSensor(coordinator, entry),
-        ModelBiasSensor(coordinator, entry),
-        ForecastAgeSensor(coordinator, entry),
-        SolarCoefficientSensor(coordinator, entry),
         # Auxiliary appliance sensors
         ApplianceThermalLoadSensor(coordinator, entry),
         ActiveAppliancesSensor(coordinator, entry),
@@ -140,6 +126,22 @@ class OptimizerPhaseSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("phase")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        attrs = {}
+        tc = self.coordinator.data.get("tactical_correction")
+        if tc is not None:
+            attrs["tactical_correction"] = tc
+        ts = self.coordinator.data.get("tactical_state")
+        if ts is not None:
+            attrs["tactical_state"] = ts
+        fd = self.coordinator.data.get("forecast_deviation")
+        if fd is not None:
+            attrs["forecast_deviation"] = fd
+        return attrs
 
 
 class TargetSetpointSensor(OptimizerBaseSensor):
@@ -231,6 +233,22 @@ class ModelAccuracySensor(OptimizerBaseSensor):
             return None
         return self.coordinator.data.get("model_accuracy_mae")
 
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        attrs = {}
+        bias = self.coordinator.data.get("model_bias")
+        if bias is not None:
+            attrs["model_bias"] = bias
+        age = self.coordinator.data.get("forecast_age_minutes")
+        if age is not None:
+            attrs["forecast_age_minutes"] = age
+        solar = self.coordinator.data.get("solar_coefficient")
+        if solar is not None:
+            attrs["solar_coefficient"] = solar
+        return attrs
+
 
 class SavingsPercentSensor(OptimizerBaseSensor):
     """Estimated runtime savings percentage from current schedule."""
@@ -268,6 +286,15 @@ class ModelConfidenceSensor(OptimizerBaseSensor):
             return None
         val = self.coordinator.data.get("kalman_confidence")
         return round(val * 100, 1) if val is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {
+            "using_adaptive_model": self.coordinator.data.get("using_adaptive_model", False),
+            "using_greybox_model": self.coordinator.data.get("using_greybox_model", False),
+        }
 
 
 class EnvelopeRValueSensor(OptimizerBaseSensor):
@@ -366,75 +393,7 @@ class ThermalMassTempSensor(OptimizerBaseSensor):
         return self.coordinator.data.get("kalman_mass_temp")
 
 
-class GreyBoxActiveSensor(OptimizerBaseSensor):
-    """Whether the grey-box LP optimizer is currently active."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "greybox_active", "Grey-Box Model Active")
-        self._attr_icon = "mdi:chart-timeline-variant-shimmer"
-
-    @property
-    def native_value(self) -> str | None:
-        if self.coordinator.data is None:
-            return None
-        active = self.coordinator.data.get("using_greybox_model", False)
-        return "Active" if active else "Inactive"
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        if self.coordinator.data is None:
-            return {}
-        return {
-            "using_adaptive_model": self.coordinator.data.get("using_adaptive_model", False),
-            "using_greybox_model": self.coordinator.data.get("using_greybox_model", False),
-            "kalman_confidence": self.coordinator.data.get("kalman_confidence"),
-            "kalman_observations": self.coordinator.data.get("kalman_observations"),
-        }
-
-
 # ── Diagnostic sensors ──────────────────────────────────────────────
-
-
-class TacticalCorrectionSensor(OptimizerBaseSensor):
-    """Current tactical correction being applied to the scheduled setpoint."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "tactical_correction", "Tactical Correction")
-        self._attr_device_class = SensorDeviceClass.TEMPERATURE
-        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 1
-        self._attr_icon = "mdi:tune-vertical"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("tactical_correction")
-
-
-class ForecastDeviationSensor(OptimizerBaseSensor):
-    """Max deviation between current forecast and optimization snapshot."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "forecast_deviation", "Forecast Deviation")
-        self._attr_device_class = SensorDeviceClass.TEMPERATURE
-        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 1
-        self._attr_icon = "mdi:weather-partly-cloudy"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("forecast_deviation")
 
 
 class ScheduleSensor(OptimizerBaseSensor):
@@ -521,6 +480,12 @@ class OutdoorTempSourceSensor(OptimizerBaseSensor):
         solar = self.coordinator.data.get("solar_irradiance")
         if solar is not None:
             attrs["solar_irradiance"] = round(solar, 0)
+        health = self.coordinator.data.get("source_health")
+        if health is not None:
+            attrs["source_health_status"] = health.get("status", "unknown")
+            attrs["source_health_healthy"] = health.get("healthy", 0)
+            attrs["source_health_total"] = health.get("total", 0)
+            attrs["source_health_sources"] = health.get("sources", {})
         return attrs
 
 
@@ -970,37 +935,6 @@ class WeightedIndoorTempSensor(OptimizerBaseSensor):
         }
 
 
-class SourceHealthSensor(OptimizerBaseSensor):
-    """Shows overall data source health: 'N/M healthy' or 'N/M degraded'."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "source_health", "Source Health")
-        self._attr_icon = "mdi:heart-pulse"
-
-    @property
-    def native_value(self) -> str | None:
-        if self.coordinator.data is None:
-            return None
-        health = self.coordinator.data.get("source_health")
-        if health is None:
-            return None
-        healthy = health.get("healthy", 0)
-        total = health.get("total", 0)
-        status = health.get("status", "unknown")
-        return f"{healthy}/{total} {status}"
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        if self.coordinator.data is None:
-            return {}
-        health = self.coordinator.data.get("source_health")
-        if health is None:
-            return {}
-        return health.get("sources", {})
-
-
 # ── Counterfactual Digital Twin Savings Sensors ────────────────────
 
 
@@ -1237,66 +1171,13 @@ class SavingsAccuracyTierSensor(OptimizerBaseSensor):
 # ── Performance Profiler sensors ─────────────────────────────────────
 
 
-class ProfilerConfidenceSensor(OptimizerBaseSensor):
-    """Overall profiler confidence (0-100%)."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "profiler_confidence", "Profiler Confidence")
-        self._attr_native_unit_of_measurement = "%"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:chart-bell-curve-cumulative"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("profiler_confidence")
-
-
-class ProfilerActiveSensor(OptimizerBaseSensor):
-    """Whether the profiler has replaced the default performance model."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "profiler_active", "Profiler Active")
-        self._attr_icon = "mdi:chart-areaspline"
-
-    @property
-    def native_value(self) -> str | None:
-        if self.coordinator.data is None:
-            return None
-        active = self.coordinator.data.get("profiler_active", False)
-        return "active" if active else "learning"
-
-
-class ProfilerObservationsSensor(OptimizerBaseSensor):
-    """Total number of observations accumulated by the profiler."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "profiler_observations", "Profiler Observations")
-        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
-        self._attr_icon = "mdi:counter"
-
-    @property
-    def native_value(self) -> int | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("profiler_observations")
-
-
 class ProfilerStatusSensor(OptimizerBaseSensor):
-    """Last profiler observation result — shows why observations are or aren't recording."""
+    """Profiler status with confidence, active state, and observation count as attributes."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "profiler_status", "Profiler Status")
+        super().__init__(coordinator, entry, "profiler_status", "Profiler")
         self._attr_icon = "mdi:list-status"
 
     @property
@@ -1304,6 +1185,20 @@ class ProfilerStatusSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("profiler_status")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        attrs = {}
+        conf = self.coordinator.data.get("profiler_confidence")
+        if conf is not None:
+            attrs["confidence"] = conf
+        attrs["active"] = self.coordinator.data.get("profiler_active", False)
+        obs = self.coordinator.data.get("profiler_observations")
+        if obs is not None:
+            attrs["observations"] = obs
+        return attrs
 
 
 class LearningProgressSensor(OptimizerBaseSensor):
@@ -1358,81 +1253,6 @@ class LearningProgressSensor(OptimizerBaseSensor):
                 "range unlocks after learning completes (~2-3 weeks)."
             )
         return attrs
-
-
-class TacticalStateSensor(OptimizerBaseSensor):
-    """Current state of the tactical controller (NORMAL/DISTURBED/THROTTLED)."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "tactical_state", "Tactical State")
-        self._attr_icon = "mdi:shield-check-outline"
-
-    @property
-    def native_value(self) -> str | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("tactical_state")
-
-
-class ModelBiasSensor(OptimizerBaseSensor):
-    """Mean signed error — positive = model over-predicts, negative = under-predicts."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "model_bias", "Model Bias")
-        self._attr_device_class = SensorDeviceClass.TEMPERATURE
-        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 2
-        self._attr_icon = "mdi:swap-vertical"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("model_bias")
-
-
-class ForecastAgeSensor(OptimizerBaseSensor):
-    """Minutes since the last fresh weather forecast was received."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "forecast_age", "Forecast Age")
-        self._attr_native_unit_of_measurement = "min"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_icon = "mdi:clock-alert-outline"
-        self._attr_suggested_display_precision = 0
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("forecast_age_minutes")
-
-
-class SolarCoefficientSensor(OptimizerBaseSensor):
-    """Learned cloud-cover / solar gain coefficient from SolarAdjuster."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "solar_coefficient", "Solar Coefficient"
-        )
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 3
-        self._attr_icon = "mdi:white-balance-sunny"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("solar_coefficient")
 
 
 class ApplianceThermalLoadSensor(OptimizerBaseSensor):

@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -128,6 +128,9 @@ CONF_DOOR_WINDOW_ENTITIES = "door_window_entities"
 # Buffer zone temperature sensors (optional — for boundary heat transfer)
 CONF_ATTIC_TEMP_ENTITY = "attic_temp_entity"
 CONF_CRAWLSPACE_TEMP_ENTITY = "crawlspace_temp_entity"
+
+# Aux heat override (optional — for thermostats that don't report aux heat)
+CONF_AUX_HEAT_OVERRIDE_ENTITY = "aux_heat_override_entity"
 
 # Occupancy (multi-entity, replaces singular CONF_OCCUPANCY_ENTITY)
 CONF_OCCUPANCY_ENTITIES = "occupancy_entities"
