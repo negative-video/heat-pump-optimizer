@@ -1589,124 +1589,172 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Auxiliary Appliances ──────────────────────────────────────────
 
-    async def async_step_appliances(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Configure auxiliary appliances that impact the thermal envelope."""
-        if user_input is not None:
-            appliances: list[dict[str, Any]] = []
-
-            # Parse dynamic appliance fields (up to 5 appliances)
-            for i in range(5):
-                name = user_input.get(f"appliance_{i}_name")
-                state_entity = user_input.get(f"appliance_{i}_state_entity")
-                if not name or not state_entity:
-                    continue
-
-                active_states_raw = user_input.get(f"appliance_{i}_active_states", "on")
-                active_states = [s.strip() for s in active_states_raw.split(",") if s.strip()]
-
-                thermal_btu = user_input.get(f"appliance_{i}_thermal_btu", 0.0)
-                estimated_watts = user_input.get(f"appliance_{i}_estimated_watts")
-                power_entity = user_input.get(f"appliance_{i}_power_entity")
-
-                # Generate a slug from the name
-                slug = name.lower().replace(" ", "_").replace("-", "_")[:32]
-
-                appliance: dict[str, Any] = {
-                    "id": slug,
-                    "name": name,
-                    "state_entity": state_entity,
-                    "active_states": active_states,
-                    "thermal_impact_btu": float(thermal_btu),
-                }
-                if estimated_watts:
-                    appliance["estimated_watts"] = float(estimated_watts)
-                if power_entity:
-                    appliance["power_entity"] = power_entity
-
-                appliances.append(appliance)
-
-            self._options[CONF_AUXILIARY_APPLIANCES] = json.dumps(appliances)
-            return self.async_create_entry(title="", data=self._options)
-
-        # Load existing appliances
-        existing: list[dict[str, Any]] = []
+    def _load_appliances(self) -> list[dict[str, Any]]:
+        """Load existing appliances from options."""
         raw = self._options.get(CONF_AUXILIARY_APPLIANCES)
         if raw:
             try:
-                existing = json.loads(raw)
+                return json.loads(raw)
             except (json.JSONDecodeError, TypeError):
                 pass
+        return []
 
-        # Exclude our own entities from the picker
-        own_eids = self._get_own_entity_ids()
+    def _save_appliances(self, appliances: list[dict[str, Any]]) -> None:
+        """Save appliances list to options."""
+        self._options[CONF_AUXILIARY_APPLIANCES] = json.dumps(appliances)
 
-        # Build form with up to 5 appliance slots (pre-filled from existing)
-        schema_dict: dict[Any, Any] = {}
-        for i in range(max(len(existing) + 1, 1)):
-            if i >= 5:
-                break
-            app = existing[i] if i < len(existing) else {}
+    async def async_step_appliances(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Appliance list — shows configured appliances with add/edit/remove."""
+        appliances = self._load_appliances()
 
-            schema_dict[vol.Optional(
-                f"appliance_{i}_name",
-                description={"suggested_value": app.get("name", "")},
-            )] = selector.TextSelector()
+        if user_input is not None:
+            action = user_input.get("appliance_action", "done")
+            if action == "add":
+                self._editing_appliance_index = None
+                return await self.async_step_appliance_edit()
+            if action == "done":
+                return self.async_create_entry(title="", data=self._options)
+            # "edit_N" or "remove_N"
+            if action.startswith("edit_"):
+                idx = int(action.split("_", 1)[1])
+                if 0 <= idx < len(appliances):
+                    self._editing_appliance_index = idx
+                    return await self.async_step_appliance_edit()
+            if action.startswith("remove_"):
+                idx = int(action.split("_", 1)[1])
+                if 0 <= idx < len(appliances):
+                    removed = appliances.pop(idx)
+                    self._save_appliances(appliances)
+                    _LOGGER.info("Removed appliance: %s", removed.get("name"))
+                return await self.async_step_appliances()
 
-            schema_dict[vol.Optional(
-                f"appliance_{i}_state_entity",
-                description={"suggested_value": app.get("state_entity", "")},
-            )] = selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    exclude_entities=own_eids,
-                ),
+        # Build menu options: edit/remove each existing, plus "Add" and "Done"
+        options = []
+        for i, app in enumerate(appliances):
+            name = app.get("name", f"Appliance {i+1}")
+            btu = app.get("thermal_impact_btu", 0)
+            btu_str = f"{btu:+.0f}" if btu else "0"
+            label = f"{name} ({btu_str} BTU/hr)"
+            options.append(
+                selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {label}")
             )
-
-            schema_dict[vol.Optional(
-                f"appliance_{i}_active_states",
-                description={"suggested_value": ", ".join(app.get("active_states", ["on"]))},
-            )] = selector.TextSelector()
-
-            schema_dict[vol.Optional(
-                f"appliance_{i}_thermal_btu",
-                description={"suggested_value": app.get("thermal_impact_btu", "")},
-            )] = selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=-10000,
-                    max=10000,
-                    step=100,
-                    unit_of_measurement="BTU/hr",
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
+            options.append(
+                selector.SelectOptionDict(value=f"remove_{i}", label=f"Remove: {name}")
             )
+        options.append(selector.SelectOptionDict(value="add", label="Add new appliance"))
+        options.append(selector.SelectOptionDict(value="done", label="Done"))
 
-            schema_dict[vol.Optional(
-                f"appliance_{i}_estimated_watts",
-                description={"suggested_value": app.get("estimated_watts", "")},
-            )] = selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=15000,
-                    step=50,
-                    unit_of_measurement="W",
-                    mode=selector.NumberSelectorMode.BOX,
-                ),
-            )
-
-            schema_dict[vol.Optional(
-                f"appliance_{i}_power_entity",
-                description={"suggested_value": app.get("power_entity", "")},
-            )] = selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    domain="sensor",
-                    exclude_entities=own_eids,
-                ),
-            )
+        description = "No appliances configured." if not appliances else (
+            f"{len(appliances)} appliance(s) configured."
+        )
 
         return self.async_show_form(
             step_id="appliances",
-            data_schema=vol.Schema(schema_dict),
+            data_schema=vol.Schema({
+                vol.Required("appliance_action", default="done"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=options,
+                        mode=selector.SelectSelectorMode.LIST,
+                    ),
+                ),
+            }),
+            description_placeholders={"appliance_summary": description},
+        )
+
+    async def async_step_appliance_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Add or edit a single appliance."""
+        appliances = self._load_appliances()
+        editing_idx = getattr(self, "_editing_appliance_index", None)
+        existing = appliances[editing_idx] if editing_idx is not None and editing_idx < len(appliances) else {}
+
+        if user_input is not None:
+            name = user_input.get("name", "").strip()
+            state_entity = user_input.get("state_entity", "")
+            if not name or not state_entity:
+                return await self.async_step_appliances()
+
+            active_states_raw = user_input.get("active_states", "on")
+            active_states = [s.strip() for s in active_states_raw.split(",") if s.strip()]
+            if not active_states:
+                active_states = ["on"]
+
+            slug = name.lower().replace(" ", "_").replace("-", "_")[:32]
+
+            appliance: dict[str, Any] = {
+                "id": existing.get("id", slug),
+                "name": name,
+                "state_entity": state_entity,
+                "active_states": active_states,
+                "thermal_impact_btu": float(user_input.get("thermal_btu", 0)),
+            }
+            estimated_watts = user_input.get("estimated_watts")
+            if estimated_watts is not None and estimated_watts > 0:
+                appliance["estimated_watts"] = float(estimated_watts)
+            power_entity = user_input.get("power_entity")
+            if power_entity:
+                appliance["power_entity"] = power_entity
+
+            if editing_idx is not None and editing_idx < len(appliances):
+                appliances[editing_idx] = appliance
+            else:
+                appliances.append(appliance)
+
+            self._save_appliances(appliances)
+            return await self.async_step_appliances()
+
+        own_eids = self._get_own_entity_ids()
+
+        return self.async_show_form(
+            step_id="appliance_edit",
+            data_schema=vol.Schema({
+                vol.Required(
+                    "name",
+                    description={"suggested_value": existing.get("name", "")},
+                ): selector.TextSelector(),
+                vol.Required(
+                    "state_entity",
+                    description={"suggested_value": existing.get("state_entity", "")},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(exclude_entities=own_eids),
+                ),
+                vol.Optional(
+                    "active_states",
+                    description={"suggested_value": ", ".join(existing.get("active_states", ["on"]))},
+                ): selector.TextSelector(),
+                vol.Required(
+                    "thermal_btu",
+                    description={"suggested_value": existing.get("thermal_impact_btu", 0)},
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-10000, max=10000, step=100,
+                        unit_of_measurement="BTU/hr",
+                        mode=selector.NumberSelectorMode.BOX,
+                    ),
+                ),
+                vol.Optional(
+                    "estimated_watts",
+                    description={"suggested_value": existing.get("estimated_watts")},
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0, max=15000, step=50,
+                        unit_of_measurement="W",
+                        mode=selector.NumberSelectorMode.BOX,
+                    ),
+                ),
+                vol.Optional(
+                    "power_entity",
+                    description={"suggested_value": existing.get("power_entity")},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain="sensor",
+                        exclude_entities=own_eids,
+                    ),
+                ),
+            }),
         )
 
     # ── Indoor Sensing ───────────────────────────────────────────────
