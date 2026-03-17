@@ -1601,9 +1601,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     APPLIANCE_PRESETS = {
         "hpwh": {
             "name": "Heat Pump Water Heater",
-            "thermal_impact_btu": -4000,
-            "estimated_watts": 500,
-            "active_states": ["compressor_running"],
+            "thermal_impact_btu": -3200,
+            "estimated_watts": 350,
+            "active_states": ["on"],
         },
         "electric_dryer": {
             "name": "Electric Dryer",
@@ -1735,7 +1735,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         preset_options = [
             selector.SelectOptionDict(
                 value="hpwh",
-                label="Heat pump water heater — cools your home (\u22124,000 BTU/hr)",
+                label="Heat pump water heater — cools your home (\u22123,200 BTU/hr)",
             ),
             selector.SelectOptionDict(
                 value="electric_dryer",

@@ -110,7 +110,7 @@
         "data": {
           "climate_entity": "Climate entity (thermostat)",
           "weather_entities": "Weather entities (first = primary, rest = fallback)",
-          "aux_heat_override_entity": "Aux heat indicator (optional)"
+          "aux_heat_override_entity": "Aux heat override sensor (optional)"
         },
         "data_description": {
           "aux_heat_override_entity": "A binary sensor or input_boolean that turns on when auxiliary/emergency heat is running. Use this if your thermostat doesn't report aux heat status. Create a template binary_sensor in Home Assistant with your detection logic (e.g., heating + high duct temperature) and select it here."
@@ -261,7 +261,7 @@
         "title": "Auxiliary Appliances",
         "description": "{appliance_summary}",
         "data": {
-          "appliance_action": "Action"
+          "appliance_action": "Choose an action"
         }
       },
       "appliance_preset": {
