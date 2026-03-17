@@ -8,7 +8,7 @@ import os
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import selector
 
@@ -1809,7 +1809,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             slug = name.lower().replace(" ", "_").replace("-", "_")[:32]
 
             estimated_watts = user_input.get("estimated_watts")
-            thermal_factor = user_input.get("thermal_factor")
+            thermal_factor = user_input.get("thermal_factor") or existing.get("thermal_factor")
             thermal_btu = user_input.get("thermal_btu")
 
             appliance: dict[str, Any] = {
@@ -1874,7 +1874,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
             vol.Required(
                 "estimated_watts",
-                description={"suggested_value": existing.get("estimated_watts", 0)},
+                default=existing.get("estimated_watts", 0),
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=0, max=15000, step=50,
@@ -1898,9 +1898,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             )
         else:
             # Watts-based: show thermal factor (pre-filled, rarely changed)
-            schema_fields[vol.Optional(
+            schema_fields[vol.Required(
                 "thermal_factor",
-                description={"suggested_value": existing.get("thermal_factor", 3.412)},
+                default=existing.get("thermal_factor", 3.412),
             )] = selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=-15, max=5, step=0.01,
