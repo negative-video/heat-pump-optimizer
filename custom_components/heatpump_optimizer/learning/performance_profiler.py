@@ -120,9 +120,11 @@ class PerformanceProfiler:
             self._previous_timestamp = now
             return "skipped_off"
 
-        # Gate: discard when significant appliance thermal load is active
-        # (e.g., a running HPWH would corrupt the profiler's temperature delta bins)
-        if abs(appliance_btu) > 500:
+        # Gate: discard when very large appliance thermal load is active
+        # (e.g., a HPWH at -3200 BTU/hr would corrupt the delta bins; normal
+        # indoor appliances at 500-2000 BTU/hr are small relative to HVAC output
+        # and are smoothed out by binned averaging)
+        if abs(appliance_btu) > 3000:
             _LOGGER.info(
                 "Profiler: skipped — auxiliary appliance active (%.0f BTU/hr)",
                 appliance_btu,
