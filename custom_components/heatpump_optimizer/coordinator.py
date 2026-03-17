@@ -926,6 +926,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 thermo_state.indoor_temp is not None
                 and outdoor_temp is not None
             ):
+                c_inv = self.estimator.C_inv
+                c_air = 1.0 / c_inv if c_inv > 0 else None
                 self._last_profiler_status = self.profiler.record_observation(
                     indoor_temp=thermo_state.indoor_temp,
                     outdoor_temp=outdoor_temp,
@@ -935,6 +937,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     solar_irradiance=solar_reading.value if solar_reading else None,
                     now=now,
                     appliance_btu=self.appliance_manager.total_thermal_impact_btu(),
+                    c_air=c_air,
                 )
             else:
                 self._last_profiler_status = "skipped_no_temps"

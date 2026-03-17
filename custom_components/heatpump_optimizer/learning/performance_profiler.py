@@ -102,13 +102,13 @@ class PerformanceProfiler:
         solar_irradiance: float | None = None,
         now: datetime | None = None,
         appliance_btu: float = 0.0,
+        c_air: float | None = None,
     ) -> str:
         """Record a single observation from the coordinator update cycle.
 
         Returns a status string describing what happened:
         "recorded", "skipped_off", "skipped_first", "skipped_interval",
-        "skipped_outlier_temp", "skipped_outlier_rate", "skipped_unclassified",
-        "skipped_appliance".
+        "skipped_outlier_temp", "skipped_outlier_rate", "skipped_unclassified".
         """
         if now is None:
             now = datetime.now(timezone.utc)
@@ -119,19 +119,6 @@ class PerformanceProfiler:
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return "skipped_off"
-
-        # Gate: discard when very large appliance thermal load is active
-        # (e.g., a HPWH at -3200 BTU/hr would corrupt the delta bins; normal
-        # indoor appliances at 500-2000 BTU/hr are small relative to HVAC output
-        # and are smoothed out by binned averaging)
-        if abs(appliance_btu) > 3000:
-            _LOGGER.info(
-                "Profiler: skipped — auxiliary appliance active (%.0f BTU/hr)",
-                appliance_btu,
-            )
-            self._previous_indoor_temp = indoor_temp
-            self._previous_timestamp = now
-            return "skipped_appliance"
 
         # Need a previous reading to compute delta
         if self._previous_indoor_temp is None or self._previous_timestamp is None:
@@ -156,9 +143,12 @@ class PerformanceProfiler:
             self._previous_timestamp = now
             return "skipped_interval"
 
-        # Compute delta
+        # Compute delta, subtracting known appliance contribution
         temp_change = indoor_temp - self._previous_indoor_temp
         delta_f_per_hr = temp_change / (interval_minutes / 60.0)
+        if appliance_btu != 0.0 and c_air is not None and c_air > 0:
+            appliance_drift = appliance_btu / c_air  # °F/hr from appliances
+            delta_f_per_hr -= appliance_drift
 
         # Outlier rejection
         if abs(temp_change) > OUTLIER_TEMP_CHANGE:
