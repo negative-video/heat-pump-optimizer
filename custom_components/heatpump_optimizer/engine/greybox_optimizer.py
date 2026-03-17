@@ -91,6 +91,7 @@ class GreyBoxOptimizer:
         weights: OptimizationWeights | None = None,
         people_home_count: int | None = None,
         indoor_humidity: float | None = None,
+        appliance_btu: float = 0.0,
     ) -> OptimizedSchedule:
         """Find optimal HVAC schedule using linear programming.
 
@@ -102,6 +103,7 @@ class GreyBoxOptimizer:
             weights: Multi-objective weights (energy, carbon, cost).
             people_home_count: Current occupant count (for internal gain scaling).
             indoor_humidity: Current indoor relative humidity (0-100).
+            appliance_btu: Net BTU/hr from auxiliary appliances (negative = cooling).
 
         Returns:
             OptimizedSchedule with entries, savings estimate, and simulation.
@@ -112,6 +114,7 @@ class GreyBoxOptimizer:
         # Store environmental context for use in thermal model
         self._people_home_count = people_home_count
         self._indoor_humidity = indoor_humidity
+        self._appliance_btu = appliance_btu
 
         # Group forecast into hourly bins
         hourly_forecast = self._bin_forecast_hourly(forecast)
@@ -283,7 +286,8 @@ class GreyBoxOptimizer:
             # Approximate air temp with passive drift
             Q_env = UA * (T_out - T_air)
             Q_int = R_int_inv * (T_mass[t] - T_air)
-            T_air += C_inv * (Q_env + Q_int + Q_internal) * _LP_DT_HOURS
+            Q_appliances = getattr(self, "_appliance_btu", 0.0)
+            T_air += C_inv * (Q_env + Q_int + Q_internal + Q_appliances) * _LP_DT_HOURS
 
             # Mass temp update
             Q_int_mass = R_int_inv * (T_air - T_mass[t])
@@ -331,7 +335,8 @@ class GreyBoxOptimizer:
             Q_int = R_int_inv * (T_mass[t] - T_air)
             # Include HVAC contribution from optimized duty
             Q_hvac = self._hvac_capacity(mode, hourly_forecast[t]["temp"], params)
-            T_air += C_inv * (Q_env + Q_int + Q_internal + u[t] * Q_hvac) * _LP_DT_HOURS
+            Q_appliances = getattr(self, "_appliance_btu", 0.0)
+            T_air += C_inv * (Q_env + Q_int + Q_internal + u[t] * Q_hvac + Q_appliances) * _LP_DT_HOURS
 
             Q_int_mass = R_int_inv * (T_air - T_mass[t])
             T_mass[t + 1] = T_mass[t] + C_mass_inv * Q_int_mass * _LP_DT_HOURS
@@ -412,7 +417,8 @@ class GreyBoxOptimizer:
                 solar_gain_btu=params.get("solar_gain_btu", _SOLAR_GAIN_BTU_FALLBACK),
             )
 
-            d[t] = C_inv * (Q_env + Q_int + Q_solar + Q_internal) * dt
+            Q_appliances = getattr(self, "_appliance_btu", 0.0)
+            d[t] = C_inv * (Q_env + Q_int + Q_solar + Q_internal + Q_appliances) * dt
             # Note: A already accounts for -UA*T_air and -R_int_inv*T_air
 
         return A, B, d

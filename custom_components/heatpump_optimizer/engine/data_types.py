@@ -342,6 +342,30 @@ class DailySavingsReport:
 
 
 @dataclass
+class ApplianceConfig:
+    """Configuration for a single auxiliary appliance that impacts the thermal envelope."""
+
+    id: str  # unique slug, e.g. "hpwh_garage"
+    name: str  # user-friendly name, e.g. "Heat Pump Water Heater"
+    state_entity: str  # entity_id to read state from (binary_sensor, water_heater, switch, sensor)
+    active_states: list[str]  # states meaning "running", e.g. ["on"] or ["Compressor Running"]
+    thermal_impact_btu: float  # BTU/hr when active (negative = cooling, e.g. -4000 for HPWH)
+    power_entity: str | None = None  # optional: sensor reporting W/kW (real-time power)
+    estimated_watts: float | None = None  # fallback power draw when active (e.g. 500W for HPWH)
+    humidity_impact: float | None = None  # %RH/hr (negative = dehumidify)
+    controllable: bool = False  # Phase 2: whether optimizer can schedule this appliance
+    control_entity: str | None = None  # Phase 2: entity for on/off control
+
+
+@dataclass
+class ApplianceState:
+    """Runtime state of a single auxiliary appliance."""
+
+    config: ApplianceConfig
+    is_active: bool = False
+    current_power_watts: float | None = None
+
+
 class ValidationReport:
     """Results from validating model predictions against observed data."""
     n_samples: int

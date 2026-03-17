@@ -327,6 +327,7 @@ class ThermalEstimator:
         attic_temp: float | None = None,
         crawlspace_temp: float | None = None,
         precipitation: bool = False,
+        appliance_btu: float = 0.0,
     ) -> float:
         """Run one EKF predict-update cycle.
 
@@ -347,6 +348,7 @@ class ThermalEstimator:
             attic_temp: Attic temperature in °F, or None.
             crawlspace_temp: Crawlspace temperature in °F, or None.
             precipitation: Whether it is currently raining/snowing.
+            appliance_btu: Net BTU/hr from auxiliary appliances (negative = cooling).
 
         Returns:
             Innovation (prediction error before update) in °F.
@@ -361,6 +363,7 @@ class ThermalEstimator:
         self._current_attic_temp = attic_temp
         self._current_crawlspace_temp = crawlspace_temp
         self._current_precipitation = precipitation
+        self._current_appliance_btu = appliance_btu
 
         # ── PREDICT ──────────────────────────────────────────────
         x_pred = self._predict_state(
@@ -506,10 +509,13 @@ class ThermalEstimator:
         # Q_env(T_air=0) = UA * infiltration * effective_outdoor
         # Q_int(T_air=0) = R_int_inv * T_mass
         # Q_boundary(T_air=0) = k_attic*T_attic + k_crawl*T_crawl (if present)
+        # Auxiliary appliance load (e.g., HPWH cooling = negative BTU/hr)
+        Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
+
         forcing_air = (
             UA * infiltration * effective_outdoor
             + R_int_inv * T_mass
-            + Q_hvac + Q_solar + Q_internal
+            + Q_hvac + Q_solar + Q_internal + Q_appliances
         )
         # Add boundary zone source terms (conductance × source temp)
         if attic_temp is not None:
@@ -597,7 +603,8 @@ class ThermalEstimator:
             Q_boundary += _K_CRAWLSPACE * (crawl_temp - T_air)
             k_boundary += _K_CRAWLSPACE
 
-        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal + Q_boundary
+        Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
+        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal + Q_boundary + Q_appliances
 
         F = np.eye(N_STATES)
         dt = dt_hours

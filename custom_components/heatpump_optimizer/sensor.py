@@ -94,6 +94,9 @@ async def async_setup_entry(
         ModelBiasSensor(coordinator, entry),
         ForecastAgeSensor(coordinator, entry),
         SolarCoefficientSensor(coordinator, entry),
+        # Auxiliary appliance sensors
+        ApplianceThermalLoadSensor(coordinator, entry),
+        ActiveAppliancesSensor(coordinator, entry),
     ]
     async_add_entities(entities)
 
@@ -347,7 +350,6 @@ class ThermalMassTempSensor(OptimizerBaseSensor):
     """Hidden thermal mass temperature (wall/slab temperature estimate)."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "thermal_mass_temp", "Thermal Mass Temperature")
@@ -368,7 +370,6 @@ class GreyBoxActiveSensor(OptimizerBaseSensor):
     """Whether the grey-box LP optimizer is currently active."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "greybox_active", "Grey-Box Model Active")
@@ -420,7 +421,6 @@ class ForecastDeviationSensor(OptimizerBaseSensor):
     """Max deviation between current forecast and optimization snapshot."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "forecast_deviation", "Forecast Deviation")
@@ -613,7 +613,7 @@ class SavingsKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "savings_kwh_today", "Energy Saved Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:lightning-bolt"
 
@@ -659,7 +659,7 @@ class SavingsCostTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "savings_cost_today", "Cost Saved Today")
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_native_unit_of_measurement = "$"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:currency-usd"
 
@@ -704,7 +704,7 @@ class SavingsCO2TodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "savings_co2_today", "CO2 Avoided Today")
         self._attr_native_unit_of_measurement = "g"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 0
         self._attr_icon = "mdi:molecule-co2"
 
@@ -748,13 +748,12 @@ class BaselineKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     """Estimated baseline energy usage today without optimizer (kWh)."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "baseline_kwh_today", "Baseline Energy Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:gauge"
 
@@ -769,13 +768,12 @@ class WorstCaseKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     """Worst-case energy usage today if HVAC ran 24/7 (kWh)."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "worst_case_kwh_today", "Worst Case Energy Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:gauge-full"
 
@@ -1035,7 +1033,7 @@ class CopSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "cop_savings_today", "COP Savings Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:speedometer"
 
@@ -1055,7 +1053,7 @@ class RateSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         super().__init__(coordinator, entry, "rate_savings_today", "Rate Arbitrage Savings Today")
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_native_unit_of_measurement = "$"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:cash-clock"
 
@@ -1074,7 +1072,7 @@ class CarbonShiftSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "carbon_shift_savings_today", "Carbon Shift Savings Today")
         self._attr_native_unit_of_measurement = "g"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 0
         self._attr_icon = "mdi:leaf"
 
@@ -1144,7 +1142,7 @@ class ComfortHoursGainedSensor(_DailyResetMixin, OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "comfort_hours_gained", "Comfort Hours Gained")
         self._attr_native_unit_of_measurement = "h"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 1
         self._attr_icon = "mdi:home-thermometer"
 
@@ -1162,7 +1160,7 @@ class BaselineComfortViolationsSensor(_DailyResetMixin, OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "baseline_comfort_violations", "Baseline Comfort Violations")
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 0
         self._attr_icon = "mdi:thermometer-alert"
 
@@ -1243,7 +1241,6 @@ class ProfilerConfidenceSensor(OptimizerBaseSensor):
     """Overall profiler confidence (0-100%)."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "profiler_confidence", "Profiler Confidence")
@@ -1263,7 +1260,6 @@ class ProfilerActiveSensor(OptimizerBaseSensor):
     """Whether the profiler has replaced the default performance model."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "profiler_active", "Profiler Active")
@@ -1281,7 +1277,6 @@ class ProfilerObservationsSensor(OptimizerBaseSensor):
     """Total number of observations accumulated by the profiler."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "profiler_observations", "Profiler Observations")
@@ -1385,7 +1380,6 @@ class ModelBiasSensor(OptimizerBaseSensor):
     """Mean signed error — positive = model over-predicts, negative = under-predicts."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "model_bias", "Model Bias")
@@ -1425,7 +1419,6 @@ class SolarCoefficientSensor(OptimizerBaseSensor):
     """Learned cloud-cover / solar gain coefficient from SolarAdjuster."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry):
         super().__init__(
@@ -1440,3 +1433,59 @@ class SolarCoefficientSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("solar_coefficient")
+
+
+class ApplianceThermalLoadSensor(OptimizerBaseSensor):
+    """Net thermal load from auxiliary appliances in BTU/hr."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "appliance_thermal_load", "Appliance Thermal Load"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_icon = "mdi:heat-wave"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("appliance_thermal_load_btu")
+
+
+class ActiveAppliancesSensor(OptimizerBaseSensor):
+    """Names of currently active auxiliary appliances."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "active_appliances", "Active Appliances"
+        )
+        self._attr_icon = "mdi:washing-machine"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        diag = self.coordinator.data.get("appliance_diagnostics")
+        if not diag:
+            return None
+        active = [a["name"] for a in diag.get("appliances", []) if a.get("active")]
+        return ", ".join(active) if active else "None"
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        if self.coordinator.data is None:
+            return None
+        diag = self.coordinator.data.get("appliance_diagnostics")
+        if not diag:
+            return None
+        return {
+            "configured_count": diag.get("configured_count", 0),
+            "active_count": diag.get("active_count", 0),
+            "total_thermal_impact_btu": diag.get("total_thermal_impact_btu", 0),
+            "appliances": diag.get("appliances", []),
+        }

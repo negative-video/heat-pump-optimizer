@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.6"
+VERSION = "0.1.7"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -166,6 +166,10 @@ DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES = 60
 # Departure profiles — pairs each person with their departure zone + travel sensor
 # Stored as JSON string: [{"person": "person.x", "zone": "zone.y", "travel_sensor": "sensor.z"}, ...]
 CONF_DEPARTURE_PROFILES = "departure_profiles"
+
+# Auxiliary appliances — appliances that impact the thermal envelope (e.g., HPWH, dryer)
+# Stored as JSON string: [{"id": "hpwh", "name": "...", "state_entity": "...", ...}, ...]
+CONF_AUXILIARY_APPLIANCES = "auxiliary_appliances"
 
 # Calendar/pre-conditioning events
 EVENT_PRECONDITIONING_START = f"{DOMAIN}_preconditioning_start"

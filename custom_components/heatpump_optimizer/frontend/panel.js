@@ -7,14 +7,14 @@
  * Receives `hass`, `narrow`, and `panel` properties from HA automatically.
  */
 
-const ENTITY_PREFIX = "heatpump_optimizer";
+const ENTITY_PREFIX = "heat_pump_optimizer";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/** Find the first entity whose ID ends with `_<suffix>`. */
+/** Find the optimizer entity whose ID contains the prefix and ends with `_<suffix>`. */
 function findEntity(states, suffix) {
   for (const id of Object.keys(states)) {
-    if (id.endsWith(`_${suffix}`)) return states[id];
+    if (id.includes(ENTITY_PREFIX) && id.endsWith(`_${suffix}`)) return states[id];
   }
   return null;
 }
@@ -127,6 +127,8 @@ function renderHeroStrip(states, hass) {
 
   const occupancy = findEntity(states, "occupancy_forecast");
   const power = findEntity(states, "net_hvac_power");
+  const applianceLoad = findEntity(states, "appliance_thermal_load");
+  const activeAppliances = findEntity(states, "active_appliances");
 
   const phaseVal = phase?.state || "unknown";
   const phaseInfo = PHASE_MAP[phaseVal] || { label: phaseVal, cls: "phase-idle" };
@@ -148,6 +150,16 @@ function renderHeroStrip(states, hass) {
   let powerChip = "";
   if (hasValue(power) && Number(power.state) > 0) {
     powerChip = `<span class="power-chip">${(Number(power.state) / 1000).toFixed(1)} kW</span>`;
+  }
+
+  // Appliance chip
+  let applianceChip = "";
+  if (hasValue(applianceLoad) && Number(applianceLoad.state) !== 0) {
+    const btu = Number(applianceLoad.state);
+    const names = activeAppliances?.state || "";
+    const label = names && names !== "None" ? names : `${Math.abs(btu).toLocaleString()} BTU/hr`;
+    const cls = btu < 0 ? "appliance-cooling" : "appliance-heating";
+    applianceChip = `<span class="appliance-chip ${cls}" title="${Math.abs(btu).toLocaleString()} BTU/hr">${label}</span>`;
   }
 
   // Tactical correction annotation
@@ -175,6 +187,7 @@ function renderHeroStrip(states, hass) {
           <span class="phase-badge ${phaseInfo.cls}">${phaseInfo.label}</span>
           ${occupancyChip}
           ${powerChip}
+          ${applianceChip}
         </div>
         <div class="hero-temps">
           <div class="hero-temp-item">
@@ -1445,7 +1458,7 @@ const PANEL_CSS = `
     gap: 6px;
     flex-wrap: wrap;
   }
-  .occupancy-chip, .power-chip {
+  .occupancy-chip, .power-chip, .appliance-chip {
     padding: 4px 10px;
     border-radius: 12px;
     font-size: 11px;
@@ -1454,6 +1467,8 @@ const PANEL_CSS = `
   .occ-home { background: var(--green-light); color: var(--green); }
   .occ-away { background: color-mix(in srgb, var(--text-secondary) 12%, transparent); color: var(--text-secondary); }
   .power-chip { background: color-mix(in srgb, var(--orange) 12%, transparent); color: var(--orange); }
+  .appliance-cooling { background: color-mix(in srgb, var(--blue) 12%, transparent); color: var(--blue); }
+  .appliance-heating { background: color-mix(in srgb, var(--red) 12%, transparent); color: var(--red); }
 
   /* ── Environment Card ── */
   .env-card { }

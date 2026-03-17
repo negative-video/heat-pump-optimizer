@@ -1,3 +1,13 @@
+reset_model:
+  name: Reset Learned Model
+  description: >-
+    Fully reset the learned thermal model, performance profiler, and all learning
+    state back to a fresh cold-start. The EKF, profiler bins, model tracker, solar
+    adjuster, baseline capture, and counterfactual simulator are all cleared.
+    History bootstrap is re-run immediately so the model begins relearning from
+    recorder history. Use this after making significant changes (e.g., adding
+    appliance corrections) that would make the old learned parameters inaccurate.
+
 rebootstrap:
   name: Re-bootstrap from History
   description: >-

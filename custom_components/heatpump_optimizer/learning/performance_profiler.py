@@ -101,12 +101,14 @@ class PerformanceProfiler:
         aux_heat_active: bool = False,
         solar_irradiance: float | None = None,
         now: datetime | None = None,
+        appliance_btu: float = 0.0,
     ) -> str:
         """Record a single observation from the coordinator update cycle.
 
         Returns a status string describing what happened:
         "recorded", "skipped_off", "skipped_first", "skipped_interval",
-        "skipped_outlier_temp", "skipped_outlier_rate", "skipped_unclassified".
+        "skipped_outlier_temp", "skipped_outlier_rate", "skipped_unclassified",
+        "skipped_appliance".
         """
         if now is None:
             now = datetime.now(timezone.utc)
@@ -117,6 +119,17 @@ class PerformanceProfiler:
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
             return "skipped_off"
+
+        # Gate: discard when significant appliance thermal load is active
+        # (e.g., a running HPWH would corrupt the profiler's temperature delta bins)
+        if abs(appliance_btu) > 500:
+            _LOGGER.info(
+                "Profiler: skipped — auxiliary appliance active (%.0f BTU/hr)",
+                appliance_btu,
+            )
+            self._previous_indoor_temp = indoor_temp
+            self._previous_timestamp = now
+            return "skipped_appliance"
 
         # Need a previous reading to compute delta
         if self._previous_indoor_temp is None or self._previous_timestamp is None:

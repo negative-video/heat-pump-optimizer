@@ -19,6 +19,7 @@ from .const import (
     AGGRESSIVENESS_BALANCED,
     AGGRESSIVENESS_CONSERVATIVE,
     CONF_AREA_SENSOR_CONFIG,
+    CONF_AUXILIARY_APPLIANCES,
     CONF_AWAY_COMFORT_DELTA,
     CONF_BAROMETRIC_PRESSURE_ENTITY,
     CONF_CALENDAR_AWAY_KEYWORDS,
@@ -665,7 +666,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["equipment", "outdoor_sensors", "indoor_sensing", "presence", "energy", "behavior", "comfort", "schedule"],
+            menu_options=["equipment", "outdoor_sensors", "indoor_sensing", "presence", "energy", "behavior", "comfort", "schedule", "appliances"],
         )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -1584,6 +1585,128 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
+        )
+
+    # ── Auxiliary Appliances ──────────────────────────────────────────
+
+    async def async_step_appliances(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure auxiliary appliances that impact the thermal envelope."""
+        if user_input is not None:
+            appliances: list[dict[str, Any]] = []
+
+            # Parse dynamic appliance fields (up to 5 appliances)
+            for i in range(5):
+                name = user_input.get(f"appliance_{i}_name")
+                state_entity = user_input.get(f"appliance_{i}_state_entity")
+                if not name or not state_entity:
+                    continue
+
+                active_states_raw = user_input.get(f"appliance_{i}_active_states", "on")
+                active_states = [s.strip() for s in active_states_raw.split(",") if s.strip()]
+
+                thermal_btu = user_input.get(f"appliance_{i}_thermal_btu", 0.0)
+                estimated_watts = user_input.get(f"appliance_{i}_estimated_watts")
+                power_entity = user_input.get(f"appliance_{i}_power_entity")
+
+                # Generate a slug from the name
+                slug = name.lower().replace(" ", "_").replace("-", "_")[:32]
+
+                appliance: dict[str, Any] = {
+                    "id": slug,
+                    "name": name,
+                    "state_entity": state_entity,
+                    "active_states": active_states,
+                    "thermal_impact_btu": float(thermal_btu),
+                }
+                if estimated_watts:
+                    appliance["estimated_watts"] = float(estimated_watts)
+                if power_entity:
+                    appliance["power_entity"] = power_entity
+
+                appliances.append(appliance)
+
+            self._options[CONF_AUXILIARY_APPLIANCES] = json.dumps(appliances)
+            return self.async_create_entry(title="", data=self._options)
+
+        # Load existing appliances
+        existing: list[dict[str, Any]] = []
+        raw = self._options.get(CONF_AUXILIARY_APPLIANCES)
+        if raw:
+            try:
+                existing = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Exclude our own entities from the picker
+        own_eids = self._get_own_entity_ids()
+
+        # Build form with up to 5 appliance slots (pre-filled from existing)
+        schema_dict: dict[Any, Any] = {}
+        for i in range(max(len(existing) + 1, 1)):
+            if i >= 5:
+                break
+            app = existing[i] if i < len(existing) else {}
+
+            schema_dict[vol.Optional(
+                f"appliance_{i}_name",
+                description={"suggested_value": app.get("name", "")},
+            )] = selector.TextSelector()
+
+            schema_dict[vol.Optional(
+                f"appliance_{i}_state_entity",
+                description={"suggested_value": app.get("state_entity", "")},
+            )] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    exclude_entities=own_eids,
+                ),
+            )
+
+            schema_dict[vol.Optional(
+                f"appliance_{i}_active_states",
+                description={"suggested_value": ", ".join(app.get("active_states", ["on"]))},
+            )] = selector.TextSelector()
+
+            schema_dict[vol.Optional(
+                f"appliance_{i}_thermal_btu",
+                description={"suggested_value": app.get("thermal_impact_btu", "")},
+            )] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-10000,
+                    max=10000,
+                    step=100,
+                    unit_of_measurement="BTU/hr",
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            )
+
+            schema_dict[vol.Optional(
+                f"appliance_{i}_estimated_watts",
+                description={"suggested_value": app.get("estimated_watts", "")},
+            )] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=15000,
+                    step=50,
+                    unit_of_measurement="W",
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            )
+
+            schema_dict[vol.Optional(
+                f"appliance_{i}_power_entity",
+                description={"suggested_value": app.get("power_entity", "")},
+            )] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    exclude_entities=own_eids,
+                ),
+            )
+
+        return self.async_show_form(
+            step_id="appliances",
+            data_schema=vol.Schema(schema_dict),
         )
 
     # ── Indoor Sensing ───────────────────────────────────────────────

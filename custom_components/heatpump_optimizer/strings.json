@@ -100,7 +100,8 @@
           "energy": "Energy & cost tracking",
           "behavior": "Optimizer behavior",
           "comfort": "Temperature boundaries",
-          "schedule": "Calendar scheduling & pre-conditioning"
+          "schedule": "Calendar scheduling & pre-conditioning",
+          "appliances": "Auxiliary appliances"
         }
       },
       "equipment": {
@@ -251,6 +252,11 @@
           "calendar_default_mode": "Occupancy mode to assume when there is no calendar event. Most users should leave this as 'home'.",
           "calendar_home_keywords": "Comma-separated keywords in event titles that mean someone is home (e.g., 'WFH, Remote, Home'). Only useful if your default mode is 'away'."
         }
+      },
+      "appliances": {
+        "title": "Auxiliary Appliances",
+        "description": "Configure appliances that heat or cool your home (e.g., heat pump water heater, dryer, oven). The optimizer accounts for their thermal impact to improve predictions. Leave blank fields empty to skip an appliance slot.\n\n**Thermal impact:** Negative BTU/hr = cooling (e.g., -4000 for HPWH), Positive = heating (e.g., +3000 for dryer).\n**Estimated watts:** Approximate power draw when running — used for energy accounting when no real-time power sensor is available.",
+        "data": {}
       },
       "indoor_sensing": {
         "title": "Indoor Sensing",

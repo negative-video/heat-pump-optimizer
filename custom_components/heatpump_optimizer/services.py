@@ -22,6 +22,7 @@ SERVICE_EXPORT_MODEL = "export_model"
 SERVICE_IMPORT_MODEL = "import_model"
 SERVICE_SET_CONSTRAINT = "set_constraint"
 SERVICE_REBOOTSTRAP = "rebootstrap"
+SERVICE_RESET_MODEL = "reset_model"
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -108,6 +109,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                 source=source,
             )
 
+    async def handle_reset_model(call: ServiceCall) -> None:
+        coordinator = await _get_coordinator()
+        if coordinator:
+            _LOGGER.info("Service call: reset learned model")
+            await coordinator.async_reset_model()
+
     async def handle_rebootstrap(call: ServiceCall) -> None:
         coordinator = await _get_coordinator()
         if coordinator:
@@ -116,6 +123,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             await coordinator._try_history_bootstrap()
             await coordinator.async_request_refresh()
 
+    hass.services.async_register(DOMAIN, SERVICE_RESET_MODEL, handle_reset_model)
     hass.services.async_register(DOMAIN, SERVICE_REBOOTSTRAP, handle_rebootstrap)
     hass.services.async_register(DOMAIN, SERVICE_FORCE_REOPTIMIZE, handle_force_reoptimize)
     hass.services.async_register(DOMAIN, SERVICE_PAUSE, handle_pause)
@@ -169,4 +177,5 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_EXPORT_MODEL)
     hass.services.async_remove(DOMAIN, SERVICE_IMPORT_MODEL)
     hass.services.async_remove(DOMAIN, SERVICE_SET_CONSTRAINT)
+    hass.services.async_remove(DOMAIN, SERVICE_RESET_MODEL)
     hass.services.async_remove(DOMAIN, SERVICE_REBOOTSTRAP)

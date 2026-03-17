@@ -104,6 +104,7 @@ class StrategicPlanner:
         occupancy_timeline: list[OccupancyForecastPoint] | None = None,
         people_home_count: int | None = None,
         indoor_humidity: float | None = None,
+        appliance_btu: float = 0.0,
     ) -> OptimizedSchedule | None:
         """Run the optimizer and update internal state.
 
@@ -153,6 +154,7 @@ class StrategicPlanner:
                     indoor_temp, forecast, comfort, mode,
                     people_home_count=people_home_count,
                     indoor_humidity=indoor_humidity,
+                    appliance_btu=appliance_btu,
                 )
             else:
                 schedule = self.optimizer.optimize_setpoints(

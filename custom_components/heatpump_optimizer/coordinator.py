@@ -28,6 +28,7 @@ from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.calendar_occupancy import CalendarOccupancyAdapter
 from .adapters.forecast import async_get_forecast, async_get_forecast_multi, enrich_forecast_with_grid_data, populate_sun_elevation
 from .adapters.occupancy import OccupancyAdapter, OccupancyMode
+from .adapters.appliance_manager import ApplianceManager
 from .adapters.sensor_hub import SensorHub
 from .adapters.thermostat import ThermostatAdapter
 from .const import (
@@ -42,6 +43,7 @@ from .const import (
     CONF_CO2_ENTITY,
     CONF_COST_WEIGHT,
     CONF_CRAWLSPACE_TEMP_ENTITY,
+    CONF_AUXILIARY_APPLIANCES,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
@@ -141,7 +143,7 @@ from .savings_tracker import SavingsTracker, TIER_LEARNING, TIER_ESTIMATED, TIER
 _LOGGER = logging.getLogger(__name__)
 
 # How often to persist learned parameters
-LEARNING_PERSIST_INTERVAL_HOURS = 6
+LEARNING_PERSIST_INTERVAL_HOURS = 1
 
 
 class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
@@ -229,6 +231,16 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             rate_entity=self._rate_entity_id,
             flat_rate=self._flat_rate,
         )
+
+        # Auxiliary appliance manager (optional — HPWH, dryer, etc.)
+        self.appliance_manager = ApplianceManager(
+            hass, opts.get(CONF_AUXILIARY_APPLIANCES)
+        )
+        if self.appliance_manager.configured:
+            _LOGGER.info(
+                "Auxiliary appliances configured: %d appliance(s)",
+                len(self.appliance_manager._configs),
+            )
 
         # Room-aware area occupancy manager (optional)
         self.area_manager: AreaOccupancyManager | None = None
@@ -920,6 +932,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     aux_heat_active=self._is_aux_heat_running(thermo_state),
                     solar_irradiance=solar_reading.value if solar_reading else None,
                     now=now,
+                    appliance_btu=self.appliance_manager.total_thermal_impact_btu(),
                 )
             else:
                 self._last_profiler_status = "skipped_no_temps"
@@ -1102,6 +1115,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 occupancy_timeline,
                 people_count,
                 self._current_indoor_humidity,
+                self.appliance_manager.total_thermal_impact_btu(),
             )
         finally:
             # Restore original model references
@@ -1361,6 +1375,67 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         return self._occupancy_timeline
 
     # ── Service call handlers ───────────────────────────────────────
+
+    async def async_reset_model(self) -> None:
+        """Reset the learned thermal model and profiler to a fresh state (service call).
+
+        Clears the EKF state, performance profiler, model tracker, solar adjuster,
+        baseline capture, and counterfactual simulator. Re-runs history bootstrap
+        afterward so the fresh model starts learning immediately.
+        """
+        _LOGGER.warning(
+            "Resetting learned model — clearing %d EKF observations, "
+            "profiler (%.0f%% confidence), and all learning state",
+            self.estimator._n_obs,
+            self.profiler.confidence * 100,
+        )
+
+        # Read current indoor temp for cold start
+        thermo_state = self.thermostat.read_state()
+        init_indoor = (
+            thermo_state.indoor_temp
+            if thermo_state and thermo_state.available and thermo_state.indoor_temp
+            else 72.0
+        )
+
+        # Reset EKF thermal estimator
+        self.estimator = ThermalEstimator.cold_start(indoor_temp=init_indoor)
+        self.adaptive_model = AdaptivePerformanceModel(self.estimator)
+        self.adaptive_model.cool_differential = self.model.cool_differential
+        self.adaptive_model.heat_differential = self.model.heat_differential
+        self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+        self.strategic.greybox_optimizer = self.greybox_optimizer
+
+        # Reset profiler, model tracker, solar adjuster
+        self.profiler = PerformanceProfiler()
+        self.model_tracker = ModelTracker()
+        self.solar_adjuster = SolarAdjuster(latitude=self._get_latitude())
+
+        # Reset baseline capture and counterfactual
+        self.baseline_capture = BaselineCapture()
+        self.counterfactual = CounterfactualSimulator(
+            deadband=self._thermostat_deadband
+        )
+
+        # Reset learning flags
+        self._confidence_threshold_reached = False
+        self._last_model_alert = False
+        self._last_accuracy_tier = TIER_LEARNING
+        self._baseline_complete_fired = False
+        self._last_profiler_status = "pending"
+
+        # Re-run history bootstrap for immediate learning
+        self._history_bootstrap_completed = False
+        self._history_bootstrap_result = None
+
+        # Persist the clean state
+        await self._persist_state()
+
+        # Kick off bootstrap + reoptimize
+        await self._try_history_bootstrap()
+        await self.async_request_refresh()
+
+        _LOGGER.info("Model reset complete — learning from scratch with fresh EKF")
 
     async def async_force_reoptimize(self) -> None:
         """Force immediate re-optimization (service call)."""
@@ -1640,6 +1715,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             if abs((closest_pt.time - now).total_seconds()) < 7200:
                 is_precipitation = closest_pt.precipitation
 
+        # Auxiliary appliance thermal load
+        self.appliance_manager.update()
+        appliance_btu = self.appliance_manager.total_thermal_impact_btu()
+
         # Use multi-sensor averaged temp for better EKF convergence
         observed = getattr(self, "_effective_indoor_temp", None) or thermo_state.indoor_temp
         innovation = self.estimator.update(
@@ -1658,6 +1737,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             attic_temp=attic_reading.value if attic_reading else None,
             crawlspace_temp=crawlspace_reading.value if crawlspace_reading else None,
             precipitation=is_precipitation,
+            appliance_btu=appliance_btu,
         )
 
         if self.estimator._n_obs % 100 == 0:
@@ -2512,6 +2592,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
             # Weather forecast for panel (enables chart during learning)
             "weather_forecast": self._build_weather_forecast(),
+
+            # Auxiliary appliances
+            "appliance_thermal_load_btu": self.appliance_manager.total_thermal_impact_btu(),
+            "appliance_diagnostics": self.appliance_manager.get_diagnostics(),
         }
 
     def _next_transition_info(self) -> dict[str, str] | None:
