@@ -255,29 +255,36 @@
       },
       "appliances": {
         "title": "Auxiliary Appliances",
-        "description": "{appliance_summary}\n\nSelect an appliance to edit or remove, or add a new one.",
+        "description": "{appliance_summary}",
         "data": {
           "appliance_action": "Action"
         }
       },
+      "appliance_preset": {
+        "title": "Choose Appliance Type",
+        "description": "Pick a common appliance type to pre-fill typical values, or choose Custom to enter your own.\n\nEach preset provides default thermal impact (BTU/hr) and power draw estimates. You'll configure the state entity (the sensor that tells HA when it's running) on the next screen.",
+        "data": {
+          "appliance_preset": "Appliance type"
+        }
+      },
       "appliance_edit": {
         "title": "Configure Appliance",
-        "description": "Set up an appliance that heats or cools your home. Negative BTU/hr = cooling (e.g., -4000 for a heat pump water heater), positive = heating (e.g., +3000 for a dryer).",
+        "description": "Configure the appliance details. Negative BTU/hr means the appliance cools your home (e.g., a heat pump water heater extracts heat from the air). Positive means it adds heat (e.g., a dryer or space heater).",
         "data": {
           "name": "Name",
           "state_entity": "State entity",
           "active_states": "Active states",
           "thermal_btu": "Thermal impact (BTU/hr)",
           "estimated_watts": "Estimated power draw (W)",
-          "power_entity": "Power sensor"
+          "power_entity": "Power sensor (optional)"
         },
         "data_description": {
           "name": "A short name for this appliance (e.g., \"Water Heater\", \"Dryer\").",
-          "state_entity": "The entity that indicates whether this appliance is running (binary_sensor, switch, water_heater, or sensor).",
-          "active_states": "Comma-separated state values that mean \"running\". Default: \"on\". For a sensor, use the exact state string (e.g., \"Compressor Running\").",
-          "thermal_btu": "Thermal impact on your home in BTU/hr when active. Negative values = cooling, positive = heating.",
-          "estimated_watts": "Approximate power draw when running. Used for energy accounting when no real-time power sensor is available.",
-          "power_entity": "Optional sensor reporting real-time power in watts (e.g., a smart plug). Overrides estimated watts when available."
+          "state_entity": "The entity that reports whether this appliance is running — a binary_sensor, switch, water_heater, or sensor.",
+          "active_states": "Comma-separated state values that mean \"running\". Default: on. For sensors with specific states, use the exact string (e.g., \"compressor_running\").",
+          "thermal_btu": "Thermal impact on your home in BTU/hr when active. Negative = cooling, positive = heating. Pre-filled from your selected type.",
+          "estimated_watts": "Approximate power draw when running. Used for energy tracking when no real-time power sensor is available.",
+          "power_entity": "A sensor reporting real-time power in watts (e.g., from a smart plug). Leave empty if not available."
         }
       },
       "indoor_sensing": {

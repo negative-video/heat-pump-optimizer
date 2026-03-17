@@ -1589,6 +1589,39 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Auxiliary Appliances ──────────────────────────────────────────
 
+    APPLIANCE_PRESETS = {
+        "hpwh": {
+            "name": "Heat Pump Water Heater",
+            "thermal_impact_btu": -4000,
+            "estimated_watts": 500,
+            "active_states": ["compressor_running"],
+        },
+        "electric_dryer": {
+            "name": "Electric Dryer",
+            "thermal_impact_btu": 3000,
+            "estimated_watts": 5000,
+            "active_states": ["on"],
+        },
+        "space_heater": {
+            "name": "Space Heater",
+            "thermal_impact_btu": 1500,
+            "estimated_watts": 1500,
+            "active_states": ["on"],
+        },
+        "media_center": {
+            "name": "Media Center / Gaming PC",
+            "thermal_impact_btu": 500,
+            "estimated_watts": 300,
+            "active_states": ["on"],
+        },
+        "custom": {
+            "name": "",
+            "thermal_impact_btu": 0,
+            "estimated_watts": 0,
+            "active_states": ["on"],
+        },
+    }
+
     def _load_appliances(self) -> list[dict[str, Any]]:
         """Load existing appliances from options."""
         raw = self._options.get(CONF_AUXILIARY_APPLIANCES)
@@ -1606,17 +1639,17 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     async def async_step_appliances(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Appliance list — shows configured appliances with add/edit/remove."""
+        """Appliance hub — summary and actions."""
+        self._appliance_preset = None  # clear stale preset state
         appliances = self._load_appliances()
 
         if user_input is not None:
             action = user_input.get("appliance_action", "done")
             if action == "add":
                 self._editing_appliance_index = None
-                return await self.async_step_appliance_edit()
+                return await self.async_step_appliance_preset()
             if action == "done":
                 return self.async_create_entry(title="", data=self._options)
-            # "edit_N" or "remove_N"
             if action.startswith("edit_"):
                 idx = int(action.split("_", 1)[1])
                 if 0 <= idx < len(appliances):
@@ -1630,37 +1663,99 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     _LOGGER.info("Removed appliance: %s", removed.get("name"))
                 return await self.async_step_appliances()
 
-        # Build menu options: edit/remove each existing, plus "Add" and "Done"
-        options = []
+        # Build rich description
+        if appliances:
+            lines = []
+            for app in appliances:
+                name = app.get("name", "Unnamed")
+                btu = app.get("thermal_impact_btu", 0)
+                effect = "cools" if btu < 0 else "heats"
+                lines.append(f"- **{name}** — {effect} your home ({btu:+,.0f} BTU/hr)")
+            summary = "**Configured appliances:**\n" + "\n".join(lines)
+        else:
+            summary = (
+                "No appliances configured yet. Appliances like water heaters, "
+                "dryers, and space heaters affect your home's temperature — "
+                "adding them helps the optimizer predict thermal loads more accurately."
+            )
+
+        # Build action list: Add first, then edit/remove per appliance, Done last
+        options = [
+            selector.SelectOptionDict(value="add", label="Add new appliance"),
+        ]
         for i, app in enumerate(appliances):
             name = app.get("name", f"Appliance {i+1}")
             btu = app.get("thermal_impact_btu", 0)
-            btu_str = f"{btu:+.0f}" if btu else "0"
-            label = f"{name} ({btu_str} BTU/hr)"
+            label = f"{name} ({btu:+,.0f} BTU/hr)"
             options.append(
                 selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {label}")
             )
             options.append(
                 selector.SelectOptionDict(value=f"remove_{i}", label=f"Remove: {name}")
             )
-        options.append(selector.SelectOptionDict(value="add", label="Add new appliance"))
-        options.append(selector.SelectOptionDict(value="done", label="Done"))
-
-        description = "No appliances configured." if not appliances else (
-            f"{len(appliances)} appliance(s) configured."
+        options.append(
+            selector.SelectOptionDict(value="done", label="Done")
         )
+
+        default = "add" if not appliances else "done"
 
         return self.async_show_form(
             step_id="appliances",
             data_schema=vol.Schema({
-                vol.Required("appliance_action", default="done"): selector.SelectSelector(
+                vol.Required("appliance_action", default=default): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=options,
                         mode=selector.SelectSelectorMode.LIST,
                     ),
                 ),
             }),
-            description_placeholders={"appliance_summary": description},
+            description_placeholders={"appliance_summary": summary},
+        )
+
+    async def async_step_appliance_preset(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Pick an appliance type preset to pre-fill the edit form."""
+        if user_input is not None:
+            preset_key = user_input.get("appliance_preset", "custom")
+            self._appliance_preset = dict(
+                self.APPLIANCE_PRESETS.get(preset_key, self.APPLIANCE_PRESETS["custom"])
+            )
+            return await self.async_step_appliance_edit()
+
+        preset_options = [
+            selector.SelectOptionDict(
+                value="hpwh",
+                label="Heat pump water heater — cools your home (\u22124,000 BTU/hr)",
+            ),
+            selector.SelectOptionDict(
+                value="electric_dryer",
+                label="Electric dryer — heats your home (+3,000 BTU/hr)",
+            ),
+            selector.SelectOptionDict(
+                value="space_heater",
+                label="Space heater — heats your home (+1,500 BTU/hr)",
+            ),
+            selector.SelectOptionDict(
+                value="media_center",
+                label="Media center / gaming PC — mild heating (+500 BTU/hr)",
+            ),
+            selector.SelectOptionDict(
+                value="custom",
+                label="Custom — enter your own values",
+            ),
+        ]
+
+        return self.async_show_form(
+            step_id="appliance_preset",
+            data_schema=vol.Schema({
+                vol.Required("appliance_preset", default="hpwh"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=preset_options,
+                        mode=selector.SelectSelectorMode.LIST,
+                    ),
+                ),
+            }),
         )
 
     async def async_step_appliance_edit(
@@ -1669,7 +1764,18 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         """Add or edit a single appliance."""
         appliances = self._load_appliances()
         editing_idx = getattr(self, "_editing_appliance_index", None)
-        existing = appliances[editing_idx] if editing_idx is not None and editing_idx < len(appliances) else {}
+
+        # Defaults: from existing appliance (edit) or from preset (add)
+        if editing_idx is not None and editing_idx < len(appliances):
+            existing = appliances[editing_idx]
+        else:
+            preset = getattr(self, "_appliance_preset", None) or {}
+            existing = {
+                "name": preset.get("name", ""),
+                "thermal_impact_btu": preset.get("thermal_impact_btu", 0),
+                "estimated_watts": preset.get("estimated_watts", 0),
+                "active_states": preset.get("active_states", ["on"]),
+            }
 
         if user_input is not None:
             name = user_input.get("name", "").strip()
@@ -1704,6 +1810,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 appliances.append(appliance)
 
             self._save_appliances(appliances)
+            self._appliance_preset = None
             return await self.async_step_appliances()
 
         own_eids = self._get_own_entity_ids()
