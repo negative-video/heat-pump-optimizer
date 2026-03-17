@@ -350,6 +350,7 @@ class ApplianceConfig:
     state_entity: str  # entity_id to read state from (binary_sensor, water_heater, switch, sensor)
     active_states: list[str]  # states meaning "running", e.g. ["on"] or ["Compressor Running"]
     thermal_impact_btu: float  # BTU/hr when active (negative = cooling, e.g. -4000 for HPWH)
+    thermal_factor: float | None = None  # BTU per watt; None = use static thermal_impact_btu
     power_entity: str | None = None  # optional: sensor reporting W/kW (real-time power)
     estimated_watts: float | None = None  # fallback power draw when active (e.g. 500W for HPWH)
     humidity_impact: float | None = None  # %RH/hr (negative = dehumidify)

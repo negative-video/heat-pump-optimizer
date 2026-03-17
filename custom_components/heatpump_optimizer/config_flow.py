@@ -1606,27 +1606,27 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             "active_states": ["on"],
         },
         "electric_dryer": {
-            "name": "Electric Dryer",
-            "thermal_impact_btu": 3000,
+            "name": "Electric Dryer (Vented)",
             "estimated_watts": 5000,
+            "thermal_factor": 0.6,
             "active_states": ["on"],
         },
         "space_heater": {
             "name": "Space Heater",
-            "thermal_impact_btu": 1500,
             "estimated_watts": 1500,
+            "thermal_factor": 3.412,
             "active_states": ["on"],
         },
         "media_center": {
             "name": "Media Center / Gaming PC",
-            "thermal_impact_btu": 500,
             "estimated_watts": 300,
+            "thermal_factor": 3.412,
             "active_states": ["on"],
         },
         "custom": {
             "name": "",
-            "thermal_impact_btu": 0,
             "estimated_watts": 0,
+            "thermal_factor": 3.412,
             "active_states": ["on"],
         },
     }
@@ -1677,9 +1677,15 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             lines = []
             for app in appliances:
                 name = app.get("name", "Unnamed")
+                watts = app.get("estimated_watts", 0) or 0
+                factor = app.get("thermal_factor")
                 btu = app.get("thermal_impact_btu", 0)
-                effect = "cools" if btu < 0 else "heats"
-                lines.append(f"- **{name}** — {effect} your home ({btu:+,.0f} BTU/hr)")
+                if factor is not None:
+                    effect = "heats" if factor > 0 else "cools"
+                    lines.append(f"- **{name}** — {watts:,.0f}W, {effect} your home")
+                else:
+                    effect = "cools" if btu < 0 else "heats"
+                    lines.append(f"- **{name}** — {effect} your home ({btu:+,.0f} BTU/hr)")
             summary = "**Configured appliances:**\n" + "\n".join(lines)
         else:
             summary = (
@@ -1694,8 +1700,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         ]
         for i, app in enumerate(appliances):
             name = app.get("name", f"Appliance {i+1}")
-            btu = app.get("thermal_impact_btu", 0)
-            label = f"{name} ({btu:+,.0f} BTU/hr)"
+            watts = app.get("estimated_watts", 0) or 0
+            label = f"{name} ({watts:,.0f}W)" if watts else name
             options.append(
                 selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {label}")
             )
@@ -1735,19 +1741,19 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         preset_options = [
             selector.SelectOptionDict(
                 value="hpwh",
-                label="Heat pump water heater — cools your home (\u22123,200 BTU/hr)",
+                label="Heat pump water heater — 350W, cools your home",
             ),
             selector.SelectOptionDict(
                 value="electric_dryer",
-                label="Electric dryer — heats your home (+3,000 BTU/hr)",
+                label="Electric dryer (vented) — 5,000W, partial heating",
             ),
             selector.SelectOptionDict(
                 value="space_heater",
-                label="Space heater — heats your home (+1,500 BTU/hr)",
+                label="Space heater — 1,500W, heats your home",
             ),
             selector.SelectOptionDict(
                 value="media_center",
-                label="Media center / gaming PC — mild heating (+500 BTU/hr)",
+                label="Media center / gaming PC — 300W, heats your home",
             ),
             selector.SelectOptionDict(
                 value="custom",
@@ -1781,10 +1787,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             preset = getattr(self, "_appliance_preset", None) or {}
             existing = {
                 "name": preset.get("name", ""),
-                "thermal_impact_btu": preset.get("thermal_impact_btu", 0),
+                "thermal_impact_btu": preset.get("thermal_impact_btu"),
+                "thermal_factor": preset.get("thermal_factor", 3.412),
                 "estimated_watts": preset.get("estimated_watts", 0),
                 "active_states": preset.get("active_states", ["on"]),
             }
+
+        uses_static_btu = existing.get("thermal_impact_btu") is not None and existing.get("thermal_factor") is None
 
         if user_input is not None:
             name = user_input.get("name", "").strip()
@@ -1799,14 +1808,28 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
             slug = name.lower().replace(" ", "_").replace("-", "_")[:32]
 
+            estimated_watts = user_input.get("estimated_watts")
+            thermal_factor = user_input.get("thermal_factor")
+            thermal_btu = user_input.get("thermal_btu")
+
             appliance: dict[str, Any] = {
                 "id": existing.get("id", slug),
                 "name": name,
                 "state_entity": state_entity,
                 "active_states": active_states,
-                "thermal_impact_btu": float(user_input.get("thermal_btu", 0)),
             }
-            estimated_watts = user_input.get("estimated_watts")
+
+            if thermal_btu is not None:
+                # Static BTU/hr mode (HPWH-style)
+                appliance["thermal_impact_btu"] = float(thermal_btu)
+            elif thermal_factor is not None:
+                # Watts-based mode
+                appliance["thermal_factor"] = float(thermal_factor)
+                watts = float(estimated_watts) if estimated_watts else 0
+                appliance["thermal_impact_btu"] = watts * float(thermal_factor)
+            else:
+                appliance["thermal_impact_btu"] = 0
+
             if estimated_watts is not None and estimated_watts > 0:
                 appliance["estimated_watts"] = float(estimated_watts)
             power_entity = user_input.get("power_entity")
@@ -1824,53 +1847,71 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         own_eids = self._get_own_entity_ids()
 
+        # Build form schema — static BTU mode (HPWH) vs watts-based mode
+        schema_fields: dict[Any, Any] = {
+            vol.Required(
+                "name",
+                description={"suggested_value": existing.get("name", "")},
+            ): selector.TextSelector(),
+            vol.Required(
+                "state_entity",
+                description={"suggested_value": existing.get("state_entity", "")},
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(exclude_entities=own_eids),
+            ),
+            vol.Optional(
+                "active_states",
+                description={"suggested_value": ", ".join(existing.get("active_states", ["on"]))},
+            ): selector.TextSelector(),
+            vol.Optional(
+                "power_entity",
+                description={"suggested_value": existing.get("power_entity")},
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    exclude_entities=own_eids,
+                ),
+            ),
+            vol.Required(
+                "estimated_watts",
+                description={"suggested_value": existing.get("estimated_watts", 0)},
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=15000, step=50,
+                    unit_of_measurement="W",
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            ),
+        }
+
+        if uses_static_btu:
+            # HPWH-style: show static BTU/hr field instead of thermal_factor
+            schema_fields[vol.Required(
+                "thermal_btu",
+                description={"suggested_value": existing.get("thermal_impact_btu", 0)},
+            )] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-10000, max=10000, step=100,
+                    unit_of_measurement="BTU/hr",
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            )
+        else:
+            # Watts-based: show thermal factor (pre-filled, rarely changed)
+            schema_fields[vol.Optional(
+                "thermal_factor",
+                description={"suggested_value": existing.get("thermal_factor", 3.412)},
+            )] = selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=-15, max=5, step=0.01,
+                    unit_of_measurement="BTU/W",
+                    mode=selector.NumberSelectorMode.BOX,
+                ),
+            )
+
         return self.async_show_form(
             step_id="appliance_edit",
-            data_schema=vol.Schema({
-                vol.Required(
-                    "name",
-                    description={"suggested_value": existing.get("name", "")},
-                ): selector.TextSelector(),
-                vol.Required(
-                    "state_entity",
-                    description={"suggested_value": existing.get("state_entity", "")},
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(exclude_entities=own_eids),
-                ),
-                vol.Optional(
-                    "active_states",
-                    description={"suggested_value": ", ".join(existing.get("active_states", ["on"]))},
-                ): selector.TextSelector(),
-                vol.Required(
-                    "thermal_btu",
-                    description={"suggested_value": existing.get("thermal_impact_btu", 0)},
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=-10000, max=10000, step=100,
-                        unit_of_measurement="BTU/hr",
-                        mode=selector.NumberSelectorMode.BOX,
-                    ),
-                ),
-                vol.Optional(
-                    "estimated_watts",
-                    description={"suggested_value": existing.get("estimated_watts")},
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0, max=15000, step=50,
-                        unit_of_measurement="W",
-                        mode=selector.NumberSelectorMode.BOX,
-                    ),
-                ),
-                vol.Optional(
-                    "power_entity",
-                    description={"suggested_value": existing.get("power_entity")},
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain="sensor",
-                        exclude_entities=own_eids,
-                    ),
-                ),
-            }),
+            data_schema=vol.Schema(schema_fields),
         )
 
     # ── Indoor Sensing ───────────────────────────────────────────────

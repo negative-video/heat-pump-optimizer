@@ -273,22 +273,24 @@
       },
       "appliance_edit": {
         "title": "Configure Appliance",
-        "description": "Configure the appliance details. Negative BTU/hr means the appliance cools your home (e.g., a heat pump water heater extracts heat from the air). Positive means it adds heat (e.g., a dryer or space heater).",
+        "description": "Configure the appliance details. For most appliances, just provide the power draw — thermal impact is calculated automatically. All electrical energy consumed by an appliance inside your home becomes heat.",
         "data": {
           "name": "Name",
           "state_entity": "State entity",
           "active_states": "Active states",
+          "power_entity": "Power sensor (optional)",
+          "estimated_watts": "Power draw (W)",
           "thermal_btu": "Thermal impact (BTU/hr)",
-          "estimated_watts": "Estimated power draw (W)",
-          "power_entity": "Power sensor (optional)"
+          "thermal_factor": "Thermal factor (BTU/W)"
         },
         "data_description": {
           "name": "A short name for this appliance (e.g., \"Water Heater\", \"Dryer\").",
           "state_entity": "The entity that reports whether this appliance is running — a binary_sensor, switch, water_heater, or sensor.",
           "active_states": "Comma-separated state values that mean \"running\". Default: on. For sensors with specific states, use the exact string (e.g., \"compressor_running\").",
+          "power_entity": "A sensor reporting real-time power in watts (e.g., from a smart plug). When available, live readings drive the thermal model for more accurate predictions.",
+          "estimated_watts": "Power draw when running. This is the primary input for thermal impact calculation. If you have a power sensor, this serves as a fallback.",
           "thermal_btu": "Thermal impact on your home in BTU/hr when active. Negative = cooling, positive = heating. Pre-filled from your selected type.",
-          "estimated_watts": "Approximate power draw when running. Used for energy tracking when no real-time power sensor is available.",
-          "power_entity": "A sensor reporting real-time power in watts (e.g., from a smart plug). Leave empty if not available."
+          "thermal_factor": "BTU per watt of thermal impact. 3.412 is correct for any appliance fully inside your home (all electricity becomes heat). Presets handle special cases like vented dryers automatically."
         }
       },
       "indoor_sensing": {

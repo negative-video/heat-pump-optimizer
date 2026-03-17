@@ -93,11 +93,25 @@ class ApplianceManager:
         # Priority 3: No power data available
         return None
 
+    def _thermal_impact_btu_for(self, state: ApplianceState) -> float:
+        """Compute real-time BTU/hr for a single appliance."""
+        if not state.is_active:
+            return 0.0
+        cfg = state.config
+
+        # Mode A: watts-based — thermal_factor converts watts to BTU/hr
+        if cfg.thermal_factor is not None:
+            if state.current_power_watts is not None and state.current_power_watts > 0:
+                return state.current_power_watts * cfg.thermal_factor
+            if cfg.estimated_watts is not None and cfg.estimated_watts > 0:
+                return cfg.estimated_watts * cfg.thermal_factor
+
+        # Mode B: static BTU/hr (HPWH-style or legacy configs)
+        return cfg.thermal_impact_btu
+
     def total_thermal_impact_btu(self) -> float:
         """Sum of BTU/hr from all currently active appliances."""
-        return sum(
-            s.config.thermal_impact_btu for s in self._states if s.is_active
-        )
+        return sum(self._thermal_impact_btu_for(s) for s in self._states)
 
     def total_humidity_impact(self) -> float | None:
         """Sum of %RH/hr from all currently active appliances, or None if none configured."""
@@ -124,7 +138,7 @@ class ApplianceManager:
                 "id": s.config.id,
                 "name": s.config.name,
                 "active": s.is_active,
-                "thermal_impact_btu": s.config.thermal_impact_btu if s.is_active else 0,
+                "thermal_impact_btu": self._thermal_impact_btu_for(s),
                 "power_watts": s.current_power_watts,
                 "state_entity": s.config.state_entity,
             })
@@ -157,12 +171,15 @@ class ApplianceManager:
         configs = []
         for item in items:
             try:
+                raw_factor = item.get("thermal_factor")
+                thermal_factor = float(raw_factor) if raw_factor is not None else None
                 configs.append(ApplianceConfig(
                     id=item["id"],
                     name=item["name"],
                     state_entity=item["state_entity"],
                     active_states=item.get("active_states", ["on"]),
-                    thermal_impact_btu=float(item["thermal_impact_btu"]),
+                    thermal_impact_btu=float(item.get("thermal_impact_btu", 0)),
+                    thermal_factor=thermal_factor,
                     power_entity=item.get("power_entity"),
                     estimated_watts=item.get("estimated_watts"),
                     humidity_impact=item.get("humidity_impact"),
