@@ -175,6 +175,7 @@ class BaselineHourResult:
     co2_grams: float | None = None
     cop: float | None = None  # COP at this hour's outdoor temp
     avg_indoor_temp: float | None = None  # virtual house temp (for comfort comparison)
+    avoided_aux_heat_kwh: float = 0.0  # kWh saved vs baseline by not triggering aux
 
 
 @dataclass
@@ -242,6 +243,10 @@ class HourlySavingsRecord:
     cop_savings_kwh: float = 0.0  # savings from better compressor efficiency
     rate_arbitrage_savings: float | None = None  # cost savings from cheaper hours
 
+    # Aux heat tracking
+    aux_heat_kwh: float = 0.0       # incremental resistive kWh above HP draw this hour
+    avoided_aux_heat_kwh: float = 0.0  # kWh saved by not triggering aux vs baseline
+
 
 @dataclass
 class DailySavingsReport:
@@ -298,6 +303,14 @@ class DailySavingsReport:
     def total_rate_arbitrage_savings(self) -> float | None:
         vals = [h.rate_arbitrage_savings for h in self.hours if h.rate_arbitrage_savings is not None]
         return sum(vals) if vals else None
+
+    @property
+    def total_aux_heat_kwh(self) -> float:
+        return sum(h.aux_heat_kwh for h in self.hours)
+
+    @property
+    def total_avoided_aux_kwh(self) -> float:
+        return sum(h.avoided_aux_heat_kwh for h in self.hours)
 
     @property
     def avg_baseline_cop(self) -> float | None:

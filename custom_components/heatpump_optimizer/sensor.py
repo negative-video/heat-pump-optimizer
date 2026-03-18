@@ -83,6 +83,10 @@ async def async_setup_entry(
         # Auxiliary appliance sensors
         ApplianceThermalLoadSensor(coordinator, entry),
         ActiveAppliancesSensor(coordinator, entry),
+        # Aux/emergency heat sensors
+        AuxHeatThresholdSensor(coordinator, entry),
+        AuxHeatKwhTodaySensor(coordinator, entry),
+        AvoidedAuxHeatKwhSensor(coordinator, entry),
     ]
     async_add_entities(entities)
 
@@ -770,12 +774,24 @@ class OccupancyForecastSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return {}
         transition = self.coordinator.data.get("next_occupancy_transition")
-        return {
+        attrs = {
             "source": self.coordinator.data.get("occupancy_forecast_source", "reactive"),
             "timeline_segments": self.coordinator.data.get("occupancy_timeline_segments", 0),
             "next_transition": transition.get("time") if transition else None,
             "next_transition_type": transition.get("type") if transition else None,
         }
+        # Expose occupancy timeline segments for panel rendering
+        timeline = self.coordinator.occupancy_timeline
+        if timeline:
+            attrs["timeline"] = [
+                {
+                    "start": seg.start_time.isoformat(),
+                    "end": seg.end_time.isoformat(),
+                    "mode": seg.mode,
+                }
+                for seg in timeline[:24]
+            ]
+        return attrs
 
 
 class PreconditioningStatusSensor(OptimizerBaseSensor):
@@ -1198,6 +1214,13 @@ class ProfilerStatusSensor(OptimizerBaseSensor):
         obs = self.coordinator.data.get("profiler_observations")
         if obs is not None:
             attrs["observations"] = obs
+        # Override intelligence for panel diagnostics
+        attrs["override_count_30d"] = self.coordinator.data.get(
+            "override_count_30d", 0
+        )
+        override_pattern = self.coordinator.data.get("override_pattern")
+        if override_pattern:
+            attrs["override_pattern"] = override_pattern
         return attrs
 
 
@@ -1309,3 +1332,84 @@ class ActiveAppliancesSensor(OptimizerBaseSensor):
             "total_thermal_impact_btu": diag.get("total_thermal_impact_btu", 0),
             "appliances": diag.get("appliances", []),
         }
+
+
+# ── Aux/emergency heat sensors ──────────────────────────────────────
+
+
+class AuxHeatThresholdSensor(OptimizerBaseSensor):
+    """Learned effective outdoor temp below which aux/emergency heat is likely to activate."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "aux_heat_threshold", "Aux Heat Threshold"
+        )
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:thermometer-alert"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("aux_heat_threshold_f")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {
+            "is_learned": self.coordinator.data.get("aux_heat_threshold_learned", False),
+            "event_count": self.coordinator.data.get("aux_heat_event_count", 0),
+            "learned_hp_watts": self.coordinator.data.get("aux_heat_learned_hp_watts"),
+        }
+
+
+class AuxHeatKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
+    """Incremental resistive kWh consumed today above heat pump baseline draw."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "aux_heat_kwh_today", "Aux Heat kWh Today"
+        )
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_suggested_display_precision = 2
+        self._attr_icon = "mdi:lightning-bolt"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        val = self.coordinator.data.get("aux_heat_kwh_today", 0.0)
+        return val if val > 0 else None
+
+
+class AvoidedAuxHeatKwhSensor(_DailyResetMixin, OptimizerBaseSensor):
+    """Estimated kWh saved today by pre-heating and avoiding aux heat activation."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "avoided_aux_heat_kwh_today", "Avoided Aux Heat kWh Today"
+        )
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_suggested_display_precision = 2
+        self._attr_icon = "mdi:shield-check-outline"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        val = self.coordinator.data.get("avoided_aux_heat_kwh_today", 0.0)
+        return val if val > 0 else None

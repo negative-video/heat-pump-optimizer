@@ -103,8 +103,11 @@ function renderAlerts(states) {
 
   if (phase?.state === "safe_mode")
     alerts.push({ cls: "alert-error", msg: "Safe mode \u2014 using conservative defaults" });
-  if (auxHeat?.state === "on")
-    alerts.push({ cls: "alert-warning", msg: "Auxiliary/emergency heat is running" });
+  if (auxHeat?.state === "on") {
+    const auxThresh = findEntity(states, "aux_heat_threshold");
+    const threshMsg = hasValue(auxThresh) ? ` (threshold: ${fmt(auxThresh, 0)}° eff)` : "";
+    alerts.push({ cls: "alert-warning", msg: `Auxiliary/emergency heat is running${threshMsg}` });
+  }
   if (stale?.state === "on")
     alerts.push({ cls: "alert-warning", msg: "Temperature sensor may be stale" });
   if (override?.state === "on")
@@ -216,6 +219,7 @@ function renderHeroStrip(states, hass) {
 function renderForecastChart(states, hass) {
   const schedule = findEntity(states, "schedule");
   const tier = findEntity(states, "savings_accuracy_tier");
+  const apparent = findEntity(states, "apparent_temperature");
   const unit = tempUnit(hass);
 
   // During learning, show weather-only outdoor temp chart
@@ -287,6 +291,9 @@ function renderForecastChart(states, hass) {
       </div>`;
   }
 
+  // Actual indoor temp for "now" marker
+  const actualIndoor = hasValue(apparent) ? Number(apparent.state) : null;
+
   // Compute temperature range
   let allTemps = [];
   for (const pt of forecast) {
@@ -294,6 +301,7 @@ function renderForecastChart(states, hass) {
     if (pt.comfort_min != null) allTemps.push(pt.comfort_min);
     if (pt.comfort_max != null) allTemps.push(pt.comfort_max);
   }
+  if (actualIndoor != null) allTemps.push(actualIndoor);
   const minT = Math.floor(Math.min(...allTemps) - 1);
   const maxT = Math.ceil(Math.max(...allTemps) + 1);
   const range = maxT - minT || 1;
@@ -335,12 +343,20 @@ function renderForecastChart(states, hass) {
       ? `<span class="chart-time">${hour === 0 ? "12a" : hour === 12 ? "12p" : hour > 12 ? (hour - 12) + "p" : hour + "a"}</span>`
       : "";
 
+    // Actual indoor temp ring on "now" column
+    let actualDot = "";
+    if (isNow && actualIndoor != null) {
+      const actualPct = ((actualIndoor - minT) / range) * 100;
+      actualDot = `<div class="chart-dot chart-dot-actual" style="bottom:${actualPct}%" title="Actual ${actualIndoor.toFixed(1)}${unit}"></div>`;
+    }
+
     return `
       <div class="chart-col${isNow ? " chart-col-now" : ""}">
         <div class="chart-area">
           ${comfortBand}
           <div class="chart-dot chart-dot-outdoor" style="bottom:${outdoorPct}%"></div>
           <div class="chart-dot chart-dot-indoor" style="bottom:${indoorPct}%"></div>
+          ${actualDot}
           ${hvacStrip}
         </div>
         ${timeLabel}
@@ -351,7 +367,8 @@ function renderForecastChart(states, hass) {
     <div class="card forecast-card">
       <h2>Forecast</h2>
       <div class="chart-legend">
-        <span class="legend-item"><span class="legend-dot legend-indoor"></span>Indoor</span>
+        <span class="legend-item"><span class="legend-dot legend-indoor"></span>Predicted</span>
+        ${actualIndoor != null ? `<span class="legend-item"><span class="legend-dot legend-actual"></span>Actual</span>` : ""}
         <span class="legend-item"><span class="legend-dot legend-outdoor"></span>Outdoor</span>
         <span class="legend-item"><span class="legend-band"></span>Comfort</span>
         <span class="legend-item"><span class="legend-hvac"></span>HVAC</span>
@@ -469,6 +486,22 @@ function renderTimeline(states, hass) {
       return `<span class="tl-legend-item"><span class="tl-legend-swatch ${p.cls}"></span>${p.label}</span>`;
     }).join("");
 
+  // Occupancy underlay — thin bar showing home/away from calendar
+  const occupancy = findEntity(states, "occupancy_forecast");
+  let occBar = "";
+  if (occupancy?.attributes?.source === "calendar" && Array.isArray(occupancy.attributes.timeline)) {
+    const occSegs = occupancy.attributes.timeline.map(seg => {
+      const start = new Date(seg.start);
+      const end = new Date(seg.end);
+      const leftPct = Math.max(0, ((start - dayStart) / dayMs) * 100);
+      const widthPct = Math.min(100 - leftPct, ((end - start) / dayMs) * 100);
+      const cls = seg.mode === "home" ? "tl-occ-home" : "tl-occ-away";
+      const label = seg.mode === "home" ? "Home" : "Away";
+      return `<div class="tl-occ-seg ${cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%" title="${label}"></div>`;
+    }).join("");
+    occBar = `<div class="tl-occ-bar">${occSegs}</div>`;
+  }
+
   // Preconditioning info
   let precondInfo = "";
   if (isAvailable(precond) && precond.attributes) {
@@ -489,9 +522,117 @@ function renderTimeline(states, hass) {
         ${segments.join("")}
         <div class="tl-now" style="left:${nowPct}%"></div>
       </div>
+      ${occBar}
       <div class="tl-ticks">${ticks.join("")}</div>
       ${isAvailable(nextAction) ? `<div class="timeline-next">${nextAction.state}</div>` : ""}
       ${precondInfo}
+    </div>`;
+}
+
+/** [D2] Decision Engine — explains why the optimizer is doing what it's doing. */
+function renderDecisionCard(states, hass) {
+  const phase = findEntity(states, "current_phase");
+  const tier = findEntity(states, "savings_accuracy_tier");
+  const tacticalCorr = findEntity(states, "tactical_correction");
+  const predicted = findEntity(states, "predicted_indoor_temp");
+  const apparent = findEntity(states, "apparent_temperature");
+  const predError = findEntity(states, "prediction_error");
+  const accuracy = findEntity(states, "model_accuracy");
+  const occupancy = findEntity(states, "occupancy_forecast");
+  const precond = findEntity(states, "preconditioning_status");
+  const unit = tempUnit(hass);
+
+  // Hidden during learning — no schedule means no tactical state
+  if ((tier?.state || "learning") === "learning") return "";
+
+  const tacticalState = phase?.attributes?.tactical_state || "nominal";
+
+  // Tactical state badge
+  const TACTICAL_MAP = {
+    nominal: { label: "On Track", cls: "tac-nominal" },
+    correcting: { label: "Correcting", cls: "tac-correcting" },
+    disturbed: { label: "Disturbed", cls: "tac-disturbed" },
+  };
+  const tacInfo = TACTICAL_MAP[tacticalState] || TACTICAL_MAP["nominal"];
+
+  // Build narrative sentence
+  let narrative = "";
+  if (tacticalState === "disturbed") {
+    const err = hasValue(predError) ? `${Number(predError.state) > 0 ? "+" : ""}${fmt(predError)}` : "";
+    narrative = `Large divergence from model${err ? ` (${err}\u00b0 drift)` : ""} \u2014 possible window open or appliance`;
+  } else if (hasValue(predicted) && hasValue(apparent)) {
+    const pred = Number(predicted.state);
+    const act = Number(apparent.state);
+    const drift = act - pred;
+    const driftStr = `${drift >= 0 ? "+" : ""}${drift.toFixed(1)}\u00b0`;
+    narrative = `Predicted ${pred.toFixed(1)}${unit}, actual ${act.toFixed(1)}${unit} (${driftStr} drift)`;
+  }
+
+  // Correction stat
+  let correctionText = "\u2014";
+  if (hasValue(tacticalCorr)) {
+    const c = Number(tacticalCorr.state);
+    if (Math.abs(c) < 0.05) correctionText = "0.0\u00b0 (none needed)";
+    else correctionText = `${c > 0 ? "+" : ""}${c.toFixed(1)}\u00b0 applied`;
+  }
+
+  // Model fit stat
+  let fitText = "";
+  if (hasValue(accuracy)) {
+    fitText = `\u00b1${fmt(accuracy)}${unit} MAE`;
+    const bias = accuracy?.attributes?.model_bias;
+    if (bias != null) {
+      const b = Number(bias);
+      const bLabel = Math.abs(b) < 0.15 ? "no bias" : b > 0 ? "warm bias" : "cool bias";
+      fitText += ` \u00b7 ${b >= 0 ? "+" : ""}${b.toFixed(1)}\u00b0 ${bLabel}`;
+    }
+  }
+
+  // What's Next — occupancy transition + preconditioning
+  let nextSection = "";
+  const nextTime = occupancy?.attributes?.next_transition;
+  const nextType = occupancy?.attributes?.next_transition_type;
+  if (nextTime) {
+    const fmtTime = new Date(nextTime).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const typeLabel = (nextType || "").replace(/_/g, " \u2192 ").replace(/\b\w/g, c => c.toUpperCase());
+    let nextLine = `<div class="decision-next-line">${typeLabel} at ${fmtTime}</div>`;
+
+    // Preconditioning plan details
+    if (precond && (precond.state === "scheduled" || precond.state === "active")) {
+      const a = precond.attributes || {};
+      const parts = [];
+      if (a.temperature_gap != null) parts.push(`${Number(a.temperature_gap).toFixed(1)}\u00b0 gap`);
+      if (a.estimated_energy_kwh != null) parts.push(`~${Number(a.estimated_energy_kwh).toFixed(1)} kWh`);
+      if (a.estimated_cost != null) parts.push(`~$${Number(a.estimated_cost).toFixed(2)}`);
+      if (parts.length) {
+        const startTime = a.scheduled_start
+          ? new Date(a.scheduled_start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+          : null;
+        nextLine += `<div class="decision-precond">${precond.state === "active" ? "Pre-conditioning now" : `Pre-condition starts ${startTime || "soon"}`} (${parts.join(", ")})</div>`;
+      }
+    }
+    nextSection = `<div class="decision-next">${nextLine}</div>`;
+  }
+
+  return `
+    <div class="card decision-card">
+      <h2>Decisions</h2>
+      <div class="decision-top">
+        <span class="tactical-badge ${tacInfo.cls}">${tacInfo.label}</span>
+        ${narrative ? `<span class="decision-narrative">${narrative}</span>` : ""}
+      </div>
+      <div class="decision-stats">
+        <div class="decision-stat">
+          <span class="decision-stat-label">Correction</span>
+          <span class="decision-stat-value">${correctionText}</span>
+        </div>
+        ${fitText ? `
+        <div class="decision-stat">
+          <span class="decision-stat-label">Model Fit</span>
+          <span class="decision-stat-value">${fitText}</span>
+        </div>` : ""}
+      </div>
+      ${nextSection}
     </div>`;
 }
 
@@ -517,6 +658,8 @@ function renderSavingsCard(states, hass) {
   const cumulKwh = findEntity(states, "savings_kwh_cumulative");
   const cumulCost = findEntity(states, "savings_cost_cumulative");
   const cumulCo2 = findEntity(states, "savings_co2_cumulative");
+  const auxHeatKwh = findEntity(states, "aux_heat_kwh_today");
+  const avoidedAuxKwh = findEntity(states, "avoided_aux_heat_kwh_today");
 
   const tierVal = tier?.state || "learning";
   const tierInfo = TIER_MAP[tierVal] || TIER_MAP["learning"];
@@ -567,6 +710,10 @@ function renderSavingsCard(states, hass) {
     chips.push(`<span class="chip">Rate $${fmt(rateSavings, 2)}</span>`);
   if (hasValue(carbonSavings) && Number(carbonSavings.state) > 0)
     chips.push(`<span class="chip">Carbon ${fmt(carbonSavings, 0)}g</span>`);
+  if (hasValue(auxHeatKwh) && Number(auxHeatKwh.state) > 0)
+    chips.push(`<span class="chip chip-warn">Resistive +${fmt(auxHeatKwh, 2)} kWh</span>`);
+  if (hasValue(avoidedAuxKwh) && Number(avoidedAuxKwh.state) > 0)
+    chips.push(`<span class="chip">Avoided aux ${fmt(avoidedAuxKwh, 2)} kWh</span>`);
 
   // COP comparison
   let copLine = "";
@@ -633,11 +780,45 @@ function renderHealthCard(states, hass) {
   // Remaining diagnostics (baseline/comfort — thermal params moved to Building card)
   const baselineTemp = findEntity(states, "baseline_avg_indoor_temp");
   const baselineViols = findEntity(states, "baseline_comfort_violations");
+  const profiler = findEntity(states, "profiler_status");
 
   let diagnosticsSection = "";
   const diagRows = [];
+
+  // Profiler status (useful both during and after learning)
+  if (isAvailable(profiler)) {
+    const profConf = profiler.attributes?.confidence;
+    const profObs = profiler.attributes?.observations;
+    let profLine = profiler.state;
+    if (profConf != null) profLine += ` \u00b7 ${Number(profConf).toFixed(0)}% confident`;
+    if (profObs != null) profLine += ` \u00b7 ${Number(profObs).toLocaleString()} obs`;
+    diagRows.push(`<div class="diag-row"><span>Profiler</span><span>${profLine}</span></div>`);
+  }
+
+  // Override intelligence
+  if (profiler?.attributes?.override_count_30d > 0) {
+    const count = profiler.attributes.override_count_30d;
+    const pattern = profiler.attributes.override_pattern;
+    let overrideLine = `${count} override${count !== 1 ? "s" : ""} in 30 days`;
+    diagRows.push(`<div class="diag-row"><span>Overrides</span><span>${overrideLine}</span></div>`);
+    if (pattern) {
+      diagRows.push(`<div class="diag-row diag-row-sub"><span>Pattern</span><span>${pattern}</span></div>`);
+    }
+  }
+
   if (hasValue(baselineTemp)) diagRows.push(`<div class="diag-row"><span>Baseline avg temp</span><span>${fmt(baselineTemp)}${unit}</span></div>`);
   if (hasValue(baselineViols)) diagRows.push(`<div class="diag-row"><span>Baseline comfort violations</span><span>${fmt(baselineViols, 0)}</span></div>`);
+
+  // Aux heat learner diagnostics
+  const auxThreshSensor = findEntity(states, "aux_heat_threshold");
+  if (hasValue(auxThreshSensor)) {
+    const evCount = auxThreshSensor.attributes?.event_count || 0;
+    diagRows.push(`<div class="diag-row"><span>Aux threshold</span><span>${fmt(auxThreshSensor, 0)}° eff (${evCount} events)</span></div>`);
+  }
+  const auxHpWatts = auxThreshSensor?.attributes?.learned_hp_watts;
+  if (auxHpWatts != null) {
+    diagRows.push(`<div class="diag-row diag-row-sub"><span>HP baseline</span><span>${(auxHpWatts / 1000).toFixed(1)} kW</span></div>`);
+  }
   if (diagRows.length > 0) {
     diagnosticsSection = `
       <details class="diag-details">
@@ -874,6 +1055,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         ${renderEnvironmentCard(s, this._hass)}
         ${renderForecastChart(s, this._hass)}
         ${renderTimeline(s, this._hass)}
+        ${renderDecisionCard(s, this._hass)}
         ${renderBuildingCard(s, this._hass)}
         ${renderSavingsCard(s, this._hass)}
         ${renderHealthCard(s, this._hass)}
@@ -1071,6 +1253,12 @@ const PANEL_CSS = `
     display: inline-block;
   }
   .legend-indoor { background: var(--accent); }
+  .legend-actual {
+    background: transparent;
+    border: 2px solid var(--green);
+    width: 8px; height: 8px;
+    box-sizing: border-box;
+  }
   .legend-outdoor { background: var(--text-secondary); }
   .legend-band {
     width: 12px; height: 8px;
@@ -1147,6 +1335,12 @@ const PANEL_CSS = `
     width: 4px; height: 4px;
     background: var(--text-secondary);
   }
+  .chart-dot-actual {
+    width: 10px; height: 10px;
+    background: transparent;
+    border: 2px solid var(--green);
+    z-index: 2;
+  }
   .chart-hvac {
     position: absolute;
     bottom: 0;
@@ -1203,6 +1397,25 @@ const PANEL_CSS = `
     height: 100%;
     background: var(--red);
     z-index: 2;
+  }
+  .tl-occ-bar {
+    position: relative;
+    height: 10px;
+    background: color-mix(in srgb, var(--border) 25%, transparent);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 3px;
+  }
+  .tl-occ-seg {
+    position: absolute;
+    top: 0;
+    height: 100%;
+  }
+  .tl-occ-home {
+    background: color-mix(in srgb, var(--green) 25%, transparent);
+  }
+  .tl-occ-away {
+    background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
   }
   .tl-ticks {
     position: relative;
@@ -1339,6 +1552,10 @@ const PANEL_CSS = `
     background: color-mix(in srgb, var(--accent) 8%, transparent);
     color: var(--text-secondary);
   }
+  .chip-warn {
+    background: color-mix(in srgb, var(--orange, #f59e0b) 12%, transparent);
+    color: color-mix(in srgb, var(--orange, #f59e0b) 80%, var(--text-secondary));
+  }
 
   .cop-compare {
     font-size: 13px;
@@ -1450,6 +1667,10 @@ const PANEL_CSS = `
   .diag-row + .diag-row {
     border-top: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
   }
+  .diag-row-sub {
+    font-style: italic;
+    padding-left: 12px;
+  }
 
   /* ── Hero badges row ── */
   .hero-badges {
@@ -1522,6 +1743,72 @@ const PANEL_CSS = `
   }
   .room-pill-occupied { background: var(--green-light); color: var(--green); }
   .room-pill-empty { background: color-mix(in srgb, var(--text-secondary) 10%, transparent); color: var(--text-secondary); }
+
+  /* ── Decision Engine Card ── */
+  .decision-card { }
+  .decision-top {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .tactical-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .tac-nominal { background: var(--green-light); color: var(--green); }
+  .tac-correcting { background: var(--accent-light); color: var(--accent); }
+  .tac-disturbed { background: color-mix(in srgb, var(--orange) 15%, transparent); color: var(--orange); }
+  .decision-narrative {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    padding-top: 2px;
+  }
+  .decision-stats {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .decision-stat {
+    display: flex;
+    flex-direction: column;
+    background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
+    border-radius: 8px;
+    padding: 8px 14px;
+    min-width: 120px;
+  }
+  .decision-stat-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 2px;
+  }
+  .decision-stat-value {
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .decision-next {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    margin-top: 4px;
+  }
+  .decision-next-line {
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .decision-precond {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
 
   /* ── Building Profile Card ── */
   .building-card { }

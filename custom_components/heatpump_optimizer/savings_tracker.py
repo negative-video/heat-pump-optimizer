@@ -55,6 +55,10 @@ class SavingsTracker:
         # Comfort tracking
         self._cumulative_comfort_violations: int = 0
 
+        # Aux heat tracking
+        self._cumulative_aux_heat_kwh: float = 0.0
+        self._cumulative_avoided_aux_kwh: float = 0.0
+
         # Intra-hour accumulator (5-min intervals within the current hour)
         self._current_hour: int | None = None  # hour key (Unix timestamp // 3600)
         self._hour_actual_runtime_min: float = 0.0
@@ -64,6 +68,7 @@ class SavingsTracker:
         self._hour_cop_readings: list[float] = []
         self._hour_mode: str = "off"
         self._hour_solar_offset_kwh: float = 0.0
+        self._hour_aux_kwh: float = 0.0  # incremental resistive kWh this hour
 
         # Counterfactual simulator reference (set by coordinator)
         self._counterfactual: CounterfactualSimulator | None = None
@@ -114,6 +119,8 @@ class SavingsTracker:
         solar_production_watts: float | None = None,
         grid_import_watts: float | None = None,
         actual_cop: float | None = None,
+        aux_heat_active: bool = False,
+        hp_baseline_watts: float = 0.0,
     ) -> None:
         """Record a single update interval (typically 5 minutes).
 
@@ -138,6 +145,7 @@ class SavingsTracker:
             self._hour_mode = mode
             self._hour_solar_offset_kwh = 0.0
             self._hour_grid_import_kwh = 0.0
+            self._hour_aux_kwh = 0.0
 
         # Accumulate this interval
         if hvac_running:
@@ -150,6 +158,11 @@ class SavingsTracker:
                 self._hour_rate_readings.append(electricity_rate)
             if actual_cop is not None:
                 self._hour_cop_readings.append(actual_cop)
+
+            # Incremental resistive kWh: only the power above HP baseline draw
+            if aux_heat_active and power_watts is not None and power_watts > hp_baseline_watts:
+                resistive_watts = power_watts - hp_baseline_watts
+                self._hour_aux_kwh += resistive_watts * (interval_minutes / 60.0) / 1000.0
 
             # Track solar offset — prefer grid import for accuracy when available
             if grid_import_watts is not None and power_watts is not None:
@@ -209,6 +222,9 @@ class SavingsTracker:
         baseline_result = None
         if self._counterfactual is not None:
             baseline_result = self._counterfactual.get_hour_result(self._current_hour)
+
+        avoided_aux_kwh = baseline_result.avoided_aux_heat_kwh if baseline_result is not None else 0.0
+        aux_heat_kwh = self._hour_aux_kwh
 
         # ── Baseline values ──────────────────────────────────────────
         if baseline_result is not None:
@@ -316,6 +332,8 @@ class SavingsTracker:
             runtime_savings_kwh=runtime_savings_kwh,
             cop_savings_kwh=cop_savings_kwh,
             rate_arbitrage_savings=rate_arbitrage,
+            aux_heat_kwh=aux_heat_kwh,
+            avoided_aux_heat_kwh=avoided_aux_kwh,
         )
 
         self._hourly_records.append(record)
@@ -333,6 +351,8 @@ class SavingsTracker:
             self._cumulative_co2_saved_grams += saved_co2
         if rate_arbitrage is not None:
             self._cumulative_rate_arbitrage_savings += rate_arbitrage
+        self._cumulative_aux_heat_kwh += aux_heat_kwh
+        self._cumulative_avoided_aux_kwh += avoided_aux_kwh
 
         # Comfort violation tracking
         if baseline_indoor_temp is not None and self._counterfactual is not None:
@@ -375,6 +395,8 @@ class SavingsTracker:
             "cop_savings_kwh": self._cumulative_cop_savings_kwh,
             "rate_arbitrage_savings": self._cumulative_rate_arbitrage_savings,
             "comfort_violations": self._cumulative_comfort_violations,
+            "aux_heat_kwh": self._cumulative_aux_heat_kwh,
+            "avoided_aux_kwh": self._cumulative_avoided_aux_kwh,
         }
 
     # ── Persistence ─────────────────────────────────────────────────
@@ -392,6 +414,8 @@ class SavingsTracker:
             "cumulative_cop_savings_kwh": self._cumulative_cop_savings_kwh,
             "cumulative_rate_arbitrage_savings": self._cumulative_rate_arbitrage_savings,
             "cumulative_comfort_violations": self._cumulative_comfort_violations,
+            "cumulative_aux_heat_kwh": self._cumulative_aux_heat_kwh,
+            "cumulative_avoided_aux_kwh": self._cumulative_avoided_aux_kwh,
             "baseline_to_optimized_ratio": self._baseline_to_optimized_ratio,
             "accuracy_tier": self._accuracy_tier,
         }
@@ -410,6 +434,8 @@ class SavingsTracker:
         tracker._cumulative_cop_savings_kwh = data.get("cumulative_cop_savings_kwh", 0.0)
         tracker._cumulative_rate_arbitrage_savings = data.get("cumulative_rate_arbitrage_savings", 0.0)
         tracker._cumulative_comfort_violations = data.get("cumulative_comfort_violations", 0)
+        tracker._cumulative_aux_heat_kwh = data.get("cumulative_aux_heat_kwh", 0.0)
+        tracker._cumulative_avoided_aux_kwh = data.get("cumulative_avoided_aux_kwh", 0.0)
         tracker._baseline_to_optimized_ratio = data.get(
             "baseline_to_optimized_ratio", 1.0
         )

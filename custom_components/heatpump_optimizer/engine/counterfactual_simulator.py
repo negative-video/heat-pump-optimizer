@@ -118,6 +118,7 @@ class CounterfactualSimulator:
         people_home_count: int | None = None,
         precipitation: bool = False,
         indoor_humidity: float | None = None,
+        aux_threshold_f: float | None = None,
     ) -> None:
         """Advance the virtual house by one time step.
 
@@ -136,6 +137,9 @@ class CounterfactualSimulator:
             people_home_count: Current occupant count (for internal gain scaling).
             precipitation: Whether it's currently raining/snowing.
             indoor_humidity: Indoor relative humidity (0-100, for SHR correction).
+            aux_threshold_f: Learned effective outdoor temp threshold below which the
+                baseline house would trigger aux heat (°F). When the shadow house
+                would activate aux, the incremental kWh is credited as avoided savings.
         """
         hour_key = int(now.timestamp()) // 3600
 
@@ -162,6 +166,7 @@ class CounterfactualSimulator:
             self._hour_co2_readings = []
             self._hour_rate_readings = []
             self._hour_mode = baseline_mode
+            self._hour_avoided_aux_kwh: float = 0.0
 
         # Determine if the virtual thermostat would run HVAC
         hvac_running = self._thermostat_decision(
@@ -232,6 +237,22 @@ class CounterfactualSimulator:
                 self._hour_rate_readings.append(electricity_rate)
 
         self._hour_mode = baseline_mode
+
+        # Shadow aux heat detection: would the baseline house have triggered aux here?
+        # Condition: outdoor temp below learned threshold AND shadow house is below setpoint
+        # AND heating mode is active. When true, credit the avoided incremental kWh.
+        if (
+            aux_threshold_f is not None
+            and baseline_mode == "heat"
+            and outdoor_temp < aux_threshold_f
+            and self._T_air < baseline_setpoint - 1.0
+        ):
+            # Estimate aux strip watts as HP heating capacity at COP=1 (resistive)
+            # Q_heat_base is in BTU/hr; 1 BTU/hr = 0.293071 W
+            aux_strip_btu_hr = float(estimator.x[IDX_Q_HEAT])
+            aux_strip_watts = aux_strip_btu_hr * 0.293071
+            avoided_kwh = aux_strip_watts * (dt_minutes / 60.0) / 1000.0
+            self._hour_avoided_aux_kwh += avoided_kwh
 
     def get_hour_result(self, hour_key: int) -> BaselineHourResult | None:
         """Get the counterfactual result for a specific hour.
@@ -410,6 +431,8 @@ class CounterfactualSimulator:
             avg_co2 = sum(self._hour_co2_readings) / len(self._hour_co2_readings)
             co2_grams = kwh * avg_co2
 
+        avoided_aux_kwh = getattr(self, "_hour_avoided_aux_kwh", 0.0)
+
         result = BaselineHourResult(
             runtime_minutes=runtime_min,
             power_watts=avg_power,
@@ -418,6 +441,7 @@ class CounterfactualSimulator:
             co2_grams=co2_grams,
             cop=avg_cop,
             avg_indoor_temp=round(avg_indoor_temp, 1),
+            avoided_aux_heat_kwh=avoided_aux_kwh,
         )
 
         self._hour_results.append((self._current_hour_key, result))

@@ -92,6 +92,8 @@ class GreyBoxOptimizer:
         people_home_count: int | None = None,
         indoor_humidity: float | None = None,
         appliance_btu: float = 0.0,
+        aux_threshold_f: float | None = None,
+        aux_heat_active: bool = False,
     ) -> OptimizedSchedule:
         """Find optimal HVAC schedule using linear programming.
 
@@ -104,6 +106,12 @@ class GreyBoxOptimizer:
             people_home_count: Current occupant count (for internal gain scaling).
             indoor_humidity: Current indoor relative humidity (0-100).
             appliance_btu: Net BTU/hr from auxiliary appliances (negative = cooling).
+            aux_threshold_f: Learned effective outdoor temp below which aux heat is
+                likely (°F). When provided, adds an aux-avoidance penalty so the LP
+                pre-heats before forecast hours that risk aux activation.
+            aux_heat_active: Whether aux heat is currently running. When True,
+                zeroes the cost for hour 0 (sunk cost — optimizer accepts it and
+                focuses on future hours).
 
         Returns:
             OptimizedSchedule with entries, savings estimate, and simulation.
@@ -115,6 +123,8 @@ class GreyBoxOptimizer:
         self._people_home_count = people_home_count
         self._indoor_humidity = indoor_humidity
         self._appliance_btu = appliance_btu
+        self._aux_threshold_f = aux_threshold_f
+        self._aux_heat_active = aux_heat_active
 
         # Group forecast into hourly bins
         hourly_forecast = self._bin_forecast_hourly(forecast)
@@ -136,7 +146,11 @@ class GreyBoxOptimizer:
         )
 
         # Compute cost vector for objective function
-        cost = self._compute_cost_vector(hourly_forecast, mode, params, weights)
+        cost = self._compute_cost_vector(
+            hourly_forecast, mode, params, weights,
+            aux_threshold_f=aux_threshold_f,
+            aux_heat_active=aux_heat_active,
+        )
 
         # Compute uncertainty-aware comfort margins
         comfort_min, comfort_max = comfort_range
@@ -503,12 +517,15 @@ class GreyBoxOptimizer:
         mode: str,
         params: dict,
         weights: OptimizationWeights,
+        aux_threshold_f: float | None = None,
+        aux_heat_active: bool = False,
     ) -> np.ndarray:
         """Build per-hour cost for the LP objective.
 
         cost[t] = w_energy * efficiency_cost[t]
                 + w_carbon * carbon[t]
                 + w_cost * rate[t]
+                + aux_risk_penalty[t]  (heating mode only, when threshold is learned)
 
         All dimensions normalized to [0, 1] for comparability.
         """
@@ -546,6 +563,34 @@ class GreyBoxOptimizer:
             cost = cost + weights.carbon_intensity * carbon_norm
         if weights.electricity_cost > 0 and np.any(cost_raw > 0):
             cost = cost + weights.electricity_cost * cost_norm
+
+        # Aux heat avoidance penalty (heating mode only, when threshold is learned).
+        # Hours where effective outdoor temp is below the learned aux threshold get
+        # a penalty proportional to the real efficiency cost of resistive vs. heat
+        # pump operation. This incentivizes pre-heating thermal mass before those hours.
+        if mode == "heat" and aux_threshold_f is not None:
+            aux_penalty = np.zeros(n)
+            for t in range(n):
+                # Use effective_temp (wind-chill-adjusted) when available
+                T_eff = hourly_forecast[t].get("effective_temp") or hourly_forecast[t]["temp"]
+                depth_below = max(0.0, aux_threshold_f - T_eff)
+                if depth_below > 0.0:
+                    # COP of heat pump at the threshold temperature
+                    hp_cop_at_threshold = max(0.1, 1.0 - _ALPHA_HEAT * (_T_REF - aux_threshold_f))
+                    # Fraction of extra electricity required by resistive vs. heat pump:
+                    # e.g., COP_hp=0.25 → penalty_multiplier=3.0 (300% more electricity)
+                    penalty_multiplier = (1.0 / hp_cop_at_threshold) - 1.0
+                    aux_penalty[t] = penalty_multiplier * depth_below
+
+            if np.any(aux_penalty > 0):
+                # Weight at 0.5× energy efficiency — strong signal but doesn't override
+                # rate/carbon arbitrage completely
+                cost = cost + 0.5 * weights.energy_efficiency * self._normalize(aux_penalty)
+
+        # Current hour: sunk cost — if aux is already running, accept hour 0 as
+        # committed and focus optimization on future hours.
+        if aux_heat_active and n > 0:
+            cost[0] = 0.0
 
         return cost
 

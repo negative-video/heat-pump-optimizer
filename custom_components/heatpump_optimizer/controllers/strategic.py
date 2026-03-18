@@ -105,6 +105,8 @@ class StrategicPlanner:
         people_home_count: int | None = None,
         indoor_humidity: float | None = None,
         appliance_btu: float = 0.0,
+        aux_threshold_f: float | None = None,
+        aux_heat_active: bool = False,
     ) -> OptimizedSchedule | None:
         """Run the optimizer and update internal state.
 
@@ -155,6 +157,8 @@ class StrategicPlanner:
                     people_home_count=people_home_count,
                     indoor_humidity=indoor_humidity,
                     appliance_btu=appliance_btu,
+                    aux_threshold_f=aux_threshold_f,
+                    aux_heat_active=aux_heat_active,
                 )
             else:
                 schedule = self.optimizer.optimize_setpoints(

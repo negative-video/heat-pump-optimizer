@@ -328,6 +328,7 @@ class ThermalEstimator:
         crawlspace_temp: float | None = None,
         precipitation: bool = False,
         appliance_btu: float = 0.0,
+        aux_resistive_btu_hr: float = 0.0,
     ) -> float:
         """Run one EKF predict-update cycle.
 
@@ -349,6 +350,10 @@ class ThermalEstimator:
             crawlspace_temp: Crawlspace temperature in °F, or None.
             precipitation: Whether it is currently raining/snowing.
             appliance_btu: Net BTU/hr from auxiliary appliances (negative = cooling).
+            aux_resistive_btu_hr: Known BTU/hr from aux/emergency resistive heat strip.
+                Computed as (total_circuit_watts - hp_baseline_watts) * 3.412 when aux
+                is active. Injected as an exogenous thermal load so the EKF correctly
+                attributes only the heat pump's contribution to IDX_Q_HEAT.
 
         Returns:
             Innovation (prediction error before update) in °F.
@@ -364,6 +369,7 @@ class ThermalEstimator:
         self._current_crawlspace_temp = crawlspace_temp
         self._current_precipitation = precipitation
         self._current_appliance_btu = appliance_btu
+        self._current_aux_resistive_btu = aux_resistive_btu_hr
 
         # ── PREDICT ──────────────────────────────────────────────
         x_pred = self._predict_state(
@@ -511,11 +517,14 @@ class ThermalEstimator:
         # Q_boundary(T_air=0) = k_attic*T_attic + k_crawl*T_crawl (if present)
         # Auxiliary appliance load (e.g., HPWH cooling = negative BTU/hr)
         Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
+        # Resistive strip BTU: computed from (circuit_watts - hp_baseline_watts) * 3.412
+        # when aux heat is active, so EKF only attributes heat pump output to IDX_Q_HEAT.
+        Q_aux_resistive = getattr(self, "_current_aux_resistive_btu", 0.0)
 
         forcing_air = (
             UA * infiltration * effective_outdoor
             + R_int_inv * T_mass
-            + Q_hvac + Q_solar + Q_internal + Q_appliances
+            + Q_hvac + Q_solar + Q_internal + Q_appliances + Q_aux_resistive
         )
         # Add boundary zone source terms (conductance × source temp)
         if attic_temp is not None:
@@ -604,7 +613,8 @@ class ThermalEstimator:
             k_boundary += _K_CRAWLSPACE
 
         Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
-        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal + Q_boundary + Q_appliances
+        Q_aux_resistive = getattr(self, "_current_aux_resistive_btu", 0.0)
+        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal + Q_boundary + Q_appliances + Q_aux_resistive
 
         F = np.eye(N_STATES)
         dt = dt_hours

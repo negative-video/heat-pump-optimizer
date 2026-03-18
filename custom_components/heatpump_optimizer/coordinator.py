@@ -133,6 +133,7 @@ from .engine.thermal_simulator import ThermalSimulator
 from .engine.adaptive_performance_model import AdaptivePerformanceModel
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .engine.greybox_optimizer import GreyBoxOptimizer
+from .learning.aux_heat_learner import AuxHeatLearner
 from .learning.baseline_capture import BaselineCapture
 from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
@@ -340,6 +341,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Grey-box optimizer (LP + Kalman)
         self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+
+        # Aux heat activation learner
+        self.aux_heat_learner = AuxHeatLearner(
+            default_hp_watts=self._power_default_watts
+        )
+        self._cached_aux_heat_active: bool = False
 
         # Adapters (HA ↔ engine)
         self.thermostat = ThermostatAdapter(hass, climate_entity_id)
@@ -843,6 +850,51 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         )
         outdoor_temp = outdoor_reading.value if outdoor_reading else None
 
+        # Aux heat state (computed once, reused across savings/EKF/learner)
+        aux_heat_active = self._is_aux_heat_running(thermo_state)
+        # Cache for use in strategic optimization (called from other async paths)
+        self._cached_aux_heat_active = aux_heat_active
+
+        # Effective outdoor temp for aux learner (wind-chill-adjusted if available)
+        _eff_outdoor = outdoor_temp
+        if new_forecast and outdoor_temp is not None:
+            try:
+                _eff_outdoor = new_forecast[0].effective_outdoor_temp or outdoor_temp
+            except Exception:
+                pass
+
+        # Aux heat activation learning and HP baseline watts tracking
+        try:
+            if outdoor_temp is not None and thermo_state.indoor_temp is not None:
+                _setpoint_delta = abs(
+                    thermo_state.indoor_temp
+                    - (thermo_state.target_temp or thermo_state.indoor_temp)
+                )
+                _hum_reading = self.sensor_hub.read_outdoor_humidity(
+                    forecast_snapshot=self.strategic.forecast_snapshot
+                )
+                _outdoor_humidity = (_hum_reading.value if _hum_reading else None) or 50.0
+                self.aux_heat_learner.record_interval(
+                    aux_heat_active=aux_heat_active,
+                    outdoor_temp_f=outdoor_temp,
+                    effective_outdoor_temp_f=_eff_outdoor,
+                    outdoor_humidity=_outdoor_humidity,
+                    setpoint_delta_f=_setpoint_delta,
+                    dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                    hvac_running=hvac_running,
+                    hvac_mode=thermo_state.hvac_mode or "off",
+                    power_watts=power_watts,
+                )
+        except Exception:
+            _LOGGER.debug("Aux heat learner update failed", exc_info=True)
+
+        # Compute resistive BTU for EKF (separates HP from strip contribution)
+        aux_resistive_btu = 0.0
+        if aux_heat_active and power_watts is not None:
+            hp_watts = self.aux_heat_learner.learned_hp_watts
+            if power_watts > hp_watts:
+                aux_resistive_btu = (power_watts - hp_watts) * 3.412  # BTU/hr
+
         # ── Savings tracking ──────────────────────────────────────────
 
         try:
@@ -862,6 +914,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 solar_production_watts=solar_reading.value if solar_reading else None,
                 grid_import_watts=grid_import_reading.value if grid_import_reading else None,
                 actual_cop=actual_cop,
+                aux_heat_active=aux_heat_active,
+                hp_baseline_watts=self.aux_heat_learner.learned_hp_watts,
             )
         except Exception:
             _LOGGER.warning("Savings tracking failed", exc_info=True)
@@ -912,6 +966,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                         people_home_count=self.occupancy.get_people_home_count(),
                         precipitation=is_precip,
                         indoor_humidity=self._current_indoor_humidity,
+                        aux_threshold_f=(
+                            self.aux_heat_learner.threshold_f
+                            if self.aux_heat_learner.is_learned else None
+                        ),
                     )
         except Exception:
             _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
@@ -1109,6 +1167,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Run optimizer in executor (synchronous engine)
         try:
+            _aux_threshold = (
+                self.aux_heat_learner.threshold_f
+                if self.aux_heat_learner.is_learned else None
+            )
+            _aux_active = getattr(self, "_cached_aux_heat_active", False)
             schedule = await self.hass.async_add_executor_job(
                 self.strategic.optimize,
                 thermo_state.indoor_temp,
@@ -1121,6 +1184,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 people_count,
                 self._current_indoor_humidity,
                 self.appliance_manager.total_thermal_impact_btu(),
+                _aux_threshold,
+                _aux_active,
             )
         finally:
             # Restore original model references
@@ -1755,6 +1820,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             crawlspace_temp=crawlspace_reading.value if crawlspace_reading else None,
             precipitation=is_precipitation,
             appliance_btu=appliance_btu,
+            aux_resistive_btu_hr=aux_resistive_btu,
         )
 
         if self.estimator._n_obs % 100 == 0:
@@ -2057,6 +2123,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "baseline_capture": self.baseline_capture.to_dict(),
             "counterfactual": self.counterfactual.to_dict(),
             "performance_profiler": self.profiler.to_dict(),
+            "aux_heat_learner": self.aux_heat_learner.to_dict(),
             "_history_bootstrap_completed": self._history_bootstrap_completed,
         }
         await self._store.async_save(data)
@@ -2119,6 +2186,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 "Restored performance profiler (%d observations, confidence=%.0f%%)",
                 self.profiler.total_observations,
                 self.profiler.confidence() * 100,
+            )
+        if "aux_heat_learner" in stored:
+            self.aux_heat_learner = AuxHeatLearner.from_dict(
+                stored["aux_heat_learner"],
+                default_hp_watts=self._power_default_watts,
+            )
+            _LOGGER.debug(
+                "Restored aux heat learner (%d events, threshold=%.1f°F, hp_watts=%.0fW)",
+                self.aux_heat_learner.event_count,
+                self.aux_heat_learner.threshold_f,
+                self.aux_heat_learner.learned_hp_watts,
             )
 
     async def async_try_history_bootstrap_if_needed(self) -> None:
@@ -2620,6 +2698,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Auxiliary appliances
             "appliance_thermal_load_btu": self.appliance_manager.total_thermal_impact_btu(),
             "appliance_diagnostics": self.appliance_manager.get_diagnostics(),
+
+            # Aux heat learner
+            "aux_heat_threshold_f": (
+                self.aux_heat_learner.threshold_f
+                if self.aux_heat_learner.is_learned else None
+            ),
+            "aux_heat_threshold_learned": self.aux_heat_learner.is_learned,
+            "aux_heat_event_count": self.aux_heat_learner.event_count,
+            "aux_heat_learned_hp_watts": (
+                round(self.aux_heat_learner.learned_hp_watts)
+                if self.aux_heat_learner.hp_watts_learned else None
+            ),
+            "aux_heat_kwh_today": today_savings.total_aux_heat_kwh,
+            "avoided_aux_heat_kwh_today": today_savings.total_avoided_aux_kwh,
         }
 
     def _next_transition_info(self) -> dict[str, str] | None:
