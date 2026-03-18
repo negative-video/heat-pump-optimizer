@@ -889,11 +889,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Aux heat learner update failed", exc_info=True)
 
         # Compute resistive BTU for EKF (separates HP from strip contribution)
-        aux_resistive_btu = 0.0
+        self._cached_aux_resistive_btu = 0.0
         if aux_heat_active and power_watts is not None:
             hp_watts = self.aux_heat_learner.learned_hp_watts
             if power_watts > hp_watts:
-                aux_resistive_btu = (power_watts - hp_watts) * 3.412  # BTU/hr
+                self._cached_aux_resistive_btu = (power_watts - hp_watts) * 3.412  # BTU/hr
 
         # ── Savings tracking ──────────────────────────────────────────
 
@@ -1820,7 +1820,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             crawlspace_temp=crawlspace_reading.value if crawlspace_reading else None,
             precipitation=is_precipitation,
             appliance_btu=appliance_btu,
-            aux_resistive_btu_hr=aux_resistive_btu,
+            aux_resistive_btu_hr=getattr(self, "_cached_aux_resistive_btu", 0.0),
         )
 
         if self.estimator._n_obs % 100 == 0:
