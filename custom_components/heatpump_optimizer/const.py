@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.12"
+VERSION = "0.1.13"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -32,6 +32,13 @@ CONF_HVAC_POWER_DEFAULT_WATTS = "hvac_power_default_watts"
 CONF_CARBON_WEIGHT = "carbon_weight"
 CONF_COST_WEIGHT = "cost_weight"
 
+# HVAC system physical specs (user-provided priors for cold-start)
+CONF_HOME_SQFT = "home_sqft"
+CONF_HVAC_TONNAGE = "hvac_tonnage"
+CONF_HVAC_SEER = "hvac_seer"
+CONF_AUX_HEAT_TYPE = "aux_heat_type"
+CONF_AUX_HEAT_KW = "aux_heat_kw"
+
 # Defaults — comfort optimization range (where the optimizer works when home)
 DEFAULT_COMFORT_COOL_MIN = 72.0
 DEFAULT_COMFORT_COOL_MAX = 78.0  # wider band = more savings opportunity
@@ -47,7 +54,9 @@ DEFAULT_FORECAST_DEVIATION_THRESHOLD = 5.0  # °F
 DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS = 2
 DEFAULT_STALE_FORECAST_HOURS = 6
 DEFAULT_UPDATE_INTERVAL_MINUTES = 5
-DEFAULT_HVAC_POWER_WATTS = 3500  # typical heat pump cooling draw
+DEFAULT_HVAC_POWER_WATTS = 3500  # typical heat pump cooling draw; overridden by tonnage+SEER if provided
+DEFAULT_AUX_HEAT_TYPE = "unknown"
+AUX_HEAT_TYPES = ["none", "electric_strip", "gas", "oil", "unknown"]
 DEFAULT_CARBON_WEIGHT = 0.0
 DEFAULT_COST_WEIGHT = 0.0
 

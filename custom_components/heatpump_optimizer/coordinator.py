@@ -55,6 +55,11 @@ from .const import (
     CONF_GRID_IMPORT_ENTITY,
     CONF_HVAC_POWER_DEFAULT_WATTS,
     CONF_HVAC_POWER_ENTITY,
+    CONF_HOME_SQFT,
+    CONF_HVAC_TONNAGE,
+    CONF_HVAC_SEER,
+    CONF_AUX_HEAT_TYPE,
+    CONF_AUX_HEAT_KW,
     CONF_AREA_SENSOR_CONFIG,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
@@ -148,6 +153,15 @@ _LOGGER = logging.getLogger(__name__)
 LEARNING_PERSIST_INTERVAL_HOURS = 1
 
 
+def _float_or_none(value: object) -> float | None:
+    """Return a float if *value* is a non-zero number, else None."""
+    try:
+        v = float(value)  # type: ignore[arg-type]
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
     """Coordinator that manages the full optimization lifecycle."""
 
@@ -203,13 +217,39 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._rate_entity_id: str | None = opts.get(CONF_ELECTRICITY_RATE_ENTITY) or None
         self._flat_rate: float | None = opts.get(CONF_ELECTRICITY_FLAT_RATE) or None
         self._power_entity_id: str | None = opts.get(CONF_HVAC_POWER_ENTITY) or None
-        self._power_default_watts: float = opts.get(
-            CONF_HVAC_POWER_DEFAULT_WATTS, DEFAULT_HVAC_POWER_WATTS
-        )
         self._tou_schedule: list[dict] | None = opts.get(CONF_TOU_SCHEDULE) or None
         self._carbon_weight: float = opts.get(CONF_CARBON_WEIGHT, DEFAULT_CARBON_WEIGHT)
         self._cost_weight: float = opts.get(CONF_COST_WEIGHT, DEFAULT_COST_WEIGHT)
         self._aux_heat_override_entity_id: str | None = opts.get(CONF_AUX_HEAT_OVERRIDE_ENTITY) or None
+
+        # Physical system specs — merged into opts by __init__.py
+        # (onboarding data merged first, options flow overrides second)
+        self._home_sqft: float | None = _float_or_none(opts.get(CONF_HOME_SQFT))
+        self._hvac_tonnage: float | None = _float_or_none(opts.get(CONF_HVAC_TONNAGE))
+        self._hvac_seer: float | None = _float_or_none(opts.get(CONF_HVAC_SEER))
+        self._aux_heat_type: str = opts.get(CONF_AUX_HEAT_TYPE, "unknown")
+        self._aux_heat_kw: float | None = _float_or_none(opts.get(CONF_AUX_HEAT_KW))
+
+        # Derive power_watts from user-provided specs when no explicit override is set.
+        # Priority: explicit watts > tonnage+SEER > tonnage-only estimate > hard default.
+        if CONF_HVAC_POWER_DEFAULT_WATTS in opts:
+            self._power_default_watts: float = float(opts[CONF_HVAC_POWER_DEFAULT_WATTS])
+        elif self._hvac_tonnage and self._hvac_seer:
+            # Rated watts = rated BTU/hr ÷ SEER  (e.g. 3 ton @ 16 SEER = 2,250 W)
+            self._power_default_watts = (self._hvac_tonnage * 12000.0) / self._hvac_seer
+            _LOGGER.debug(
+                "Derived power_default_watts=%.0f W from tonnage=%.1f + SEER=%.1f",
+                self._power_default_watts, self._hvac_tonnage, self._hvac_seer,
+            )
+        elif self._hvac_tonnage:
+            # Estimate: ~850 W/ton ≈ 14 SEER (conservative — slightly overestimates cost)
+            self._power_default_watts = self._hvac_tonnage * 850.0
+            _LOGGER.debug(
+                "Estimated power_default_watts=%.0f W from tonnage=%.1f (no SEER provided)",
+                self._power_default_watts, self._hvac_tonnage,
+            )
+        else:
+            self._power_default_watts = float(DEFAULT_HVAC_POWER_WATTS)
 
         # SensorHub — centralized sensor reads with fallback chains
         self.sensor_hub = SensorHub(
@@ -285,10 +325,22 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         )
 
         if initialization_mode == "learning":
-            # Cold start: synthetic defaults, EKF learns from scratch
+            # Cold start: synthetic defaults, EKF learns from scratch.
+            # Tonnage and sqft provide better priors when available, reducing
+            # the convergence window from weeks to days.
             self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
-            _LOGGER.info("Initialized in learning mode — model will calibrate over 2-3 weeks")
+            self.estimator = ThermalEstimator.cold_start(
+                indoor_temp=_init_indoor,
+                tonnage=self._hvac_tonnage,
+                sqft=self._home_sqft,
+            )
+            _LOGGER.info(
+                "Initialized in learning mode — model will calibrate over %s "
+                "(tonnage=%s, sqft=%s)",
+                "2-3 days" if self._hvac_tonnage else "2-3 weeks",
+                f"{self._hvac_tonnage:.1f} ton" if self._hvac_tonnage else "unknown",
+                f"{self._home_sqft:.0f} ft²" if self._home_sqft else "unknown",
+            )
         elif initialization_mode == "import" and model_import_data:
             # Restore from exported model
             import json as _json
@@ -304,7 +356,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.error("Failed to import model (%s) — falling back to defaults", type(err).__name__, exc_info=True)
                 self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
+                self.estimator = ThermalEstimator.cold_start(
+                    indoor_temp=_init_indoor,
+                    tonnage=self._hvac_tonnage,
+                    sqft=self._home_sqft,
+                )
         elif profile_path:
             # Beestat mode (default, backward compatible)
             try:
@@ -321,14 +377,22 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     profile_path, err,
                 )
                 self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
+                self.estimator = ThermalEstimator.cold_start(
+                    indoor_temp=_init_indoor,
+                    tonnage=self._hvac_tonnage,
+                    sqft=self._home_sqft,
+                )
         else:
             # Beestat mode selected but no profile path — fall back to learning
             _LOGGER.warning(
                 "Beestat mode selected but no profile path configured — using learning mode"
             )
             self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start(indoor_temp=_init_indoor)
+            self.estimator = ThermalEstimator.cold_start(
+                indoor_temp=_init_indoor,
+                tonnage=self._hvac_tonnage,
+                sqft=self._home_sqft,
+            )
 
         self.simulator = ThermalSimulator(self.model)
         self.optimizer = ScheduleOptimizer(self.model, self.simulator)
@@ -888,12 +952,21 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.debug("Aux heat learner update failed", exc_info=True)
 
-        # Compute resistive BTU for EKF (separates HP from strip contribution)
+        # Compute resistive BTU for EKF (separates HP from strip contribution).
+        # When a power sensor is available, subtract the learned HP baseline from
+        # the measured circuit draw.  When no sensor is present but the user has
+        # declared their aux heat capacity (aux_heat_kw), use that directly so
+        # the EKF receives correct heat input rather than absorbing strip heat
+        # into the compressor capacity estimate.
         self._cached_aux_resistive_btu = 0.0
-        if aux_heat_active and power_watts is not None:
-            hp_watts = self.aux_heat_learner.learned_hp_watts
-            if power_watts > hp_watts:
-                self._cached_aux_resistive_btu = (power_watts - hp_watts) * 3.412  # BTU/hr
+        if aux_heat_active:
+            if power_watts is not None:
+                hp_watts = self.aux_heat_learner.learned_hp_watts
+                if power_watts > hp_watts:
+                    self._cached_aux_resistive_btu = (power_watts - hp_watts) * 3.412  # BTU/hr
+            elif self._aux_heat_kw is not None and self._aux_heat_type == "electric_strip":
+                # No power sensor — use declared strip capacity as a fixed prior
+                self._cached_aux_resistive_btu = self._aux_heat_kw * 3412.0  # kW → BTU/hr
 
         # ── Savings tracking ──────────────────────────────────────────
 
@@ -1474,8 +1547,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         except Exception:
             init_indoor = 72.0
 
-        # Reset EKF thermal estimator
-        self.estimator = ThermalEstimator.cold_start(indoor_temp=init_indoor)
+        # Reset EKF thermal estimator (preserve user-provided priors)
+        self.estimator = ThermalEstimator.cold_start(
+            indoor_temp=init_indoor,
+            tonnage=self._hvac_tonnage,
+            sqft=self._home_sqft,
+        )
         self.adaptive_model = AdaptivePerformanceModel(self.estimator)
         try:
             self.adaptive_model.cool_differential = self.model.cool_differential

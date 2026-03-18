@@ -43,6 +43,11 @@ from .const import (
     CONF_THERMOSTAT_DEADBAND,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
+    CONF_HOME_SQFT,
+    CONF_HVAC_TONNAGE,
+    CONF_HVAC_SEER,
+    CONF_AUX_HEAT_TYPE,
+    CONF_AUX_HEAT_KW,
     DEFAULT_AGGRESSIVENESS,
     DEFAULT_AWAY_COMFORT_DELTA,
     DEFAULT_COMFORT_COOL_MAX,
@@ -109,14 +114,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Comfort ranges — options flow overrides take precedence over initial data
     opts = dict(entry.options)
 
-    # Merge onboarding sensor data into opts (options take precedence)
+    # Merge onboarding data into opts (options flow overrides take precedence)
     for _key in (
         CONF_OUTDOOR_TEMP_ENTITIES, CONF_OUTDOOR_HUMIDITY_ENTITIES,
         CONF_INDOOR_TEMP_ENTITIES, CONF_INDOOR_HUMIDITY_ENTITIES,
+        # System specs set during initial setup — editable later via options flow
+        CONF_HOME_SQFT, CONF_HVAC_TONNAGE, CONF_AUX_HEAT_TYPE, CONF_AUX_HEAT_KW,
     ):
         if _key not in opts:
             _val = entry.data.get(_key)
-            if _val:
+            if _val is not None:
                 opts[_key] = _val
     comfort_cool = (
         opts.get(CONF_COMFORT_COOL_MIN, entry.data.get(CONF_COMFORT_COOL_MIN, DEFAULT_COMFORT_COOL_MIN)),

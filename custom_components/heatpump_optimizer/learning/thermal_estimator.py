@@ -177,35 +177,70 @@ class ThermalEstimator:
     # ── Initialization ──────────────────────────────────────────────
 
     @classmethod
-    def cold_start(cls, indoor_temp: float = 72.0) -> ThermalEstimator:
+    def cold_start(
+        cls,
+        indoor_temp: float = 72.0,
+        tonnage: float | None = None,
+        sqft: float | None = None,
+    ) -> ThermalEstimator:
         """Initialize with conservative defaults (no Beestat data).
 
-        Suitable for a ~2000 sq ft home. The filter will converge to
-        the true values within ~2 weeks of mixed weather.
+        When ``tonnage`` is provided the Q_cool/Q_heat priors are set to the
+        rated capacity (tons × 12,000 BTU/hr) and the initial covariance is
+        narrowed to ±20%, dramatically reducing convergence time from weeks to
+        days.  When ``sqft`` is provided the air thermal capacitance prior uses
+        the same 0.6 BTU/°F/ft² formula as ``from_beestat()``.
+
+        Without either, the filter falls back to generic conservative defaults
+        suitable for a ~2,000 ft² home, which will still converge within
+        ~2 weeks of mixed-weather operation.
         """
         est = cls()
+
+        # ── Capacity priors ──────────────────────────────────────────
+        if tonnage is not None:
+            q_cool = tonnage * 12000.0        # rated BTU/hr
+            q_heat = tonnage * 12000.0 * 1.1  # ~110% of cooling rating at 47°F outdoor
+            q_cool_var = (0.20 * q_cool) ** 2  # ±20% SD
+            q_heat_var = (0.20 * q_heat) ** 2
+        else:
+            q_cool = 20000.0   # ~1.7 ton generic default
+            q_heat = 18000.0
+            q_cool_var = 1e8   # very uncertain — let filter converge freely
+            q_heat_var = 1e8
+
+        # ── Thermal mass priors ──────────────────────────────────────
+        if sqft is not None:
+            sqft = max(300.0, min(10000.0, sqft))
+            est._envelope_area = sqft
+            c_air = 0.6 * sqft           # BTU/°F (same formula as from_beestat)
+            c_inv = 1.0 / c_air
+            c_inv_var = (0.30 * c_inv) ** 2  # ±30% SD
+        else:
+            c_inv = 0.001    # C ≈ 1000 BTU/°F (~2000 ft² default)
+            c_inv_var = 1e-4
+
         est.x = np.array([
             indoor_temp,  # T_air
             indoor_temp,  # T_mass (assume equilibrium at start)
             0.10,         # R_inv → R ≈ 10 °F·hr/BTU (moderate insulation)
             50.0,         # R_int_inv → R_int ≈ 0.02 (mass τ ≈ 200 hr at default C_mass)
-            0.001,        # C_inv → C ≈ 1000 BTU/°F
+            c_inv,        # C_inv
             0.0001,       # C_mass_inv → C_mass ≈ 10,000 BTU/°F
-            20000.0,      # Q_cool_base ≈ 20k BTU/hr (~1.7 ton)
-            18000.0,      # Q_heat_base ≈ 18k BTU/hr
+            q_cool,       # Q_cool_base
+            q_heat,       # Q_heat_base
             DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu ≈ 3000 BTU/hr
         ])
-        # High initial uncertainty — let the filter find the truth
         est.P = np.diag([
-            0.1,       # T_air — we trust the thermostat
-            25.0,      # T_mass — very uncertain (hidden state)
-            0.01,      # R_inv — wide range possible
-            100.0,     # R_int_inv — wide range to explore coupling strength
-            1e-4,      # C_inv
-            1e-6,      # C_mass_inv
-            1e8,       # Q_cool_base — very uncertain without data
-            1e8,       # Q_heat_base
-            1e6,       # solar_gain_btu — uncertain without data
+            0.1,        # T_air — we trust the thermostat
+            25.0,       # T_mass — very uncertain (hidden state)
+            0.01,       # R_inv — wide range possible
+            100.0,      # R_int_inv — wide range to explore coupling strength
+            c_inv_var,  # C_inv — tighter if sqft known
+            1e-6,       # C_mass_inv
+            q_cool_var, # Q_cool_base — tight if tonnage known, open otherwise
+            q_heat_var, # Q_heat_base
+            1e6,        # solar_gain_btu — uncertain without data
         ])
         est._P_initial = est.P.copy()
         est._initialized = True

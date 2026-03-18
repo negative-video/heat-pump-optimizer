@@ -49,6 +49,13 @@ from .const import (
     CONF_GRID_IMPORT_ENTITY,
     CONF_HVAC_POWER_DEFAULT_WATTS,
     CONF_HVAC_POWER_ENTITY,
+    CONF_HOME_SQFT,
+    CONF_HVAC_TONNAGE,
+    CONF_HVAC_SEER,
+    CONF_AUX_HEAT_TYPE,
+    CONF_AUX_HEAT_KW,
+    DEFAULT_AUX_HEAT_TYPE,
+    AUX_HEAT_TYPES,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
     CONF_INDOOR_WEIGHTING_MODE,
@@ -252,7 +259,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             if weather_entities:
                 user_input[CONF_WEATHER_ENTITY] = weather_entities[0]
             self._config_data.update(user_input)
-            return await self.async_step_air_sensors()
+            return await self.async_step_hvac_specs()
 
         # Auto-discover entities for smart defaults
         discovery = EntityDiscovery(self.hass)
@@ -301,7 +308,82 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(schema),
         )
 
-    # ── Step 2: Air Sensors ─────────────────────────────────────────
+    # ── Step 2: HVAC System Specs ────────────────────────────────────
+
+    async def async_step_hvac_specs(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 2: Optional system specs — improves cold-start accuracy.
+
+        All fields are optional.  Skipping this step leaves the thermal model
+        at generic defaults; filling it in narrows the EKF priors and produces
+        accurate energy estimates from day one.
+        """
+        if user_input is not None:
+            # Convert tonnage string → float before storing
+            if CONF_HVAC_TONNAGE in user_input:
+                try:
+                    user_input[CONF_HVAC_TONNAGE] = float(user_input[CONF_HVAC_TONNAGE])
+                except (ValueError, TypeError):
+                    user_input.pop(CONF_HVAC_TONNAGE, None)
+            # Strip empty / zero / placeholder values so they don't shadow defaults
+            cleaned = {
+                k: v for k, v in user_input.items()
+                if v is not None and v != "" and v != 0 and v != "unknown"
+            }
+            self._config_data.update(cleaned)
+            return await self.async_step_air_sensors()
+
+        existing = self._config_data
+        tonnage_options = ["1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "5.0", "unknown"]
+
+        schema: dict[Any, Any] = {
+            vol.Optional(
+                CONF_HOME_SQFT,
+                description={"suggested_value": existing.get(CONF_HOME_SQFT)},
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=300, max=10000, step=100,
+                    unit_of_measurement="sq ft",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_HVAC_TONNAGE,
+                description={"suggested_value": str(existing.get(CONF_HVAC_TONNAGE, "unknown"))},
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=tonnage_options,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_AUX_HEAT_TYPE,
+                description={"suggested_value": existing.get(CONF_AUX_HEAT_TYPE, DEFAULT_AUX_HEAT_TYPE)},
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=AUX_HEAT_TYPES,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_AUX_HEAT_KW,
+                description={"suggested_value": existing.get(CONF_AUX_HEAT_KW)},
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1, max=30, step=0.5,
+                    unit_of_measurement="kW",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+        }
+
+        return self.async_show_form(
+            step_id="hvac_specs",
+            data_schema=vol.Schema(schema),
+        )
+
+    # ── Step 3: Air Sensors ─────────────────────────────────────────
 
     async def async_step_air_sensors(
         self, user_input: dict[str, Any] | None = None
@@ -691,13 +773,19 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     async def async_step_equipment(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Change thermostat or weather source without losing learned data."""
+        """Change thermostat, weather source, or system specs without losing learned data."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
+            # Convert tonnage string back to float (SelectSelector returns str)
+            if CONF_HVAC_TONNAGE in user_input:
+                try:
+                    user_input[CONF_HVAC_TONNAGE] = float(user_input[CONF_HVAC_TONNAGE])
+                except (ValueError, TypeError):
+                    user_input.pop(CONF_HVAC_TONNAGE, None)
             self._options.update(user_input)
             return self.async_create_entry(title="", data=self._options)
 
-        # Read current values from entry data (initial setup)
+        # Read current values — options take precedence over initial setup data
         data = self.config_entry.data
 
         current_climate = self._options.get(
@@ -707,6 +795,12 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             CONF_WEATHER_ENTITIES,
             data.get(CONF_WEATHER_ENTITIES, [data.get(CONF_WEATHER_ENTITY, "")]),
         )
+        current_sqft = self._options.get(CONF_HOME_SQFT, data.get(CONF_HOME_SQFT))
+        current_tonnage = self._options.get(CONF_HVAC_TONNAGE, data.get(CONF_HVAC_TONNAGE))
+        current_aux_type = self._options.get(CONF_AUX_HEAT_TYPE, data.get(CONF_AUX_HEAT_TYPE, DEFAULT_AUX_HEAT_TYPE))
+        current_aux_kw = self._options.get(CONF_AUX_HEAT_KW, data.get(CONF_AUX_HEAT_KW))
+
+        tonnage_options = ["1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "5.0", "unknown"]
 
         return self.async_show_form(
             step_id="equipment",
@@ -733,6 +827,44 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         selector.EntitySelectorConfig(
                             domain=["binary_sensor", "input_boolean", "switch"],
                         ),
+                    ),
+                    vol.Optional(
+                        CONF_HOME_SQFT,
+                        description={"suggested_value": current_sqft},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=300, max=10000, step=100,
+                            unit_of_measurement="sq ft",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_HVAC_TONNAGE,
+                        description={"suggested_value": str(current_tonnage) if current_tonnage else "unknown"},
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=tonnage_options,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AUX_HEAT_TYPE,
+                        description={"suggested_value": current_aux_type},
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=AUX_HEAT_TYPES,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_AUX_HEAT_KW,
+                        description={"suggested_value": current_aux_kw},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=30, step=0.5,
+                            unit_of_measurement="kW",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
                     ),
                 }
             ),
@@ -930,10 +1062,18 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
-                        CONF_HVAC_POWER_DEFAULT_WATTS,
-                        default=self._options.get(
-                            CONF_HVAC_POWER_DEFAULT_WATTS, DEFAULT_HVAC_POWER_WATTS
+                        CONF_HVAC_SEER,
+                        description={"suggested_value": self._options.get(CONF_HVAC_SEER)},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=8, max=30, step=0.5,
+                            unit_of_measurement="SEER",
+                            mode=selector.NumberSelectorMode.BOX,
                         ),
+                    ),
+                    vol.Optional(
+                        CONF_HVAC_POWER_DEFAULT_WATTS,
+                        description={"suggested_value": self._options.get(CONF_HVAC_POWER_DEFAULT_WATTS)},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=500, max=20000, step=100,
