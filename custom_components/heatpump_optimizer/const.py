@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.13"
+VERSION = "0.1.14"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -219,6 +219,22 @@ DEFAULT_EMA_ALPHA = 0.2  # weight for new reading (lower = more smoothing)
 
 # Door/window debounce
 DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS = 120  # 2 minutes
+
+# Thermostat satellite sensor blend mitigation
+CONF_BLEND_MITIGATION_MODE = "blend_mitigation_mode"
+CONF_THERMOSTAT_OCCUPANCY_ENTITY = "thermostat_occupancy_entity"
+CONF_BLEND_SCHEDULE_START = "blend_schedule_start"
+CONF_BLEND_SCHEDULE_END = "blend_schedule_end"
+CONF_BLEND_OUTLIER_THRESHOLD_F = "blend_outlier_threshold_f"
+
+BLEND_MODE_NONE = "none"
+BLEND_MODE_OCCUPANCY = "occupancy"
+BLEND_MODE_SCHEDULE = "schedule"
+BLEND_MODE_MEDIAN = "median"
+
+DEFAULT_BLEND_OUTLIER_THRESHOLD_F = 3.0   # °F from median to count as outlier
+DEFAULT_BLEND_SCHEDULE_START = "22:00"    # start of nightly suppression window
+DEFAULT_BLEND_SCHEDULE_END = "08:00"      # end of nightly suppression window
 
 # Setpoint switching penalty
 DEFAULT_SWITCHING_PENALTY_WEIGHT = 0.3  # soft penalty for consecutive setpoint changes

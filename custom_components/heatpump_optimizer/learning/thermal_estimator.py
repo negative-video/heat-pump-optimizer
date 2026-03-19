@@ -364,6 +364,7 @@ class ThermalEstimator:
         precipitation: bool = False,
         appliance_btu: float = 0.0,
         aux_resistive_btu_hr: float = 0.0,
+        measurement_noise_scale: float = 1.0,
     ) -> float:
         """Run one EKF predict-update cycle.
 
@@ -389,6 +390,11 @@ class ThermalEstimator:
                 Computed as (total_circuit_watts - hp_baseline_watts) * 3.412 when aux
                 is active. Injected as an exogenous thermal load so the EKF correctly
                 attributes only the heat pump's contribution to IDX_Q_HEAT.
+            measurement_noise_scale: Multiplier for R_meas (default 1.0 = no change).
+                Set >1 when the indoor temperature sensor is suspected unreliable (e.g.
+                thermostat satellite blending). When >1, parameter-learning rows of the
+                Kalman gain are also zeroed to prevent bad measurements from corrupting
+                building thermal estimates.
 
         Returns:
             Innovation (prediction error before update) in °F.
@@ -427,8 +433,9 @@ class ThermalEstimator:
         z_pred = x_pred[IDX_T_AIR]
         innovation = z - z_pred
 
-        # Innovation covariance
-        S = H @ P_pred @ H.T + self.R_meas
+        # Innovation covariance — scale R_meas when sensor trust is reduced
+        effective_R = self.R_meas * measurement_noise_scale
+        S = H @ P_pred @ H.T + effective_R
         S_scalar = float(S[0, 0])
 
         # Kalman gain
@@ -444,12 +451,24 @@ class ThermalEstimator:
                 open_door_window_count,
             )
 
+        # Thermostat blend mitigation: when noise scale > 1 the sensor is
+        # suspected to be blending toward an occupied satellite sensor.
+        # Freeze parameter-learning rows so bad observations can't corrupt R/C.
+        # T_air and T_mass state rows still update (they track real temperatures).
+        if measurement_noise_scale > 1.0:
+            K[_IDX_FIRST_PARAM:, :] = 0.0
+            _LOGGER.debug(
+                "EKF parameter learning paused: thermostat blend mitigation "
+                "(noise_scale=%.1f)",
+                measurement_noise_scale,
+            )
+
         # State update
         self.x = x_pred + (K * innovation).flatten()
 
         # Covariance update (Joseph form for numerical stability)
         I_KH = np.eye(N_STATES) - K @ H
-        self.P = I_KH @ P_pred @ I_KH.T + (K * self.R_meas) @ K.T
+        self.P = I_KH @ P_pred @ I_KH.T + (K * effective_R) @ K.T
 
         # Clamp parameters to physical bounds
         self._clamp_parameters()

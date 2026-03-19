@@ -87,6 +87,8 @@ async def async_setup_entry(
         AuxHeatThresholdSensor(coordinator, entry),
         AuxHeatKwhTodaySensor(coordinator, entry),
         AvoidedAuxHeatKwhSensor(coordinator, entry),
+        # Thermostat blend mitigation diagnostics
+        CrossSensorSpreadSensor(coordinator, entry),
     ]
     async_add_entities(entities)
 
@@ -1413,3 +1415,44 @@ class AvoidedAuxHeatKwhSensor(_DailyResetMixin, OptimizerBaseSensor):
             return None
         val = self.coordinator.data.get("avoided_aux_heat_kwh_today", 0.0)
         return val if val > 0 else None
+
+
+class CrossSensorSpreadSensor(OptimizerBaseSensor):
+    """Temperature spread between the thermostat and additional indoor sensors.
+
+    Reports the absolute difference between the primary thermostat reading and
+    the average of configured indoor temperature entities. A persistently large
+    spread (>2-3°F) at night when only one area is occupied is a sign that the
+    thermostat is blending toward a remote satellite sensor. Useful for tuning
+    the blend mitigation threshold in Multi-Sensor Median mode and for monitoring
+    whether the Occupancy-Based or Schedule modes are activating correctly.
+
+    This sensor is always present regardless of the selected blend mitigation mode.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "cross_sensor_spread", "Cross-Sensor Temp Spread")
+        self._attr_device_class = SensorDeviceClass.TEMPERATURE
+        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:thermometer-lines"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        spread = self.coordinator.data.get("cross_sensor_spread_f", 0.0)
+        # Only expose when indoor entities are configured (spread is meaningful)
+        return round(spread, 1) if spread is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {
+            "blend_mode": self.coordinator.data.get("thermostat_blend_mode"),
+            "blend_active": self.coordinator.data.get("thermostat_blend_suspected", False),
+        }

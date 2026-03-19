@@ -18,7 +18,19 @@ from .const import (
     AGGRESSIVENESS_AGGRESSIVE,
     AGGRESSIVENESS_BALANCED,
     AGGRESSIVENESS_CONSERVATIVE,
+    BLEND_MODE_NONE,
+    BLEND_MODE_OCCUPANCY,
+    BLEND_MODE_SCHEDULE,
+    BLEND_MODE_MEDIAN,
     CONF_AREA_SENSOR_CONFIG,
+    CONF_BLEND_MITIGATION_MODE,
+    CONF_BLEND_OUTLIER_THRESHOLD_F,
+    CONF_BLEND_SCHEDULE_END,
+    CONF_BLEND_SCHEDULE_START,
+    CONF_THERMOSTAT_OCCUPANCY_ENTITY,
+    DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
+    DEFAULT_BLEND_SCHEDULE_END,
+    DEFAULT_BLEND_SCHEDULE_START,
     CONF_AUXILIARY_APPLIANCES,
     CONF_AWAY_COMFORT_DELTA,
     CONF_BAROMETRIC_PRESSURE_ENTITY,
@@ -749,7 +761,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["equipment", "outdoor_sensors", "indoor_sensing", "presence", "energy", "behavior", "comfort", "schedule", "appliances"],
+            menu_options=["equipment", "outdoor_sensors", "indoor_sensing", "blend_mitigation", "presence", "energy", "behavior", "comfort", "schedule", "appliances"],
         )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -2064,6 +2076,86 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                 }
             ),
+        )
+
+    async def async_step_blend_mitigation(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure thermostat satellite sensor blend mitigation.
+
+        Some thermostats (Ecobee, Nest) blend their reported temperature toward
+        an occupied satellite/room sensor. This causes the EKF thermal model to
+        receive artificially warm temperatures at night, corrupting building
+        thermal estimates. Three mitigation strategies are available.
+        """
+        if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        current_mode = self._options.get(CONF_BLEND_MITIGATION_MODE, BLEND_MODE_NONE)
+
+        schema: dict = {
+            vol.Optional(
+                CONF_BLEND_MITIGATION_MODE,
+                default=current_mode,
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[
+                        selector.SelectOptionDict(
+                            value=BLEND_MODE_NONE,
+                            label="Disabled",
+                        ),
+                        selector.SelectOptionDict(
+                            value=BLEND_MODE_OCCUPANCY,
+                            label="Occupancy-Based (requires thermostat occupancy sensor + ≥1 room sensor)",
+                        ),
+                        selector.SelectOptionDict(
+                            value=BLEND_MODE_SCHEDULE,
+                            label="Time Schedule (suppress thermostat during configured hours)",
+                        ),
+                        selector.SelectOptionDict(
+                            value=BLEND_MODE_MEDIAN,
+                            label="Multi-Sensor Median (requires ≥3 indoor sensors)",
+                        ),
+                    ],
+                ),
+            ),
+            # Occupancy mode — thermostat built-in occupancy sensor
+            vol.Optional(
+                CONF_THERMOSTAT_OCCUPANCY_ENTITY,
+                default=self._options.get(CONF_THERMOSTAT_OCCUPANCY_ENTITY, ""),
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="binary_sensor",
+                ),
+            ),
+            # Schedule mode — suppression window start/end
+            vol.Optional(
+                CONF_BLEND_SCHEDULE_START,
+                default=self._options.get(CONF_BLEND_SCHEDULE_START, DEFAULT_BLEND_SCHEDULE_START),
+            ): selector.TimeSelector(),
+            vol.Optional(
+                CONF_BLEND_SCHEDULE_END,
+                default=self._options.get(CONF_BLEND_SCHEDULE_END, DEFAULT_BLEND_SCHEDULE_END),
+            ): selector.TimeSelector(),
+            # Median mode — outlier threshold
+            vol.Optional(
+                CONF_BLEND_OUTLIER_THRESHOLD_F,
+                default=self._options.get(CONF_BLEND_OUTLIER_THRESHOLD_F, DEFAULT_BLEND_OUTLIER_THRESHOLD_F),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1.5,
+                    max=6.0,
+                    step=0.5,
+                    unit_of_measurement="°F",
+                ),
+            ),
+        }
+
+        return self.async_show_form(
+            step_id="blend_mitigation",
+            data_schema=vol.Schema(schema),
         )
 
     async def async_step_indoor_simple(

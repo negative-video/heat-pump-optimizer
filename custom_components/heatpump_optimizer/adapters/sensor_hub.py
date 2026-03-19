@@ -11,6 +11,7 @@ All temperatures are normalized to °F. Wind speeds to mph. Pressure to hPa.
 from __future__ import annotations
 
 import logging
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -27,6 +28,9 @@ from homeassistant.util.unit_conversion import (
 )
 
 from ..const import (
+    BLEND_MODE_MEDIAN,
+    BLEND_MODE_NONE,
+    DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
     DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS,
     DEFAULT_EMA_ALPHA,
     DEFAULT_SENSOR_STALE_MINUTES,
@@ -83,6 +87,9 @@ class SensorHub:
         co2_entity: str | None = None,
         rate_entity: str | None = None,
         flat_rate: float | None = None,
+        # Thermostat satellite blend mitigation (optional)
+        blend_mode: str = BLEND_MODE_NONE,
+        blend_outlier_threshold_f: float = DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
     ) -> None:
         self.hass = hass
 
@@ -133,6 +140,13 @@ class SensorHub:
         self._dw_debounce_seconds: int = DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS
         self._dw_last_raw: dict[str, tuple[bool, datetime]] = {}
         self._dw_debounced: dict[str, bool] = {}
+
+        # Thermostat satellite blend mitigation (median mode)
+        self._blend_mode: str = blend_mode
+        self._blend_outlier_threshold_f: float = blend_outlier_threshold_f
+        # Public diagnostic state (updated by read_indoor_temp each cycle)
+        self.thermostat_blend_suspected: bool = False
+        self.cross_sensor_spread_f: float = 0.0
 
     # ── Core validation ─────────────────────────────────────────────
 
@@ -421,6 +435,72 @@ class SensorHub:
 
     # ── Indoor temperature ────────────────────────────────────────────
 
+    def _get_fresh_indoor_entity_values(self) -> list[float]:
+        """Return fresh °F readings from each configured indoor temp entity.
+
+        Used by the median outlier filter to get individual values before
+        they are averaged together.  Stale values are excluded so that
+        offline sensors don't influence the pool.
+        """
+        values: list[float] = []
+        for eid in self._indoor_temp_entities:
+            value, unit = self._read_entity_with_unit(eid, -80.0, 200.0, "Indoor temp")
+            if value is None:
+                continue
+            if unit == UnitOfTemperature.CELSIUS or unit == "°C":
+                value = TemperatureConverter.convert(
+                    value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
+                )
+            state = self.hass.states.get(eid)
+            if not self._is_stale(state):
+                values.append(value)
+        return values
+
+    def _median_filter_indoor_temps(
+        self,
+        entity_values: list[float],
+        thermostat_temp: float | None,
+        threshold_f: float,
+    ) -> tuple[float | None, bool, str]:
+        """Pool all indoor sensors, exclude outliers > threshold from median, average remainder.
+
+        Returns (filtered_avg, thermostat_was_excluded, source_string).
+
+        Requires ≥3 sensors for reliable outlier rejection; with fewer sensors,
+        all values are returned unchanged so no sensor is wrongly discarded.
+
+        Kitchen/stove note: a sensor near an active oven spikes as a HIGH outlier
+        and is excluded by the same mechanism as thermostat blending — correct
+        behaviour, since the spike is localised and should not bias the house average.
+        """
+        pool: list[float] = list(entity_values)
+        if thermostat_temp is not None:
+            pool.append(thermostat_temp)
+
+        if not pool:
+            return None, False, "no_sensors"
+
+        if len(pool) < 3:
+            # Insufficient sensors for majority-vote outlier rejection — use all.
+            avg = sum(pool) / len(pool)
+            return avg, False, f"average:{len(pool)}"
+
+        median_val = statistics.median(pool)
+        filtered = [v for v in pool if abs(v - median_val) <= threshold_f]
+        if not filtered:
+            filtered = pool  # safety fallback: never discard everything
+
+        thermostat_excluded = (
+            thermostat_temp is not None
+            and abs(thermostat_temp - median_val) > threshold_f
+        )
+        avg = sum(filtered) / len(filtered)
+        excluded_count = len(pool) - len(filtered)
+        source = f"median_filtered:{len(filtered)}"
+        if excluded_count:
+            source += f"(-{excluded_count})"
+        return avg, thermostat_excluded, source
+
     def read_indoor_temp(
         self,
         thermostat_temp: float | None = None,
@@ -433,6 +513,36 @@ class SensorHub:
         source = "thermostat"
         sensor_count = 1
 
+        # ── Median-filter mode (requires ≥3 sensors for reliable outlier rejection)
+        if self._blend_mode == BLEND_MODE_MEDIAN and self._indoor_temp_entities:
+            entity_values = self._get_fresh_indoor_entity_values()
+            filtered_avg, excluded, filter_source = self._median_filter_indoor_temps(
+                entity_values, thermostat_temp, self._blend_outlier_threshold_f
+            )
+            self.thermostat_blend_suspected = excluded
+            if excluded:
+                _LOGGER.debug(
+                    "Thermostat excluded by median filter: "
+                    "thermostat=%.1f°F, median=%.1f°F, threshold=%.1f°F",
+                    thermostat_temp,
+                    statistics.median(entity_values + ([thermostat_temp] if thermostat_temp is not None else [])),
+                    self._blend_outlier_threshold_f,
+                )
+            if filtered_avg is not None:
+                self._ema_indoor_temp = self._apply_ema(
+                    filtered_avg, self._ema_indoor_temp, self._ema_alpha
+                )
+                total_sensors = len(entity_values) + (1 if thermostat_temp is not None else 0)
+                return SensorReading(
+                    value=self._ema_indoor_temp,
+                    source=filter_source,
+                    timestamp=self._now(),
+                    stale=False,
+                    sensor_count=total_sensors,
+                )
+            # Fall through if no sensors returned
+
+        # ── Standard mode (occupancy/schedule exclusion handled by caller via thermostat_temp=None)
         # 1. Additional room sensors
         reading = self._read_multi_temp(self._indoor_temp_entities, "Indoor temp")
         if reading and not reading.stale:

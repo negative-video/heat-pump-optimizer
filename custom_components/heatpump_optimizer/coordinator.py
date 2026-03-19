@@ -15,7 +15,7 @@ Learning:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -60,7 +60,16 @@ from .const import (
     CONF_HVAC_SEER,
     CONF_AUX_HEAT_TYPE,
     CONF_AUX_HEAT_KW,
+    BLEND_MODE_NONE,
+    BLEND_MODE_MEDIAN,
+    BLEND_MODE_OCCUPANCY,
+    BLEND_MODE_SCHEDULE,
     CONF_AREA_SENSOR_CONFIG,
+    CONF_BLEND_MITIGATION_MODE,
+    CONF_BLEND_OUTLIER_THRESHOLD_F,
+    CONF_BLEND_SCHEDULE_END,
+    CONF_BLEND_SCHEDULE_START,
+    CONF_THERMOSTAT_OCCUPANCY_ENTITY,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
     CONF_INDOOR_WEIGHTING_MODE,
@@ -85,6 +94,9 @@ from .const import (
     DEFAULT_CALENDAR_DEFAULT_MODE,
     DEFAULT_CALENDAR_HOME_KEYWORDS,
     DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES,
+    DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
+    DEFAULT_BLEND_SCHEDULE_END,
+    DEFAULT_BLEND_SCHEDULE_START,
     DEFAULT_INDOOR_WEIGHTING_MODE,
     DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES,
     DEFAULT_OCCUPIED_WEIGHT_MULTIPLIER,
@@ -251,6 +263,32 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         else:
             self._power_default_watts = float(DEFAULT_HVAC_POWER_WATTS)
 
+        # Thermostat satellite blend mitigation config
+        self._blend_mode: str = opts.get(CONF_BLEND_MITIGATION_MODE, BLEND_MODE_NONE)
+        self._thermostat_occ_entity: str | None = opts.get(CONF_THERMOSTAT_OCCUPANCY_ENTITY) or None
+        self._blend_outlier_threshold_f: float = float(
+            opts.get(CONF_BLEND_OUTLIER_THRESHOLD_F, DEFAULT_BLEND_OUTLIER_THRESHOLD_F)
+        )
+        # Parse schedule start/end as datetime.time objects
+        def _parse_time(s: str, default: str) -> dt_time:
+            try:
+                h, m = (s or default).split(":")
+                return dt_time(int(h), int(m))
+            except (ValueError, AttributeError):
+                h, m = default.split(":")
+                return dt_time(int(h), int(m))
+        self._blend_schedule_start: dt_time = _parse_time(
+            opts.get(CONF_BLEND_SCHEDULE_START, DEFAULT_BLEND_SCHEDULE_START),
+            DEFAULT_BLEND_SCHEDULE_START,
+        )
+        self._blend_schedule_end: dt_time = _parse_time(
+            opts.get(CONF_BLEND_SCHEDULE_END, DEFAULT_BLEND_SCHEDULE_END),
+            DEFAULT_BLEND_SCHEDULE_END,
+        )
+        # Runtime blend detection state (updated each cycle)
+        self._thermostat_blend_suspected: bool = False
+        self._last_indoor_noise_scale: float = 1.0
+
         # SensorHub — centralized sensor reads with fallback chains
         self.sensor_hub = SensorHub(
             hass,
@@ -273,6 +311,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             co2_entity=self._co2_entity_id,
             rate_entity=self._rate_entity_id,
             flat_rate=self._flat_rate,
+            blend_mode=self._blend_mode,
+            blend_outlier_threshold_f=self._blend_outlier_threshold_f,
         )
 
         # Auxiliary appliance manager (optional — HPWH, dryer, etc.)
@@ -675,15 +715,65 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             indoor_humidity_reading.value if indoor_humidity_reading else None
         )
 
+        # Thermostat satellite blend detection (occupancy/schedule modes).
+        # For median mode, SensorHub handles detection internally during read_indoor_temp.
+        # We run detection before reading so occupancy/schedule modes can exclude
+        # the thermostat by passing thermostat_temp=None to SensorHub.
+        if self._blend_mode != BLEND_MODE_MEDIAN:
+            self._thermostat_blend_suspected = self._detect_thermostat_blend()
+
+        # Compute the effective thermostat temperature for sensor fusion.
+        # When blend is suspected (occupancy or schedule modes), pass None so
+        # SensorHub falls back to indoor entity averaging only (e.g. EP1).
+        effective_thermo_temp = (
+            None if (
+                self._thermostat_blend_suspected
+                and self._blend_mode in (BLEND_MODE_OCCUPANCY, BLEND_MODE_SCHEDULE)
+            )
+            else thermo_state.indoor_temp
+        )
+
         # Read weighted indoor temp (falls back to thermostat if no area manager)
         indoor_temp_reading = self.sensor_hub.read_weighted_indoor_temp(
-            thermo_state.indoor_temp
+            effective_thermo_temp
         )
+
+        # For median mode, update the blend flag after SensorHub has run its filter
+        if self._blend_mode == BLEND_MODE_MEDIAN:
+            self._thermostat_blend_suspected = self.sensor_hub.thermostat_blend_suspected
+
         effective_indoor_temp = (
             indoor_temp_reading.value if indoor_temp_reading
             else thermo_state.indoor_temp
         )
         self._effective_indoor_temp = effective_indoor_temp
+
+        # Noise scale for EKF: inflate R_meas only when thermostat is the sole
+        # remaining sensor and blend is suspected (occupancy/schedule modes only).
+        # In median mode the thermostat is simply excluded from the pool, so the
+        # remaining sensor data is clean and no noise inflation is needed.
+        thermostat_is_only_source = (
+            indoor_temp_reading is not None
+            and indoor_temp_reading.sensor_count == 1
+            and "thermostat" in (indoor_temp_reading.source or "")
+        )
+        self._last_indoor_noise_scale = (
+            4.0 if (
+                self._thermostat_blend_suspected
+                and self._blend_mode in (BLEND_MODE_OCCUPANCY, BLEND_MODE_SCHEDULE)
+                and thermostat_is_only_source
+            )
+            else 1.0
+        )
+
+        # Compute cross-sensor spread for diagnostics (always, regardless of mode)
+        self._cross_sensor_spread_f: float = 0.0
+        if thermo_state.indoor_temp is not None and self.sensor_hub._indoor_temp_entities:
+            entity_only_reading = self.sensor_hub.read_indoor_temp(thermostat_temp=None)
+            if entity_only_reading is not None:
+                self._cross_sensor_spread_f = abs(
+                    thermo_state.indoor_temp - entity_only_reading.value
+                )
 
         # Calculate apparent temperature (humidity-adjusted feels-like temp)
         if (
@@ -1817,6 +1907,50 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             timestamp=now,
         )
 
+    # ── Thermostat blend detection ───────────────────────────────────
+
+    def _detect_thermostat_blend(self) -> bool:
+        """Return True when the thermostat is likely blending toward a satellite sensor.
+
+        Three detection strategies based on configured blend_mitigation_mode:
+
+        - occupancy: thermostat area shows no occupancy but people are home elsewhere.
+          Requires CONF_THERMOSTAT_OCCUPANCY_ENTITY (e.g. binary_sensor.my_ecobee_occupancy).
+
+        - schedule: current local time is within the configured suppression window
+          (e.g. 22:00–08:00). Works for regular-schedule households without occupancy sensors.
+
+        - median: detection is handled by SensorHub during read_indoor_temp(); this method
+          just returns the cached SensorHub state.
+
+        - none (default): always returns False (feature disabled).
+        """
+        if self._blend_mode == BLEND_MODE_OCCUPANCY:
+            if not self._thermostat_occ_entity:
+                return False
+            state = self.hass.states.get(self._thermostat_occ_entity)
+            if state is None or state.state in ("unavailable", "unknown"):
+                return False
+            if state.state == "on":
+                return False  # thermostat area is occupied — no blending
+            # Thermostat area unoccupied; if people are home elsewhere, blend is active
+            return self.occupancy.get_people_home_count() > 0
+
+        if self._blend_mode == BLEND_MODE_SCHEDULE:
+            from homeassistant.util import dt as dt_util
+            now_time = dt_util.now().time()
+            start = self._blend_schedule_start
+            end = self._blend_schedule_end
+            if start > end:  # overnight window e.g. 22:00–08:00
+                return now_time >= start or now_time < end
+            return start <= now_time < end
+
+        if self._blend_mode == BLEND_MODE_MEDIAN:
+            # SensorHub sets thermostat_blend_suspected during read_indoor_temp()
+            return self.sensor_hub.thermostat_blend_suspected
+
+        return False  # BLEND_MODE_NONE
+
     # ── Kalman filter feeding ────────────────────────────────────────
 
     def _feed_estimator(self, thermo_state, now: datetime) -> None:
@@ -1880,6 +2014,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Use multi-sensor averaged temp for better EKF convergence
         observed = getattr(self, "_effective_indoor_temp", None) or thermo_state.indoor_temp
+        noise_scale = getattr(self, "_last_indoor_noise_scale", 1.0)
         innovation = self.estimator.update(
             observed_temp=observed,
             outdoor_temp=outdoor_temp,
@@ -1898,6 +2033,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             precipitation=is_precipitation,
             appliance_btu=appliance_btu,
             aux_resistive_btu_hr=getattr(self, "_cached_aux_resistive_btu", 0.0),
+            measurement_noise_scale=noise_scale,
         )
 
         if self.estimator._n_obs % 100 == 0:
@@ -2548,6 +2684,15 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "current_indoor_temp": thermo_state.indoor_temp if thermo_state else None,
             "weighted_indoor_temp": getattr(self, "_effective_indoor_temp", None),
             "humidity": thermo_state.humidity if thermo_state else None,
+
+            # Thermostat blend mitigation diagnostics
+            "thermostat_blend_suspected": getattr(self, "_thermostat_blend_suspected", False),
+            "thermostat_blend_mode": self._blend_mode,
+            "cross_sensor_spread_f": getattr(self, "_cross_sensor_spread_f", 0.0),
+            "indoor_thermo_excluded": (
+                getattr(self, "_thermostat_blend_suspected", False)
+                and self._blend_mode != BLEND_MODE_NONE
+            ),
 
             # Apparent temperature (humidity-adjusted)
             "apparent_temperature": self._current_apparent_temp,

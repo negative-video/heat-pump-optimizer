@@ -908,6 +908,26 @@ One integration instance manages one climate entity. For multi-zone systems, the
 - **Multiple instances** — Install separate integration instances for each zone (each with its own config entry). They operate independently.
 - **Mini-splits** — Work well if the unit is exposed as a standard `climate` entity in Home Assistant. Units that only expose fan/swing controls without temperature feedback won't produce useful EKF learning.
 
+---
+
+### My thermostat is an Ecobee or Nest with satellite sensors. Is the EKF learning corrupted by temperature blending?
+
+Smart thermostats like Ecobee and Nest sell satellite sensors partly on the promise of comfort where you actually are, not just where the thermostat is. When you're in bed at night and the bedroom sensor is warmer than the living room thermostat, the thermostat's firmware quietly blends its reported temperature upward — toward the occupied room. This is a deliberate comfort feature, and it works well for that purpose: the thermostat calls for heat sooner because it "feels" colder than the main sensor actually reads.
+
+The problem is that this blending is invisible to any software reading the thermostat. From this integration's perspective, the thermostat simply reports a temperature that's 2–5°F warmer than the actual air near it — slowly, over several hours, with no flag or warning. That corrupts the thermal model: if the thermostat says it's warmer overnight than it actually is, the model infers that your home holds heat unusually well, and adjusts its learned building parameters accordingly. The effect compounds over days.
+
+**If you suspect this is happening**, the `Cross-Sensor Temp Spread` diagnostic sensor is the best first check. Add one or more additional room temperature sensors, then watch the spread between those and your thermostat overnight. A sustained divergence of 2–5°F during sleeping hours that collapses in the morning is the signature pattern.
+
+**To address it**, go to **Configure → Indoor Temp Blending** and choose a mitigation mode:
+
+- **Occupancy-Based** — Uses the thermostat's own occupancy sensor. When the thermostat's area is unoccupied but people are home, the thermostat reading is excluded and the integration relies on your other room sensors. This is the most precise option for Ecobee/Nest users because it directly detects the condition that triggers blending.
+
+- **Time Schedule** — Excludes the thermostat reading during a configured window (e.g., 10pm–8am). No extra hardware required. Works well for households with a regular sleep schedule; less useful if your schedule varies.
+
+- **Multi-Sensor Median** — Requires at least 3 indoor sensors. All sensors (including the thermostat) are pooled; any that deviate too far from the median are excluded. This handles thermostat blending, sensors cooled by nearby appliances, and kitchen sensors spiking during cooking — all by the same mechanism. The most hardware-intensive option but the most automatic.
+
+> **Note for gas/propane stove users:** A kitchen sensor near the stove will read high during cooking and get excluded in median mode — just like a blending thermostat would. This is intentional. The model won't see the local spike as "the house is warm," and the stove's heat will propagate to other sensors naturally over time.
+
 </details>
 
 ---

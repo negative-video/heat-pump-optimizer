@@ -41,6 +41,7 @@ async def async_setup_entry(
         StaleSensorDetectedSensor(coordinator, entry),
         AuxHeatActiveSensor(coordinator, entry),
         LearningActiveSensor(coordinator, entry),
+        ThermostatBlendSuspectedSensor(coordinator, entry),
     ]
     async_add_entities(entities)
 
@@ -154,4 +155,42 @@ class LearningActiveSensor(CoordinatorEntity, BinarySensorEntity):
             "model_confidence": self.coordinator.data.get("kalman_confidence"),
             "observations": self.coordinator.data.get("kalman_observations"),
             "initialization_mode": self.coordinator.data.get("initialization_mode"),
+        }
+
+
+class ThermostatBlendSuspectedSensor(CoordinatorEntity, BinarySensorEntity):
+    """Whether the thermostat is suspected of blending toward a satellite sensor.
+
+    Turns on when the configured blend mitigation mode detects that the
+    thermostat's reported temperature is influenced by a remote occupancy/
+    comfort sensor (e.g. Ecobee Follow Me, Nest satellite sensors). During
+    this period the thermostat reading is excluded or down-weighted in the
+    EKF thermal model to protect building parameter estimates.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator: HeatPumpOptimizerCoordinator, entry: ConfigEntry):
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_thermostat_blend_suspected"
+        self._attr_name = "Thermostat Blend Suspected"
+        self._attr_icon = "mdi:thermometer-lines"
+        self._attr_device_class = BinarySensorDeviceClass.PROBLEM
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def is_on(self) -> bool | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("thermostat_blend_suspected", False)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {
+            "blend_mode": self.coordinator.data.get("thermostat_blend_mode"),
+            "cross_sensor_spread_f": self.coordinator.data.get("cross_sensor_spread_f"),
+            "indoor_thermo_excluded": self.coordinator.data.get("indoor_thermo_excluded"),
         }
