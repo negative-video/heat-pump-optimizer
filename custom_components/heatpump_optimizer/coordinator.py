@@ -2601,9 +2601,15 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                         round(pt.comfort_max, 1),
                     )
 
+        # Subsample to one point per hour (heuristic optimizer uses 5-min
+        # steps producing ~288 points; grey-box already uses hourly steps).
         result = []
+        seen_hours: set[int] = set()
         for pt in schedule.simulation:
             hour_key = int(pt.time.timestamp()) // 3600
+            if hour_key in seen_hours:
+                continue
+            seen_hours.add(hour_key)
             bounds = comfort_bounds.get(hour_key)
             entry: dict = {
                 "time": pt.time.isoformat(),

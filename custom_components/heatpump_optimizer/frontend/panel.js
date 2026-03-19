@@ -215,267 +215,6 @@ function renderHeroStrip(states, hass) {
     </div>`;
 }
 
-/** [C] Forecast Chart — 24h predicted indoor/outdoor temps + HVAC. */
-function renderForecastChart(states, hass, retro = null) {
-  const schedule = findEntity(states, "schedule");
-  const tier = findEntity(states, "savings_accuracy_tier");
-  const apparent = findEntity(states, "apparent_temperature");
-  const unit = tempUnit(hass);
-
-  const tierVal = tier?.state || "learning";
-  if (tierVal === "learning") {
-    return renderRetrospectiveChart(states, hass, retro);
-  }
-
-  const forecast = schedule?.attributes?.forecast;
-  if (!forecast || !Array.isArray(forecast) || forecast.length < 2) {
-    return `
-      <div class="card forecast-card">
-        <h2>Forecast</h2>
-        <div class="forecast-placeholder">No forecast data available</div>
-      </div>`;
-  }
-
-  // Actual indoor temp for "now" marker
-  const actualIndoor = hasValue(apparent) ? Number(apparent.state) : null;
-
-  // Compute temperature range
-  let allTemps = [];
-  for (const pt of forecast) {
-    allTemps.push(pt.indoor, pt.outdoor);
-    if (pt.comfort_min != null) allTemps.push(pt.comfort_min);
-    if (pt.comfort_max != null) allTemps.push(pt.comfort_max);
-  }
-  if (actualIndoor != null) allTemps.push(actualIndoor);
-  const minT = Math.floor(Math.min(...allTemps) - 1);
-  const maxT = Math.ceil(Math.max(...allTemps) + 1);
-  const range = maxT - minT || 1;
-
-  // Generate gridlines (4 evenly spaced)
-  const step = range / 4;
-  const gridlines = [];
-  for (let i = 0; i <= 4; i++) {
-    const temp = minT + step * i;
-    gridlines.push({ temp: Math.round(temp), pct: ((temp - minT) / range) * 100 });
-  }
-
-  // Current hour for "now" marker
-  const nowHour = new Date().getHours();
-
-  // Build columns
-  const cols = forecast.map((pt, i) => {
-    const time = new Date(pt.time);
-    const hour = time.getHours();
-    const indoorPct = ((pt.indoor - minT) / range) * 100;
-    const outdoorPct = ((pt.outdoor - minT) / range) * 100;
-    const isNow = hour === nowHour && i === forecast.findIndex(p => new Date(p.time).getHours() === nowHour);
-
-    // Comfort band
-    let comfortBand = "";
-    if (pt.comfort_min != null && pt.comfort_max != null) {
-      const minPct = ((pt.comfort_min - minT) / range) * 100;
-      const maxPct = ((pt.comfort_max - minT) / range) * 100;
-      comfortBand = `<div class="chart-comfort" style="bottom:${minPct}%;height:${maxPct - minPct}%"></div>`;
-    }
-
-    // HVAC strip
-    const hvacStrip = pt.hvac
-      ? `<div class="chart-hvac ${pt.outdoor > pt.indoor ? "chart-hvac-cool" : "chart-hvac-heat"}"></div>`
-      : "";
-
-    // Time label (every 3 hours)
-    const timeLabel = hour % 3 === 0
-      ? `<span class="chart-time">${hour === 0 ? "12a" : hour === 12 ? "12p" : hour > 12 ? (hour - 12) + "p" : hour + "a"}</span>`
-      : "";
-
-    // Actual indoor temp ring on "now" column
-    let actualDot = "";
-    if (isNow && actualIndoor != null) {
-      const actualPct = ((actualIndoor - minT) / range) * 100;
-      actualDot = `<div class="chart-dot chart-dot-actual" style="bottom:${actualPct}%" title="Actual ${actualIndoor.toFixed(1)}${unit}"></div>`;
-    }
-
-    return `
-      <div class="chart-col${isNow ? " chart-col-now" : ""}">
-        <div class="chart-area">
-          ${comfortBand}
-          <div class="chart-dot chart-dot-outdoor" style="bottom:${outdoorPct}%"></div>
-          <div class="chart-dot chart-dot-indoor" style="bottom:${indoorPct}%"></div>
-          ${actualDot}
-          ${hvacStrip}
-        </div>
-        ${timeLabel}
-      </div>`;
-  });
-
-  return `
-    <div class="card forecast-card">
-      <h2>Forecast</h2>
-      <div class="chart-legend">
-        <span class="legend-item"><span class="legend-dot legend-indoor"></span>Predicted</span>
-        ${actualIndoor != null ? `<span class="legend-item"><span class="legend-dot legend-actual"></span>Actual</span>` : ""}
-        <span class="legend-item"><span class="legend-dot legend-outdoor"></span>Outdoor</span>
-        <span class="legend-item"><span class="legend-band"></span>Comfort</span>
-        <span class="legend-item"><span class="legend-hvac"></span>HVAC</span>
-      </div>
-      <div class="chart-container">
-        <div class="chart-yaxis">
-          ${gridlines.map(g => `<span class="chart-ylabel" style="bottom:${g.pct}%">${g.temp}\u00b0</span>`).join("")}
-        </div>
-        <div class="chart-grid">
-          ${gridlines.map(g => `<div class="chart-gridline" style="bottom:${g.pct}%"></div>`).join("")}
-          ${cols.join("")}
-        </div>
-      </div>
-    </div>`;
-}
-
-/** [D] Schedule Timeline — 24h horizontal bar with phase colors. */
-function renderTimeline(states, hass) {
-  const schedule = findEntity(states, "schedule");
-  const nextAction = findEntity(states, "next_action");
-  const precond = findEntity(states, "preconditioning_status");
-  const unit = tempUnit(hass);
-
-  const entries = schedule?.attributes?.entries;
-  if (!entries || !Array.isArray(entries) || entries.length === 0) {
-    // During learning, show multi-bar calibration progress
-    const tier = findEntity(states, "savings_accuracy_tier");
-    const tierVal = tier?.state || "learning";
-    if (tierVal === "learning") {
-      const baselineConf = findEntity(states, "baseline_confidence");
-      const modelConf = findEntity(states, "model_confidence");
-      const profilerStatus = findEntity(states, "profiler_status");
-      const progress = findEntity(states, "learning_progress");
-
-      const profilerConfPct = profilerStatus?.attributes?.confidence != null ? Number(profilerStatus.attributes.confidence) : 0;
-      const profilerObsCount = profilerStatus?.attributes?.observations != null ? Number(profilerStatus.attributes.observations) : 0;
-
-      const bars = [
-        { label: "Baseline", pct: hasValue(baselineConf) ? Number(baselineConf.state) : 0, cls: "learn-bar-baseline" },
-        { label: "Thermal Model", pct: hasValue(modelConf) ? Number(modelConf.state) : 0, cls: "learn-bar-model" },
-        { label: "Profiler", pct: profilerConfPct, cls: "learn-bar-profiler" },
-      ];
-
-      const barsHtml = bars.map(b => `
-        <div class="learn-bar-row">
-          <span class="learn-bar-label">${b.label}</span>
-          <div class="learn-bar-track">
-            <div class="learn-bar-fill ${b.cls}" style="width:${Math.min(100, b.pct)}%"></div>
-          </div>
-          <span class="learn-bar-pct">${b.pct.toFixed(0)}%</span>
-        </div>`).join("");
-
-      const statusText = isAvailable(progress) ? progress.state : "Capturing your home\u2019s thermal signature\u2026";
-      const obsText = profilerObsCount > 0 ? `${profilerObsCount.toLocaleString()} observations collected` : "";
-
-      return `
-        <div class="card timeline-card">
-          <h2>Calibration Progress</h2>
-          <div class="learn-bars">${barsHtml}</div>
-          <div class="learn-status">${statusText}</div>
-          ${obsText ? `<div class="learn-obs">${obsText}</div>` : ""}
-        </div>`;
-    }
-
-    return `
-      <div class="card timeline-card">
-        <h2>Schedule</h2>
-        <div class="timeline-empty">No active schedule</div>
-        ${isAvailable(nextAction) ? `<div class="timeline-next">${nextAction.state}</div>` : ""}
-      </div>`;
-  }
-
-  // Parse entries and compute hour positions relative to start of day
-  const now = new Date();
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayMs = 24 * 60 * 60 * 1000;
-
-  // Build segments with labels
-  const usedPhases = new Set();
-  const segments = entries.map((e) => {
-    const start = new Date(e.start);
-    const end = new Date(e.end);
-    const leftPct = Math.max(0, ((start - dayStart) / dayMs) * 100);
-    const widthPct = Math.min(100 - leftPct, ((end - start) / dayMs) * 100);
-    const phaseKey = reasonToPhaseKey(e.reason);
-    const phaseInfo = PHASE_MAP[phaseKey] || PHASE_MAP["idle"];
-    usedPhases.add(phaseKey);
-    // Format time range for tooltip
-    const fmtTime = (d) => { const h = d.getHours(); const m = d.getMinutes(); return `${h === 0 ? 12 : h > 12 ? h - 12 : h}:${String(m).padStart(2, "0")}${h >= 12 ? "p" : "a"}`; };
-    const tooltip = `${phaseInfo.label}: ${fmtTime(start)}\u2013${fmtTime(end)} \u00b7 ${e.target_temp}${unit}`;
-    // Show inline label if segment is wide enough (>8% of day = ~2hrs)
-    const inlineLabel = widthPct > 8 ? `<span class="tl-seg-label">${phaseInfo.label}</span>` : "";
-    return `<div class="tl-segment ${phaseInfo.cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%" title="${tooltip}">${inlineLabel}</div>`;
-  });
-
-  const nowPct = ((now - dayStart) / dayMs) * 100;
-
-  // Hour ticks
-  const ticks = [0, 6, 12, 18].map(
-    (h) => `<span class="tl-tick" style="left:${(h / 24) * 100}%">${h === 0 ? "12a" : h === 12 ? "12p" : h > 12 ? h - 12 + "p" : h + "a"}</span>`
-  );
-
-  // Legend showing only phases that appear in today's schedule
-  const PHASE_LEGEND = {
-    "pre-cooling": { label: "Pre-Cooling", cls: "phase-active" },
-    "pre-heating": { label: "Pre-Heating", cls: "phase-active" },
-    coasting: { label: "Coasting", cls: "phase-coast" },
-    maintaining: { label: "Maintaining", cls: "phase-maintain" },
-    idle: { label: "Idle", cls: "phase-idle" },
-    preconditioning: { label: "Pre-conditioning", cls: "phase-active" },
-  };
-  const legendItems = [...usedPhases]
-    .filter(k => PHASE_LEGEND[k])
-    .map(k => {
-      const p = PHASE_LEGEND[k];
-      return `<span class="tl-legend-item"><span class="tl-legend-swatch ${p.cls}"></span>${p.label}</span>`;
-    }).join("");
-
-  // Occupancy underlay — thin bar showing home/away from calendar
-  const occupancy = findEntity(states, "occupancy_forecast");
-  let occBar = "";
-  if (occupancy?.attributes?.source === "calendar" && Array.isArray(occupancy.attributes.timeline)) {
-    const occSegs = occupancy.attributes.timeline.map(seg => {
-      const start = new Date(seg.start);
-      const end = new Date(seg.end);
-      const leftPct = Math.max(0, ((start - dayStart) / dayMs) * 100);
-      const widthPct = Math.min(100 - leftPct, ((end - start) / dayMs) * 100);
-      const cls = seg.mode === "home" ? "tl-occ-home" : "tl-occ-away";
-      const label = seg.mode === "home" ? "Home" : "Away";
-      return `<div class="tl-occ-seg ${cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%" title="${label}"></div>`;
-    }).join("");
-    occBar = `<div class="tl-occ-bar">${occSegs}</div>`;
-  }
-
-  // Preconditioning info
-  let precondInfo = "";
-  if (isAvailable(precond) && precond.attributes) {
-    const a = precond.attributes;
-    if (a.arrival_time) {
-      const parts = [`Arrival: ${a.arrival_time}`];
-      if (a.energy_estimate != null) parts.push(`${Number(a.energy_estimate).toFixed(1)} kWh`);
-      if (a.cost_estimate != null) parts.push(`$${Number(a.cost_estimate).toFixed(2)}`);
-      precondInfo = `<div class="timeline-precond">${parts.join(" \u00b7 ")}</div>`;
-    }
-  }
-
-  return `
-    <div class="card timeline-card">
-      <h2>Schedule</h2>
-      ${legendItems ? `<div class="tl-legend">${legendItems}</div>` : ""}
-      <div class="tl-bar">
-        ${segments.join("")}
-        <div class="tl-now" style="left:${nowPct}%"></div>
-      </div>
-      ${occBar}
-      <div class="tl-ticks">${ticks.join("")}</div>
-      ${isAvailable(nextAction) ? `<div class="timeline-next">${nextAction.state}</div>` : ""}
-      ${precondInfo}
-    </div>`;
-}
-
 /** [D2] Decision Engine — explains why the optimizer is doing what it's doing. */
 function renderDecisionCard(states, hass) {
   const phase = findEntity(states, "current_phase");
@@ -727,7 +466,7 @@ function renderHealthCard(states, hass) {
   // Remaining diagnostics (baseline/comfort — thermal params moved to Building card)
   const baselineTemp = findEntity(states, "baseline_avg_indoor_temp");
   const baselineViols = findEntity(states, "baseline_comfort_violations");
-  const profiler = findEntity(states, "profiler_status");
+  const profiler = findEntity(states, "profiler_status") || findEntity(states, "profiler");
 
   let diagnosticsSection = "";
   const diagRows = [];
@@ -1154,7 +893,8 @@ function renderBuildingCard(states, hass) {
 function bucketHistory(series, startMs, numBuckets, bucketMs) {
   const buckets = Array.from({ length: numBuckets }, () => []);
   for (const pt of series) {
-    const ts = new Date(pt.last_changed).getTime();
+    const raw = pt.last_changed;
+    const ts = typeof raw === "number" ? raw * 1000 : new Date(raw).getTime();
     const v = Number(pt.state);
     if (ts < startMs || isNaN(v)) continue;
     const idx = Math.min(numBuckets - 1, Math.floor((ts - startMs) / bucketMs));
@@ -1170,8 +910,9 @@ function computeHvacBuckets(retro, startMs, numBuckets, bucketMs) {
     const bEnd = bStart + bucketMs;
 
     // Check if HVAC was on (avg power > 50W)
+    const ptTs = pt => { const r = pt.last_changed; return typeof r === "number" ? r * 1000 : new Date(r).getTime(); };
     const powerReadings = retro.power.filter(pt => {
-      const ts = new Date(pt.last_changed).getTime();
+      const ts = ptTs(pt);
       return ts >= bStart && ts < bEnd && !isNaN(Number(pt.state));
     });
     if (!powerReadings.length) return null;
@@ -1181,7 +922,7 @@ function computeHvacBuckets(retro, startMs, numBuckets, bucketMs) {
     // Check if aux/emergency heat was active (>30% of readings = on)
     if (retro.aux && retro.aux.length) {
       const auxReadings = retro.aux.filter(pt => {
-        const ts = new Date(pt.last_changed).getTime();
+        const ts = ptTs(pt);
         return ts >= bStart && ts < bEnd;
       });
       if (auxReadings.length) {
@@ -1192,11 +933,11 @@ function computeHvacBuckets(retro, startMs, numBuckets, bucketMs) {
 
     // Heat vs cool: compare avg indoor to avg outdoor
     const inReadings = retro.indoor.filter(pt => {
-      const ts = new Date(pt.last_changed).getTime();
+      const ts = ptTs(pt);
       return ts >= bStart && ts < bEnd && !isNaN(Number(pt.state));
     });
     const outReadings = retro.outdoor.filter(pt => {
-      const ts = new Date(pt.last_changed).getTime();
+      const ts = ptTs(pt);
       return ts >= bStart && ts < bEnd && !isNaN(Number(pt.state));
     });
     if (inReadings.length && outReadings.length) {
@@ -1213,8 +954,8 @@ function renderRetrospectiveChart(states, hass, retro) {
   const unit = tempUnit(hass);
   const indoor = findEntity(states, "apparent_temperature");
   const outdoor = findEntity(states, "outdoor_temp_source");
-  const NUM_BUCKETS = 24;
-  const BUCKET_MS = 2 * 60 * 60 * 1000; // 2-hour buckets
+  const NUM_BUCKETS = 48;
+  const BUCKET_MS = 1 * 60 * 60 * 1000; // 1-hour buckets
   const startMs = Date.now() - NUM_BUCKETS * BUCKET_MS;
 
   if (!retro) {
@@ -1233,7 +974,7 @@ function renderRetrospectiveChart(states, hass, retro) {
   const indoorVals = bucketHistory(retro.indoor, startMs, NUM_BUCKETS, BUCKET_MS);
   const outdoorVals = bucketHistory(retro.outdoor, startMs, NUM_BUCKETS, BUCKET_MS);
   const predictedVals = bucketHistory(retro.predicted, startMs, NUM_BUCKETS, BUCKET_MS);
-  const hvacStates = retro.power.length ? computeHvacBuckets(retro, startMs, NUM_BUCKETS, BUCKET_MS) : indoorVals.map(() => null);
+  const hvacStates = retro.power?.length ? computeHvacBuckets(retro, startMs, NUM_BUCKETS, BUCKET_MS) : indoorVals.map(() => null);
 
   const allTemps = [...indoorVals, ...outdoorVals, ...predictedVals].filter(v => v != null);
   if (hasValue(indoor)) allTemps.push(Number(indoor.state));
@@ -1317,10 +1058,12 @@ function renderUnifiedTimeline(states, _hass, retro) {
   const nextAction = findEntity(states, "next_action");
   const precond = findEntity(states, "preconditioning_status");
 
-  // 24h history: 12 buckets × 2h
-  const HIST_BUCKETS = 12;
-  const BUCKET_MS = 2 * 60 * 60 * 1000;
-  const histStartMs = Date.now() - HIST_BUCKETS * BUCKET_MS;
+  // History: 24 buckets × 1 hour each, clock-aligned, ending at current hour
+  const HIST_BUCKETS = 24;
+  const nowMs = Date.now();
+  const BUCKET_MS = 60 * 60 * 1000; // 1 hour per bucket
+  const currentHourMs = nowMs - (nowMs % BUCKET_MS); // floor to hour boundary
+  const histStartMs = currentHourMs - (HIST_BUCKETS - 1) * BUCKET_MS;
 
   let indoorVals = Array(HIST_BUCKETS).fill(null);
   let outdoorVals = Array(HIST_BUCKETS).fill(null);
@@ -1331,27 +1074,28 @@ function renderUnifiedTimeline(states, _hass, retro) {
     indoorVals = bucketHistory(retro.indoor, histStartMs, HIST_BUCKETS, BUCKET_MS);
     outdoorVals = bucketHistory(retro.outdoor, histStartMs, HIST_BUCKETS, BUCKET_MS);
     predictedVals = bucketHistory(retro.predicted, histStartMs, HIST_BUCKETS, BUCKET_MS);
-    if (retro.power.length) hvacStates = computeHvacBuckets(retro, histStartMs, HIST_BUCKETS, BUCKET_MS);
+    if (retro.power?.length) hvacStates = computeHvacBuckets(retro, histStartMs, HIST_BUCKETS, BUCKET_MS);
   }
 
-  // 24h forecast: filter to future points only (up to 24)
+  // 24h forecast: start at the next clock hour (history covers current hour)
   const allForecast = schedule?.attributes?.forecast;
-  const now = new Date();
+  const nextHourMs = currentHourMs + BUCKET_MS;
   const forecastCols = (Array.isArray(allForecast) ? allForecast : [])
-    .filter(pt => new Date(pt.time) >= now)
+    .filter(pt => new Date(pt.time).getTime() >= nextHourMs)
     .slice(0, 24);
 
   // Schedule entries for phase strip coloring on forecast side
   const entries = schedule?.attributes?.entries || [];
 
-  // Compute unified temperature range
+  // Compute unified temperature range (exclude comfort band — it's decorative, not data)
   const allTemps = [
     ...indoorVals, ...outdoorVals, ...predictedVals,
     ...forecastCols.map(p => p.indoor),
     ...forecastCols.map(p => p.outdoor),
-    ...forecastCols.flatMap(p => [p.comfort_min, p.comfort_max]),
   ].filter(v => v != null);
   if (hasValue(apparent)) allTemps.push(Number(apparent.state));
+  const outdoorE = findEntity(states, "outdoor_temp_source");
+  if (hasValue(outdoorE)) allTemps.push(Number(outdoorE.state));
 
   if (allTemps.length < 2) {
     const loadMsg = retro ? "Insufficient data\u2026" : "Loading history\u2026";
@@ -1362,8 +1106,8 @@ function renderUnifiedTimeline(states, _hass, retro) {
       </div>`;
   }
 
-  const minT = Math.floor(Math.min(...allTemps) - 1);
-  const maxT = Math.ceil(Math.max(...allTemps) + 1);
+  const minT = Math.floor(Math.min(...allTemps) - 2);
+  const maxT = Math.ceil(Math.max(...allTemps) + 2);
   const range = maxT - minT || 1;
   const step = range / 4;
   const gridlines = [];
@@ -1381,8 +1125,10 @@ function renderUnifiedTimeline(states, _hass, retro) {
     const hvacState = hvacStates[i];
     const bucketTs = histStartMs + i * BUCKET_MS;
     const hour = new Date(bucketTs).getHours();
-    const timeLabel = (hour % 6 === 0)
-      ? `<span class="chart-time">${fmtHour(hour)}</span>` : "";
+    const isLast = i === HIST_BUCKETS - 1;
+    const timeLabel = isLast
+      ? `<span class="chart-time chart-time-now">Now</span>`
+      : (hour % 6 === 0 ? `<span class="chart-time">${fmtHour(hour)}</span>` : "");
     const dots = [
       indoorVal != null ? `<div class="chart-dot chart-dot-indoor" style="bottom:${((indoorVal - minT) / range) * 100}%"></div>` : "",
       outdoorVal != null ? `<div class="chart-dot chart-dot-outdoor" style="bottom:${((outdoorVal - minT) / range) * 100}%"></div>` : "",
@@ -1392,22 +1138,20 @@ function renderUnifiedTimeline(states, _hass, retro) {
     if (hvacState === "aux") hvacStrip = `<div class="chart-hvac chart-hvac-aux"></div>`;
     else if (hvacState === "heat") hvacStrip = `<div class="chart-hvac chart-hvac-heat"></div>`;
     else if (hvacState === "cool") hvacStrip = `<div class="chart-hvac chart-hvac-cool"></div>`;
-    return `<div class="chart-col"><div class="chart-area">${dots}${hvacStrip}</div>${timeLabel}</div>`;
+    return `<div class="chart-col${isLast ? " chart-col-now" : ""}"><div class="chart-area">${dots}${hvacStrip}</div>${timeLabel}</div>`;
   }).join("");
 
   // ── Forecast columns (right of Now) ──
-  const fcColsHtml = forecastCols.map((pt, i) => {
+  const fcColsHtml = forecastCols.map((pt) => {
     const time = new Date(pt.time);
     const hour = time.getHours();
-    const isFirst = i === 0;
-    const timeLabel = isFirst
-      ? `<span class="chart-time chart-time-now">Now</span>`
-      : (hour % 6 === 0 ? `<span class="chart-time">${fmtHour(hour)}</span>` : "");
+    const timeLabel = (hour % 6 === 0)
+      ? `<span class="chart-time">${fmtHour(hour)}</span>` : "";
 
     let comfortBand = "";
     if (pt.comfort_min != null && pt.comfort_max != null) {
-      const minPct = ((pt.comfort_min - minT) / range) * 100;
-      const maxPct = ((pt.comfort_max - minT) / range) * 100;
+      const minPct = Math.max(0, ((pt.comfort_min - minT) / range) * 100);
+      const maxPct = Math.min(100, ((pt.comfort_max - minT) / range) * 100);
       comfortBand = `<div class="chart-comfort" style="bottom:${minPct}%;height:${maxPct - minPct}%"></div>`;
     }
 
@@ -1424,8 +1168,27 @@ function renderUnifiedTimeline(states, _hass, retro) {
     const phaseStrip = phaseKey !== "idle"
       ? `<div class="chart-phase ${phaseInfo.cls}"></div>` : "";
 
-    return `<div class="chart-col${isFirst ? " chart-col-now" : ""}"><div class="chart-area">${comfortBand}${dots}${phaseStrip}</div>${timeLabel}</div>`;
+    return `<div class="chart-col"><div class="chart-area">${comfortBand}${dots}${phaseStrip}</div>${timeLabel}</div>`;
   }).join("");
+
+  // ── Pad forecast side to 24 columns so "Now" stays centered at 50% ──
+  const FC_SLOTS = HIST_BUCKETS;
+  const fcPadCount = Math.max(0, FC_SLOTS - forecastCols.length);
+  // Padding columns need time labels so the forecast axis isn't blank
+  const lastFcTime = forecastCols.length
+    ? new Date(forecastCols[forecastCols.length - 1].time).getTime()
+    : nowMs;
+  const fcPadHtml = Array.from({ length: fcPadCount }, (_, i) => {
+    const padTs = lastFcTime + (i + 1) * BUCKET_MS;
+    const hour = new Date(padTs).getHours();
+    const timeLabel = (hour % 6 === 0) ? `<span class="chart-time">${fmtHour(hour)}</span>` : "";
+    return `<div class="chart-col"><div class="chart-area"></div>${timeLabel}</div>`;
+  }).join("");
+
+  // If no forecast columns at all, insert a dedicated "Now" marker column
+  const nowMarker = forecastCols.length === 0
+    ? `<div class="chart-col chart-col-now"><div class="chart-area"></div><span class="chart-time chart-time-now">Now</span></div>`
+    : "";
 
   // ── Legend ──
   const hasPredicted = predictedVals.some(v => v != null);
@@ -1454,6 +1217,24 @@ function renderUnifiedTimeline(states, _hass, retro) {
     }),
   ].filter(Boolean).join("");
 
+  // ── Occupancy underlay — thin bar showing home/away from calendar ──
+  const occupancy = findEntity(states, "occupancy_forecast");
+  let occBar = "";
+  if (occupancy?.attributes?.source === "calendar" && Array.isArray(occupancy.attributes.timeline)) {
+    const totalMs = (HIST_BUCKETS + FC_SLOTS) * BUCKET_MS;
+    const timelineStart = histStartMs;
+    const occSegs = occupancy.attributes.timeline.map(seg => {
+      const start = Math.max(new Date(seg.start).getTime(), timelineStart);
+      const end = Math.min(new Date(seg.end).getTime(), timelineStart + totalMs);
+      if (end <= start) return "";
+      const leftPct = ((start - timelineStart) / totalMs) * 100;
+      const widthPct = ((end - start) / totalMs) * 100;
+      const cls = seg.mode === "home" ? "tl-occ-home" : "tl-occ-away";
+      return `<div class="tl-occ-seg ${cls}" style="left:${leftPct}%;width:${Math.max(widthPct, 0.5)}%"></div>`;
+    }).join("");
+    occBar = `<div class="tl-occ-bar">${occSegs}</div>`;
+  }
+
   // ── Forecast footer notes ──
   let footerNote = "";
   if (isAvailable(nextAction)) {
@@ -1478,10 +1259,14 @@ function renderUnifiedTimeline(states, _hass, retro) {
         <div class="chart-grid">
           ${gridlines.map(g => `<div class="chart-gridline" style="bottom:${g.pct}%"></div>`).join("")}
           ${histColsHtml}
-          ${fcColsHtml}
+          ${nowMarker}${fcColsHtml}${fcPadHtml}
         </div>
       </div>
+      ${occBar}
       ${footerNote}
+      <div style="font-size:10px;color:var(--text-secondary);margin-top:4px;font-family:monospace">
+        in=${retro?.indoor?.length??0} last=${retro?.indoor?.length ? retro.indoor[retro.indoor.length-1].last_changed : "?"} bucketed=${indoorVals.filter(v=>v!=null).length}/24
+      </div>
     </div>`;
 }
 
@@ -1492,7 +1277,7 @@ function renderLearningProgressCards(states) {
   const thermalMass = findEntity(states, "thermal_mass");
   const coolCap = findEntity(states, "cooling_capacity");
   const baselineConf = findEntity(states, "baseline_confidence");
-  const profilerStatus = findEntity(states, "profiler_status");
+  const profilerStatus = findEntity(states, "profiler_status") || findEntity(states, "profiler");
 
   const zone = getClimateZone(states);
   const R_GOOD = zone === "cold" ? 15 : zone === "mixed" ? 12 : 9;
@@ -1700,10 +1485,10 @@ class HeatPumpOptimizerPanel extends HTMLElement {
       const auxE = findBinary(s, "aux_heat_active");
       const ids = [indoorE, outdoorE, predictedE, powerE, auxE].filter(Boolean).map(e => e.entity_id).join(",");
       if (!ids) return;
-      const start = new Date(now - 48 * 60 * 60 * 1000).toISOString();
+      const start = new Date(now - 24 * 60 * 60 * 1000).toISOString();
       const data = await this._hass.callApi(
         "GET",
-        `history/period/${start}?filter_entity_id=${ids}&minimal_response=true&no_attributes=true`
+        `history/period/${start}?filter_entity_id=${ids}&minimal_response&no_attributes`
       );
       if (!Array.isArray(data)) return;
       const byId = {};
@@ -1757,9 +1542,14 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         ${renderAlerts(s)}
         ${renderHeroStrip(s, this._hass)}
         ${renderEnvironmentCard(s, this._hass)}
-        ${isLearning
-          ? renderRetrospectiveChart(s, this._hass, this._retro)
-          : renderUnifiedTimeline(s, this._hass, this._retro)}
+        ${(() => {
+          if (!isLearning) return renderUnifiedTimeline(s, this._hass, this._retro);
+          const fc = findEntity(s, "schedule")?.attributes?.forecast;
+          const hasRetro = this._retro && (this._retro.indoor.length > 0 || this._retro.outdoor.length > 0);
+          return (fc && Array.isArray(fc) && fc.length >= 2 && hasRetro)
+            ? renderUnifiedTimeline(s, this._hass, this._retro)
+            : renderRetrospectiveChart(s, this._hass, this._retro);
+        })()}
         ${isLearning ? renderLearningProgressCards(s) : ""}
         ${isLearning ? renderLearningMilestones(s) : renderDecisionCard(s, this._hass)}
         ${renderBuildingCard(s, this._hass)}
@@ -2006,6 +1796,7 @@ const PANEL_CSS = `
   .chart-container {
     display: flex;
     height: 160px;
+    margin-bottom: 18px;
   }
   .chart-yaxis {
     width: 32px;
@@ -2038,11 +1829,12 @@ const PANEL_CSS = `
     position: relative;
   }
   .chart-col-now {
-    border-left: 2px solid var(--red);
+    border-right: 2px solid var(--red);
   }
   .chart-area {
     position: absolute;
     inset: 0;
+    overflow: hidden;
   }
   .chart-comfort {
     position: absolute;
@@ -2058,11 +1850,11 @@ const PANEL_CSS = `
     z-index: 1;
   }
   .chart-dot-indoor {
-    width: 6px; height: 6px;
+    width: 5px; height: 5px;
     background: var(--accent);
   }
   .chart-dot-outdoor {
-    width: 4px; height: 4px;
+    width: 3px; height: 3px;
     background: var(--text-secondary);
   }
   .chart-dot-actual {
@@ -2142,7 +1934,7 @@ const PANEL_CSS = `
     font-size: 13px;
     color: var(--text-secondary);
   }
-  .timeline-next { margin-top: 8px; }
+  .timeline-next { margin-top: 20px; }
   .timeline-precond {
     font-size: 12px;
     color: var(--text-secondary);
@@ -2619,19 +2411,19 @@ const PANEL_CSS = `
   .profile-rows {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 20px;
   }
   .profile-row { }
   .profile-row-header {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-bottom: 5px;
+    margin-bottom: 8px;
     gap: 8px;
   }
   .profile-label {
-    font-size: 12px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 600;
     flex-shrink: 0;
   }
   .profile-qual {
@@ -2640,28 +2432,29 @@ const PANEL_CSS = `
     text-align: right;
   }
   .profile-bar-track {
-    height: 6px;
-    background: color-mix(in srgb, var(--border) 50%, transparent);
-    border-radius: 3px;
+    height: 4px;
+    background: color-mix(in srgb, var(--border) 40%, transparent);
+    border-radius: 2px;
     position: relative;
+    margin: 0 6px;
   }
   .profile-bar-marker {
     position: absolute;
     top: 50%;
     transform: translate(-50%, -50%);
-    width: 12px;
-    height: 12px;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
-    border: 2px solid var(--card-bg);
-    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    border: 2.5px solid var(--card-bg);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
   }
   .profile-scale {
     display: flex;
     justify-content: space-between;
-    margin-top: 3px;
-    font-size: 9px;
-    color: var(--text-secondary);
-    text-transform: uppercase;
+    margin-top: 6px;
+    padding: 0 2px;
+    font-size: 10px;
+    color: color-mix(in srgb, var(--text-secondary) 70%, transparent);
     letter-spacing: 0.3px;
   }
   .quality-good { color: var(--green); }

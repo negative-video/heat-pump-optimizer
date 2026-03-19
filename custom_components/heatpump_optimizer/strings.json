@@ -56,6 +56,22 @@
           "occupancy_entities": "Presence entities"
         }
       },
+      "hvac_specs": {
+        "title": "HVAC System Specs",
+        "description": "Optional details about your HVAC system. These improve cold-start accuracy so the optimizer makes better decisions from day one. Skip if unsure \u2014 the model will learn these automatically.",
+        "data": {
+          "home_sqft": "Home size (sq ft)",
+          "hvac_tonnage": "HVAC tonnage",
+          "aux_heat_type": "Auxiliary heat type",
+          "aux_heat_kw": "Auxiliary heat capacity (kW)"
+        },
+        "data_description": {
+          "home_sqft": "Approximate conditioned square footage of your home.",
+          "hvac_tonnage": "Rated tonnage of your heat pump or AC unit. Check the model number plate or your installer's paperwork.",
+          "aux_heat_type": "Type of backup/auxiliary heat: electric resistance strips, gas furnace, or none.",
+          "aux_heat_kw": "Rated capacity of your auxiliary heat source in kilowatts. For gas furnaces, enter the electrical equivalent."
+        }
+      },
       "comfort": {
         "title": "Temperature Boundaries",
         "description": "The optimizer saves energy by shifting when your HVAC runs. During cheap/efficient hours it pre-cools or pre-heats toward one end of your range; during expensive/inefficient hours it coasts toward the other end.\n\nA wider optimization range means more savings. Safety limits are absolute guardrails that are never exceeded.",
@@ -96,6 +112,7 @@
           "equipment": "Thermostat & weather source",
           "outdoor_sensors": "Outdoor & building sensors",
           "indoor_sensing": "Indoor sensing",
+          "blend_mitigation": "Thermostat sensor blending",
           "presence": "Presence & away",
           "energy": "Energy & cost tracking",
           "behavior": "Optimizer behavior",
@@ -335,6 +352,24 @@
         "title": "Room Sensors",
         "description": "Assign temperature, humidity, and motion sensors to each room. Discovered sensors are pre-filled from your area registry — adjust as needed. Rooms: {room_details}",
         "data": {}
+      },
+      "blend_mitigation": {
+        "title": "Thermostat Sensor Blending",
+        "description": "Some smart thermostats (Ecobee, Nest) invisibly blend their temperature reading toward an occupied satellite sensor. At night this can shift the reported temperature 5-6\u00b0F from the actual room reading, corrupting the thermal model. Choose a mitigation strategy below, or leave disabled if you don't use satellite sensors.",
+        "data": {
+          "blend_mitigation_mode": "Mitigation mode",
+          "thermostat_occupancy_entity": "Thermostat occupancy sensor",
+          "blend_schedule_start": "Suppression window start",
+          "blend_schedule_end": "Suppression window end",
+          "blend_outlier_threshold_f": "Outlier threshold (\u00b0F)"
+        },
+        "data_description": {
+          "blend_mitigation_mode": "Disabled: no mitigation. Occupancy-Based: excludes thermostat when its area is unoccupied but people are home. Time Schedule: excludes thermostat during a fixed window. Multi-Sensor Median: pools all sensors and excludes outliers.",
+          "thermostat_occupancy_entity": "The binary sensor from your thermostat that reports room occupancy (e.g., Ecobee occupancy). Only used in Occupancy-Based mode.",
+          "blend_schedule_start": "Time to start suppressing the thermostat reading (e.g., 22:00). Only used in Time Schedule mode.",
+          "blend_schedule_end": "Time to stop suppressing the thermostat reading (e.g., 08:00). Only used in Time Schedule mode.",
+          "blend_outlier_threshold_f": "How far a sensor can deviate from the median before being excluded. Lower values are stricter. Only used in Multi-Sensor Median mode."
+        }
       }
     },
     "error": {
