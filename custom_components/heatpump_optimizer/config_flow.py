@@ -1450,11 +1450,11 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_SLEEP_COMFORT_COOL_MIN,
                         default=_get(CONF_SLEEP_COMFORT_COOL_MIN, DEFAULT_SLEEP_COMFORT_COOL_MIN),
-                    ): _comfort_selector(self.hass, 58, 80),
+                    ): _comfort_selector(self.hass, 50, 80),
                     vol.Optional(
                         CONF_SLEEP_COMFORT_COOL_MAX,
                         default=_get(CONF_SLEEP_COMFORT_COOL_MAX, DEFAULT_SLEEP_COMFORT_COOL_MAX),
-                    ): _comfort_selector(self.hass, 70, 88),
+                    ): _comfort_selector(self.hass, 55, 88),
                     vol.Optional(
                         CONF_SLEEP_COMFORT_HEAT_MIN,
                         default=_get(CONF_SLEEP_COMFORT_HEAT_MIN, DEFAULT_SLEEP_COMFORT_HEAT_MIN),
@@ -1462,7 +1462,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_SLEEP_COMFORT_HEAT_MAX,
                         default=_get(CONF_SLEEP_COMFORT_HEAT_MAX, DEFAULT_SLEEP_COMFORT_HEAT_MAX),
-                    ): _comfort_selector(self.hass, 55, 78),
+                    ): _comfort_selector(self.hass, 50, 78),
                 }
             ),
         )
