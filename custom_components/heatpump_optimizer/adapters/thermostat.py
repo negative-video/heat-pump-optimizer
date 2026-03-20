@@ -143,14 +143,55 @@ class ThermostatAdapter:
             _LOGGER.warning("Cannot write setpoint: thermostat unavailable")
             return False
 
-        # Convert back to HA's unit system if needed
-        temp_value = self._from_fahrenheit(clamped)
-
         try:
-            service_data = {
-                "entity_id": self.entity_id,
-                ATTR_TEMPERATURE: temp_value,
-            }
+            hvac_mode = self._map_hvac_mode(state.state)
+
+            if hvac_mode == "heat_cool":
+                # Dual-setpoint: write target_temp_low/high based on active side
+                hvac_action = state.attributes.get(ATTR_HVAC_ACTION)
+                if hvac_action == "heating":
+                    service_data = {
+                        "entity_id": self.entity_id,
+                        ATTR_TARGET_TEMP_LOW: self._from_fahrenheit(clamped),
+                        ATTR_TARGET_TEMP_HIGH: self._from_fahrenheit(comfort_max),
+                    }
+                elif hvac_action == "cooling":
+                    service_data = {
+                        "entity_id": self.entity_id,
+                        ATTR_TARGET_TEMP_HIGH: self._from_fahrenheit(clamped),
+                        ATTR_TARGET_TEMP_LOW: self._from_fahrenheit(comfort_min),
+                    }
+                else:
+                    # Idle — determine active side from indoor temp
+                    indoor = self._to_fahrenheit(
+                        state.attributes.get(ATTR_CURRENT_TEMPERATURE)
+                    )
+                    mid = (comfort_min + comfort_max) / 2
+                    if indoor is not None and indoor >= mid:
+                        service_data = {
+                            "entity_id": self.entity_id,
+                            ATTR_TARGET_TEMP_HIGH: self._from_fahrenheit(clamped),
+                            ATTR_TARGET_TEMP_LOW: self._from_fahrenheit(comfort_min),
+                        }
+                    else:
+                        service_data = {
+                            "entity_id": self.entity_id,
+                            ATTR_TARGET_TEMP_LOW: self._from_fahrenheit(clamped),
+                            ATTR_TARGET_TEMP_HIGH: self._from_fahrenheit(comfort_max),
+                        }
+                _LOGGER.debug(
+                    "Dual-setpoint write: low=%.1f high=%.1f (action=%s)",
+                    self._to_fahrenheit(service_data.get(ATTR_TARGET_TEMP_LOW)) or 0,
+                    self._to_fahrenheit(service_data.get(ATTR_TARGET_TEMP_HIGH)) or 0,
+                    hvac_action,
+                )
+            else:
+                # Single-setpoint mode
+                service_data = {
+                    "entity_id": self.entity_id,
+                    ATTR_TEMPERATURE: self._from_fahrenheit(clamped),
+                }
+
             await self.hass.services.async_call(
                 "climate",
                 "set_temperature",
