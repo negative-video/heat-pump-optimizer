@@ -2548,6 +2548,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
             self.strategic.greybox_optimizer = self.greybox_optimizer
 
+            # Reset profiler tracking so the first live cycle starts clean
+            # (avoids perpetual skipped_interval from stale bootstrap timestamp)
+            self.profiler._previous_indoor_temp = None
+            self.profiler._previous_timestamp = None
+
             _LOGGER.info(
                 "History bootstrap complete: %d EKF observations "
                 "(confidence=%.0f%%), baseline %s (%d obs), profiler %d obs",
