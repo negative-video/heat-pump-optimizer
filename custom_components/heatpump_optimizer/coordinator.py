@@ -189,7 +189,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         *,
         weather_entity_ids: list[str] | None = None,
         safety_limits: tuple[float, float] | None = None,
-        occupancy_entity_id: str | None = None,
+        occupancy_entity_ids: list[str] | None = None,
         options: dict[str, Any] | None = None,
         initialization_mode: str = "beestat",
         model_import_data: str | None = None,
@@ -461,7 +461,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Adapters (HA ↔ engine)
         self.thermostat = ThermostatAdapter(hass, climate_entity_id)
-        self.occupancy = OccupancyAdapter(hass, occupancy_entity_id)
+        self.occupancy = OccupancyAdapter(hass, entity_ids=occupancy_entity_ids)
 
         # Calendar-based occupancy scheduling (optional, multi-calendar)
         calendar_entities = opts.get(CONF_CALENDAR_ENTITIES, [])

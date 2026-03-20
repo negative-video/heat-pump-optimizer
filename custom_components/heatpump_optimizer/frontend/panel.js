@@ -890,6 +890,109 @@ function renderBuildingCard(states, hass) {
     </div>`;
 }
 
+/** [F2] House Thermal Load — stacked bar breakdown of passive heat flows. */
+function renderThermalLoadCard(states, _hass) {
+  const loadEntity = findEntity(states, "house_thermal_load");
+  if (!loadEntity || !hasValue(loadEntity)) return "";
+
+  const attrs = loadEntity.attributes || {};
+  const netLoad = Number(loadEntity.state);
+  const confidence = attrs.model_confidence ?? 0;
+  const converging = confidence < 50;
+
+  // Format BTU/hr with comma separators and sign
+  function fmtBtu(n) {
+    const abs = Math.abs(Math.round(n));
+    const str = abs.toLocaleString("en-US");
+    return n >= 0 ? `+${str}` : `\u2212${str}`;
+  }
+
+  // Component data from the primary sensor's attributes
+  const components = [
+    { key: "weather", label: "Weather", value: attrs.weather_heat_transfer ?? 0, color: "var(--orange)" },
+    { key: "solar", label: "Solar", value: attrs.solar_heat_gain ?? 0, color: "#fdd835" },
+    { key: "people", label: "People", value: attrs.occupancy_heat_gain ?? 0, color: "var(--accent)" },
+    { key: "boundary", label: "Boundary", value: attrs.boundary_zone_heat_transfer ?? 0, color: "#8d6e63" },
+    { key: "appliances", label: "Appliances", value: attrs.appliance_load ?? 0, color: "var(--blue)" },
+  ];
+
+  // Filter out zero-value components and split by direction
+  const active = components.filter(c => Math.abs(c.value) > 0.5);
+  const gains = active.filter(c => c.value > 0);
+  const removals = active.filter(c => c.value < 0);
+
+  // Build a stacked bar from a set of components
+  function stackedBar(items, cssExtra) {
+    const total = items.reduce((s, c) => s + Math.abs(c.value), 0);
+    if (total === 0) return "";
+    let left = 0;
+    const segs = items.map(c => {
+      const pct = Math.max(2, (Math.abs(c.value) / total) * 100);
+      const seg = `<div class="tl-bar-seg" style="left:${left}%;width:${pct}%;background:${c.color}"></div>`;
+      left += pct;
+      return seg;
+    }).join("");
+    return `<div class="tl-stacked-bar${cssExtra || ""}">${segs}</div>`;
+  }
+
+  // Direction label
+  let direction = "balanced";
+  if (netLoad > 50) direction = "gaining heat";
+  else if (netLoad < -50) direction = "losing heat";
+
+  // Gain bar
+  let gainSection = "";
+  if (gains.length > 0) {
+    gainSection = `
+      <div class="tl-bar-label">Adding heat</div>
+      ${stackedBar(gains, converging ? " tl-converging" : "")}`;
+  }
+
+  // Removal bar
+  let removalSection = "";
+  if (removals.length > 0) {
+    removalSection = `
+      <div class="tl-bar-label">Removing heat</div>
+      ${stackedBar(removals, converging ? " tl-converging" : "")}`;
+  }
+
+  // Legend — only active components
+  const legendItems = active.map(c =>
+    `<span class="tl-load-legend-item"><span class="tl-load-legend-dot" style="background:${c.color}"></span>${c.label}</span>`
+  ).join("");
+
+  // Collapsible details — all components including HVAC and stored heat
+  const detailRows = [
+    ...components.map(c =>
+      `<div class="diag-row"><span>${c.label}</span><span>${fmtBtu(c.value)} BTU/hr</span></div>`
+    ),
+    attrs.hvac_output != null
+      ? `<div class="diag-row"><span>HVAC Output</span><span>${fmtBtu(attrs.hvac_output)} BTU/hr</span></div>` : "",
+    attrs.stored_heat_exchange != null
+      ? `<div class="diag-row"><span>Stored Heat</span><span>${fmtBtu(attrs.stored_heat_exchange)} BTU/hr</span></div>` : "",
+  ].filter(Boolean).join("");
+
+  return `
+    <div class="card thermal-load-card">
+      <div class="building-header">
+        <h2>House Thermal Load</h2>
+        ${converging ? `<span class="converging-tag">Learning</span>` : ""}
+      </div>
+      <div class="tl-headline">
+        <span class="tl-headline-value">${fmtBtu(netLoad)} BTU/hr</span>
+        <span class="tl-headline-dir">${direction}</span>
+      </div>
+      ${gainSection}
+      ${removalSection}
+      <div class="tl-load-legend">${legendItems}</div>
+      ${detailRows ? `
+        <details class="diag-details thermal-load-details">
+          <summary class="diag-summary">Component Details</summary>
+          <div class="diag-grid">${detailRows}</div>
+        </details>` : ""}
+    </div>`;
+}
+
 // ── Learning Mode Renderers ──────────────────────────────────────────
 
 /** Helper: bucket a history series into N equal-time slots and average values. */
@@ -1598,6 +1701,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         ${isLearning ? renderWelcomeCard(s) : ""}
         ${renderHeroStrip(s, this._hass)}
         ${renderEnvironmentCard(s, this._hass)}
+        ${renderThermalLoadCard(s, this._hass)}
         ${(() => {
           if (!isLearning) return renderUnifiedTimeline(s, this._hass, this._retro);
           const fc = findEntity(s, "schedule")?.attributes?.forecast;
@@ -2522,6 +2626,65 @@ const PANEL_CSS = `
     font-size: 12px;
     color: var(--text-secondary);
     margin-top: 10px;
+  }
+
+  /* ── Thermal Load Card ── */
+  .thermal-load-card { overflow: hidden; }
+  .tl-headline {
+    margin-bottom: 12px;
+  }
+  .tl-headline-value {
+    font-size: 20px;
+    font-weight: 600;
+    display: block;
+  }
+  .tl-headline-dir {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .tl-bar-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    margin-bottom: 4px;
+    margin-top: 8px;
+  }
+  .tl-stacked-bar {
+    position: relative;
+    height: 20px;
+    background: color-mix(in srgb, var(--border) 30%, transparent);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .tl-stacked-bar.tl-converging {
+    opacity: 0.5;
+  }
+  .tl-bar-seg {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    opacity: 0.85;
+  }
+  .tl-load-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .tl-load-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .tl-load-legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
   }
 
   /* ── Forecast additions ── */

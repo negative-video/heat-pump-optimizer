@@ -123,8 +123,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         singular = entry.data.get(CONF_OCCUPANCY_ENTITY)
         if singular:
             occupancy_entities = [singular]
-    occupancy_entity = occupancy_entities[0] if occupancy_entities and len(occupancy_entities) == 1 else entry.data.get(CONF_OCCUPANCY_ENTITY)
-
     # Comfort ranges — options flow overrides take precedence over initial data
     opts = dict(entry.options)
 
@@ -201,7 +199,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         comfort_cool=comfort_cool,
         comfort_heat=comfort_heat,
         safety_limits=safety_limits,
-        occupancy_entity_id=occupancy_entity,
+        occupancy_entity_ids=occupancy_entities,
         options=opts,
         initialization_mode=init_mode,
         model_import_data=model_import_data,
