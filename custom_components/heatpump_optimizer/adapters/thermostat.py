@@ -40,6 +40,24 @@ class ThermostatState:
     timestamp: datetime
     available: bool
 
+    @property
+    def effective_setpoint(self) -> float | None:
+        """Return single effective setpoint, resolving dual-setpoint modes."""
+        if self.target_temp is not None:
+            return self.target_temp
+        # Dual-setpoint: pick the active bound based on HVAC action
+        if self.hvac_action == "heating":
+            return self.target_temp_low
+        if self.hvac_action == "cooling":
+            return self.target_temp_high
+        # Idle: use bound closest to current indoor temp
+        if self.target_temp_low is not None and self.target_temp_high is not None:
+            if self.indoor_temp is not None:
+                mid = (self.target_temp_low + self.target_temp_high) / 2
+                return self.target_temp_low if self.indoor_temp < mid else self.target_temp_high
+            return self.target_temp_low
+        return self.target_temp_low or self.target_temp_high
+
 
 class ThermostatAdapter:
     """Read/write thermostat state with safety checks.
@@ -167,16 +185,17 @@ class ThermostatAdapter:
             return False
 
         state = self.read_state()
-        if not state.available or state.target_temp is None:
+        current = state.effective_setpoint
+        if not state.available or current is None:
             return False
 
         # Allow 0.5°F tolerance for rounding
-        diff = abs(state.target_temp - self._last_written_setpoint)
+        diff = abs(current - self._last_written_setpoint)
         if diff > 0.5:
             _LOGGER.info(
                 "Override detected: expected %.1f°F, thermostat shows %.1f°F",
                 self._last_written_setpoint,
-                state.target_temp,
+                current,
             )
             return True
         return False

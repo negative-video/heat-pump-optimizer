@@ -652,8 +652,14 @@ class GreyBoxOptimizer:
             Q_hvac_abs = abs(self._hvac_capacity(mode, T_out, params))
 
             # Sensitivity of T_air[t+1] to each parameter (R_inv enters as UA = R_inv * area)
+            # Q_total includes all heat sources, not just envelope + HVAC, so the
+            # C_inv sensitivity captures the full thermal load uncertainty.
+            cloud = hourly_forecast[t].get("cloud_cover", 0.5) if t < len(hourly_forecast) else 0.5
+            Q_solar = params.get("solar_gain_btu", 0.0) * 0.5 * (1.0 - cloud)
+            Q_internal = 1200.0  # typical occupied home
+            Q_total_abs = abs(UA * (T_out - T_air) + Q_hvac_abs + Q_solar + Q_internal)
             J_R = params["C_inv"] * area * (T_out - T_air) * dt  # ∂T/∂R_inv
-            J_C = (UA * (T_out - T_air) + Q_hvac_abs) * dt  # ∂T/∂C_inv
+            J_C = Q_total_abs * dt  # ∂T/∂C_inv — full thermal load
             J_Q = params["C_inv"] * dt  # ∂T/∂Q_hvac
 
             # Propagated variance (sum of parameter contributions)
@@ -755,7 +761,11 @@ class GreyBoxOptimizer:
                     lo = mid  # Need more
             u[t] = hi
 
-        # Greedy refinement: try to shift duty from expensive to cheap hours
+        # Greedy refinement: try to shift duty from expensive to cheap hours.
+        # Complete the full pass through all cheap hours before checking
+        # satisfaction — early exit within a pass would miss opportunities
+        # to pre-load cheaper hours, reducing the amount that step 6 can
+        # trim from expensive hours.
         all_satisfied = False
         for _iteration in range(3):
             for t in sorted_hours:
@@ -770,14 +780,12 @@ class GreyBoxOptimizer:
                 if max_feasible > u[t] + 0.01:
                     u[t] = max_feasible
 
-                # Check if all constraints are now satisfied
-                T_current = self._simulate_trajectory(u, A, B, d, T_init, n)
-                all_satisfied = True
-                for s in range(1, n + 1):
-                    if T_current[s] < T_min[s] - 0.1 or T_current[s] > T_max[s] + 0.1:
-                        all_satisfied = False
-                        break
-                if all_satisfied:
+            # Check satisfaction only after completing the full pass
+            T_current = self._simulate_trajectory(u, A, B, d, T_init, n)
+            all_satisfied = True
+            for s in range(1, n + 1):
+                if T_current[s] < T_min[s] - 0.1 or T_current[s] > T_max[s] + 0.1:
+                    all_satisfied = False
                     break
 
             if all_satisfied:

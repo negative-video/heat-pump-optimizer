@@ -9,8 +9,10 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import selector
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.entity_discovery import EntityDiscovery
@@ -27,6 +29,7 @@ from .const import (
     CONF_BLEND_OUTLIER_THRESHOLD_F,
     CONF_BLEND_SCHEDULE_END,
     CONF_BLEND_SCHEDULE_START,
+    CONF_HUMIDITY_SQUELCH_PAIRS,
     CONF_THERMOSTAT_OCCUPANCY_ENTITY,
     DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
     DEFAULT_BLEND_SCHEDULE_END,
@@ -176,6 +179,63 @@ def _validate_profile(path: str) -> str | None:
         return "profile_missing_keys"
 
     return None
+
+
+def _is_metric(hass: HomeAssistant) -> bool:
+    """Check if the HA instance uses metric (Celsius) temperatures."""
+    return hass.config.units.temperature_unit == UnitOfTemperature.CELSIUS
+
+
+def _f_to_display(temp_f: float, hass: HomeAssistant) -> float:
+    """Convert °F to the user's display unit (°F or °C), rounded to int."""
+    if _is_metric(hass):
+        return round(TemperatureConverter.convert(
+            temp_f, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS
+        ))
+    return temp_f
+
+
+def _display_to_f(temp_display: float, hass: HomeAssistant) -> float:
+    """Convert from user's display unit back to °F for internal storage."""
+    if _is_metric(hass):
+        return TemperatureConverter.convert(
+            temp_display, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
+        )
+    return temp_display
+
+
+def _temp_unit(hass: HomeAssistant) -> str:
+    """Return the display temperature unit string."""
+    return "°C" if _is_metric(hass) else "°F"
+
+
+def _comfort_selector(hass: HomeAssistant, min_f: float, max_f: float) -> selector.NumberSelector:
+    """Create a temperature NumberSelector in the user's unit system."""
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=_f_to_display(min_f, hass),
+            max=_f_to_display(max_f, hass),
+            step=1,
+            unit_of_measurement=_temp_unit(hass),
+            mode=selector.NumberSelectorMode.SLIDER,
+        ),
+    )
+
+
+def _convert_comfort_input_to_f(user_input: dict[str, Any], hass: HomeAssistant) -> dict[str, Any]:
+    """Convert temperature fields in user_input from display units to °F."""
+    if not _is_metric(hass):
+        return user_input
+    temp_keys = {
+        CONF_COMFORT_COOL_MIN, CONF_COMFORT_COOL_MAX,
+        CONF_COMFORT_HEAT_MIN, CONF_COMFORT_HEAT_MAX,
+        CONF_SAFETY_HEAT_MIN, CONF_SAFETY_COOL_MAX,
+    }
+    converted = dict(user_input)
+    for key in temp_keys:
+        if key in converted:
+            converted[key] = _display_to_f(converted[key], hass)
+    return converted
 
 
 def _validate_comfort_ranges(user_input: dict[str, Any]) -> dict[str, str]:
@@ -655,6 +715,8 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
         """Step 5: Configure safety limits and optimization range."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            # Convert from display units (°C or °F) to internal °F
+            user_input = _convert_comfort_input_to_f(user_input, self.hass)
             errors = _validate_comfort_ranges(user_input)
             if not errors:
                 self._config_data.update(user_input)
@@ -671,65 +733,29 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                     # Safety limits (absolute guardrails)
                     vol.Optional(
                         CONF_SAFETY_HEAT_MIN,
-                        default=DEFAULT_SAFETY_HEAT_MIN,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=35, max=65, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_f_to_display(DEFAULT_SAFETY_HEAT_MIN, self.hass),
+                    ): _comfort_selector(self.hass, 35, 65),
                     vol.Optional(
                         CONF_SAFETY_COOL_MAX,
-                        default=DEFAULT_SAFETY_COOL_MAX,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=75, max=100, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_f_to_display(DEFAULT_SAFETY_COOL_MAX, self.hass),
+                    ): _comfort_selector(self.hass, 75, 100),
                     # Optimization range (where the optimizer works when home)
                     vol.Optional(
                         CONF_COMFORT_COOL_MIN,
-                        default=DEFAULT_COMFORT_COOL_MIN,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=58, max=80, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_f_to_display(DEFAULT_COMFORT_COOL_MIN, self.hass),
+                    ): _comfort_selector(self.hass, 58, 80),
                     vol.Optional(
                         CONF_COMFORT_COOL_MAX,
-                        default=DEFAULT_COMFORT_COOL_MAX,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=70, max=88, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_f_to_display(DEFAULT_COMFORT_COOL_MAX, self.hass),
+                    ): _comfort_selector(self.hass, 70, 88),
                     vol.Optional(
                         CONF_COMFORT_HEAT_MIN,
-                        default=DEFAULT_COMFORT_HEAT_MIN,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=45, max=72, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_f_to_display(DEFAULT_COMFORT_HEAT_MIN, self.hass),
+                    ): _comfort_selector(self.hass, 45, 72),
                     vol.Optional(
                         CONF_COMFORT_HEAT_MAX,
-                        default=DEFAULT_COMFORT_HEAT_MAX,
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=55, max=78, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_f_to_display(DEFAULT_COMFORT_HEAT_MAX, self.hass),
+                    ): _comfort_selector(self.hass, 55, 78),
                 }
             ),
         )
@@ -761,7 +787,16 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["equipment", "outdoor_sensors", "indoor_sensing", "blend_mitigation", "presence", "energy", "behavior", "comfort", "schedule", "appliances"],
+            menu_options=["comfort", "presence", "energy", "equipment", "advanced"],
+        )
+
+    async def async_step_advanced(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show the advanced options menu."""
+        return self.async_show_menu(
+            step_id="advanced",
+            menu_options=["behavior", "schedule", "indoor_sensing", "outdoor_sensors", "blend_mitigation", "humidity_squelch", "appliances"],
         )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -1301,6 +1336,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         """Reconfigure safety limits and optimization range."""
         errors: dict[str, str] = {}
         if user_input is not None:
+            # Convert from display units (°C or °F) to internal °F
+            user_input = _convert_comfort_input_to_f(user_input, self.hass)
             errors = _validate_comfort_ranges(user_input)
             if not errors:
                 # Comfort settings go into config entry data, not options.
@@ -1309,7 +1346,12 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 return self.async_create_entry(title="", data=self._options)
 
         # Read current values from entry data (set during initial setup)
+        # and convert stored °F to display units for the form defaults.
         data = self.config_entry.data
+
+        def _get_default(key: str, fallback: float) -> float:
+            val_f = self._options.get(key, data.get(key, fallback))
+            return _f_to_display(val_f, self.hass)
 
         return self.async_show_form(
             step_id="comfort",
@@ -1318,82 +1360,28 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 {
                     vol.Optional(
                         CONF_SAFETY_HEAT_MIN,
-                        default=self._options.get(
-                            CONF_SAFETY_HEAT_MIN,
-                            data.get(CONF_SAFETY_HEAT_MIN, DEFAULT_SAFETY_HEAT_MIN),
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=35, max=65, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_get_default(CONF_SAFETY_HEAT_MIN, DEFAULT_SAFETY_HEAT_MIN),
+                    ): _comfort_selector(self.hass, 35, 65),
                     vol.Optional(
                         CONF_SAFETY_COOL_MAX,
-                        default=self._options.get(
-                            CONF_SAFETY_COOL_MAX,
-                            data.get(CONF_SAFETY_COOL_MAX, DEFAULT_SAFETY_COOL_MAX),
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=75, max=100, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_get_default(CONF_SAFETY_COOL_MAX, DEFAULT_SAFETY_COOL_MAX),
+                    ): _comfort_selector(self.hass, 75, 100),
                     vol.Optional(
                         CONF_COMFORT_COOL_MIN,
-                        default=self._options.get(
-                            CONF_COMFORT_COOL_MIN,
-                            data.get(CONF_COMFORT_COOL_MIN, DEFAULT_COMFORT_COOL_MIN),
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=58, max=80, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_get_default(CONF_COMFORT_COOL_MIN, DEFAULT_COMFORT_COOL_MIN),
+                    ): _comfort_selector(self.hass, 58, 80),
                     vol.Optional(
                         CONF_COMFORT_COOL_MAX,
-                        default=self._options.get(
-                            CONF_COMFORT_COOL_MAX,
-                            data.get(CONF_COMFORT_COOL_MAX, DEFAULT_COMFORT_COOL_MAX),
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=70, max=88, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_get_default(CONF_COMFORT_COOL_MAX, DEFAULT_COMFORT_COOL_MAX),
+                    ): _comfort_selector(self.hass, 70, 88),
                     vol.Optional(
                         CONF_COMFORT_HEAT_MIN,
-                        default=self._options.get(
-                            CONF_COMFORT_HEAT_MIN,
-                            data.get(CONF_COMFORT_HEAT_MIN, DEFAULT_COMFORT_HEAT_MIN),
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=45, max=72, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_get_default(CONF_COMFORT_HEAT_MIN, DEFAULT_COMFORT_HEAT_MIN),
+                    ): _comfort_selector(self.hass, 45, 72),
                     vol.Optional(
                         CONF_COMFORT_HEAT_MAX,
-                        default=self._options.get(
-                            CONF_COMFORT_HEAT_MAX,
-                            data.get(CONF_COMFORT_HEAT_MAX, DEFAULT_COMFORT_HEAT_MAX),
-                        ),
-                    ): selector.NumberSelector(
-                        selector.NumberSelectorConfig(
-                            min=55, max=78, step=1,
-                            unit_of_measurement="°F",
-                            mode=selector.NumberSelectorMode.SLIDER,
-                        ),
-                    ),
+                        default=_get_default(CONF_COMFORT_HEAT_MAX, DEFAULT_COMFORT_HEAT_MAX),
+                    ): _comfort_selector(self.hass, 55, 78),
                 }
             ),
         )
@@ -2155,6 +2143,65 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="blend_mitigation",
+            data_schema=vol.Schema(schema),
+        )
+
+    async def async_step_humidity_squelch(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure humidity-gated sensor squelching for wet rooms.
+
+        Pairs a temperature sensor with a co-located humidity sensor so the
+        temperature sensor is excluded from indoor averages when humidity spikes
+        (e.g., during showers), preventing false readings from corrupting the
+        thermal model.
+        """
+        if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
+            temp_entity = user_input.get("squelch_temp_entity", "")
+            humidity_entity = user_input.get("squelch_humidity_entity", "")
+            if temp_entity and humidity_entity:
+                pairs = [{"temp_entity": temp_entity, "humidity_entity": humidity_entity}]
+            else:
+                pairs = []
+            self._options[CONF_HUMIDITY_SQUELCH_PAIRS] = json.dumps(pairs)
+            return self.async_create_entry(title="", data=self._options)
+
+        # Load existing pair (if any)
+        existing_pairs = []
+        raw = self._options.get(CONF_HUMIDITY_SQUELCH_PAIRS, "")
+        if raw:
+            try:
+                existing_pairs = json.loads(raw)
+            except (ValueError, TypeError):
+                pass
+
+        current_temp = existing_pairs[0]["temp_entity"] if existing_pairs else ""
+        current_hum = existing_pairs[0]["humidity_entity"] if existing_pairs else ""
+
+        schema: dict = {
+            vol.Optional(
+                "squelch_temp_entity",
+                default=current_temp,
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="temperature",
+                ),
+            ),
+            vol.Optional(
+                "squelch_humidity_entity",
+                default=current_hum,
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain="sensor",
+                    device_class="humidity",
+                ),
+            ),
+        }
+
+        return self.async_show_form(
+            step_id="humidity_squelch",
             data_schema=vol.Schema(schema),
         )
 

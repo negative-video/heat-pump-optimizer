@@ -1398,10 +1398,37 @@ function renderLearningMilestones(states) {
       </div>`;
   }).join("");
 
+  // Contextual tips based on current configuration
+  const tips = [];
+  const indoorSource = findEntity(states, "indoor_temp_source");
+  const occupancy = findEntity(states, "occupancy_forecast");
+  const schedule = findEntity(states, "schedule");
+
+  const indoorCount = indoorSource?.attributes?.entity_count || 0;
+  if (indoorCount === 0) {
+    tips.push("Adding indoor temperature sensors improves accuracy. Configure them in Settings.");
+  }
+  if (!isAvailable(occupancy) || occupancy.state === "unknown") {
+    tips.push("Adding presence detection enables away-mode savings when nobody is home.");
+  }
+
+  const comfortMin = schedule?.attributes?.comfort_min;
+  const comfortMax = schedule?.attributes?.comfort_max;
+  if (comfortMin != null && comfortMax != null && (comfortMax - comfortMin) < 3) {
+    tips.push("A wider comfort range gives the optimizer more room to save energy.");
+  }
+
+  if (tips.length === 0) {
+    tips.push("Everything looks good. The optimizer is learning in the background.");
+  }
+
+  const tipHtml = tips.map(t => `<div class="tip-item">${t}</div>`).join("");
+
   return `
     <div class="card milestone-card">
       <h2>Getting Started</h2>
       <div class="ms-list">${items}</div>
+      <div class="tips-section">${tipHtml}</div>
     </div>`;
 }
 
@@ -1450,6 +1477,31 @@ function renderSnapshotCard(states, hass) {
         <span class="snapshot-note">Savings comparison unlocks after baseline</span>
       </div>
       <div class="snap-grid">${grid}</div>
+    </div>`;
+}
+
+/** [W] Welcome Card -- shown only on fresh installations before any data arrives. */
+function renderWelcomeCard(states) {
+  const modelConf = findEntity(states, "model_confidence");
+  const baselineConf = findEntity(states, "baseline_confidence");
+  const sampleDays = baselineConf?.attributes?.sample_days ?? 0;
+  const confPct = hasValue(modelConf) ? Number(modelConf.state) : 0;
+
+  // Only show when truly fresh: no observations yet
+  if (confPct > 0 || sampleDays > 0) return "";
+
+  return `
+    <div class="card welcome-card">
+      <h2>Welcome</h2>
+      <p class="welcome-text">
+        The optimizer is now learning how your home responds to temperature changes.
+        Over the next 2-3 weeks, it will build a thermal model of your home and start
+        shifting HVAC runtime to save energy while keeping you comfortable.
+      </p>
+      <p class="welcome-text">
+        No action is needed. It works in the background using your thermostat and weather
+        data. You can check back here anytime to see its progress.
+      </p>
     </div>`;
 }
 
@@ -1540,6 +1592,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
           <h1>Heat Pump Optimizer</h1>
         </header>
         ${renderAlerts(s)}
+        ${isLearning ? renderWelcomeCard(s) : ""}
         ${renderHeroStrip(s, this._hass)}
         ${renderEnvironmentCard(s, this._hass)}
         ${(() => {
@@ -2629,6 +2682,35 @@ const PANEL_CSS = `
     color: var(--accent);
   }
   .ms-done .ms-sub { color: var(--green); }
+
+  /* ── Tips Section (inside milestone card) ── */
+  .tips-section {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, var(--border) 30%, transparent);
+  }
+  .tip-item {
+    font-size: 12px;
+    color: var(--text-secondary);
+    padding: 3px 0;
+  }
+  .tip-item::before {
+    content: "Tip: ";
+    font-weight: 500;
+    color: var(--accent);
+  }
+
+  /* ── Welcome Card ── */
+  .welcome-card {
+    border-left: 3px solid var(--accent, #4CAF50);
+  }
+  .welcome-text {
+    margin: 0.5em 0;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+  .welcome-text:last-child { margin-bottom: 0; }
 
   /* ── Today's Snapshot Card ── */
   .snapshot-card { }

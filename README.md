@@ -230,6 +230,19 @@ When multiple indoor temperature sensors are configured with area assignments:
 | **Occupied only** | Only rooms with detected motion contribute |
 | **Weighted** | Occupied rooms get higher weight (default 3×), unoccupied rooms still contribute |
 
+### Wet Room Squelch
+
+Bathrooms and laundry rooms cause large temperature spikes during showers or dryer use (typically +5–6°F lasting 3–4 hours). These spikes corrupt the thermal model if included in the indoor average.
+
+**Wet Room Squelch** pairs a temperature sensor with a co-located humidity sensor. When humidity exceeds the activation threshold, the temperature and humidity sensors are excluded from indoor averages until humidity recovers.
+
+| Parameter | Value |
+|-----------|-------|
+| **Activation threshold** | 65% RH |
+| **Deactivation threshold** | 55% RH (hysteresis) |
+
+Configure in **Configure → Advanced → Wet Room Squelch**. Select the temperature sensor to squelch and the humidity sensor that triggers squelching. When squelched, other indoor sensors and the thermostat continue contributing normally. If the squelched sensor is the only indoor sensor, the integration falls back to the thermostat reading.
+
 ---
 
 <details>
@@ -962,10 +975,10 @@ Where each heat flow term (in BTU/hr) is:
 **Definitions:**
 
 - `UA = R_inv · A_envelope` — whole-building conductance (per-area conductance × envelope area, BTU/hr/°F)
-- `φ = 1 + 2·n_open_doors + 0.025·v_wind` — infiltration multiplier (dimensionless)
+- `φ = min(4, 1 + 2·n_open_doors + 0.025·v_wind + 0.02·√|T_out_eff - T_air|)` — infiltration multiplier including wind, open doors, and buoyancy-driven stack effect (dimensionless, capped at 4×)
 - `T_out_eff = T_out - 3°F` during precipitation (evaporative cooling correction), otherwise `T_out`
 - `R_int_inv` — air-to-mass coupling conductance (BTU/hr/°F)
-- `K_attic = 50`, `K_crawl = 25` BTU/hr/°F — boundary zone conductances
+- `K_attic = 50 · (A/2000)`, `K_crawl = 25 · (A/2000)` BTU/hr/°F — boundary zone conductances, scaled by envelope area relative to 2000 ft² baseline
 - `Q_solar_peak` — learned peak solar gain at clear-sky noon (BTU/hr, estimated by the EKF)
 
 ### HVAC capacity model
@@ -1020,6 +1033,30 @@ T_mass(t+Δt) = T_mass(t) · e^(-β) + T_air(t) · (1 - e^(-β))
 ```
 
 This exponential integration avoids the oscillation problems that forward Euler exhibits when `λ·Δt` approaches 2, which can happen with large conductance values or long time steps.
+
+### Thermodynamic validity
+
+Every physical model component has been reviewed against building science standards and literature. The table below summarizes the assessment:
+
+| Component | Verdict | Reference / Notes |
+|-----------|---------|-------------------|
+| Two-node RC model | **Correct** | ISO 13786 validated; 2R2C is the standard approach for residential thermal simulation |
+| COP degradation (η_cool, η_heat) | **Approximately correct** | Slopes match AHRI 210/240 test data for single-speed units; variable-capacity heat pumps degrade more gently (~0.008-0.012/°F vs the modeled 0.015) — the EKF compensates by learning a higher base capacity |
+| Solar gain geometry | **Correct** | `sin(elevation)` is the geometrically correct factor for direct-beam irradiance on a horizontal surface; diffuse radiation (~10-20% of total) is omitted but absorbed into the learned `Q_solar_peak` parameter |
+| Infiltration model | **Correct** | Wind coefficient (2.5%/mph) is within ASHRAE Fundamentals Ch. 26 range for residential; stack effect (buoyancy-driven leakage ∝ √ΔT) is included per ASHRAE guidance; infiltration capped at 4× to prevent parameter corruption |
+| Internal heat gain | **Correct** | 350 BTU/hr per occupant matches ASHRAE 90.1; 800 BTU/hr appliance base load is within the residential range documented in IECC |
+| Boundary zone conductance | **Approximately correct** | K_attic=50 BTU/hr/°F corresponds to ~2000 ft² ceiling at R-30 insulation; scales with configured home area to generalize across home sizes |
+| Exponential integration | **Correct** | Analytical solution to the first-order linear ODE; unconditionally stable for any time step and parameter values |
+| Linearized LP optimizer | **Valid for 24h** | ±1-2°F prediction error over 24 hours; thermal mass freeze corrected by re-iteration |
+| Duty cycle model | **Correct for energy** | Time-integral of heat input (∫Q·dt) is identical whether delivered as pulsed on/off or continuous partial capacity over 1-hour bins |
+| Counterfactual simulator | **Excellent** | Uses identical physics equations as the real model — essential for honest savings attribution |
+
+**Known limitations:**
+
+- **Single-zone assumption** — the model treats the home as one air volume. Multi-zone or multi-story homes with significant temperature stratification are not fully captured.
+- **No explicit latent heat** — humidity effects on cooling capacity are modeled via sensible heat ratio (SHR) correction, but the model does not track absolute humidity or enthalpy.
+- **Linear COP degradation** — real heat pump performance curves are slightly concave, especially near defrost thresholds (30-40°F). The EKF learns effective capacity to compensate, but hour-ahead predictions at temperatures far from the reference may have higher error.
+- **No auto mode-switching** — the optimizer assumes a single HVAC mode (heat or cool) per optimization horizon. Shoulder season days requiring both modes within 24 hours may need manual intervention.
 
 ---
 

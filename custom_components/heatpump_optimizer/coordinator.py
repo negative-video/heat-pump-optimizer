@@ -69,6 +69,7 @@ from .const import (
     CONF_BLEND_OUTLIER_THRESHOLD_F,
     CONF_BLEND_SCHEDULE_END,
     CONF_BLEND_SCHEDULE_START,
+    CONF_HUMIDITY_SQUELCH_PAIRS,
     CONF_THERMOSTAT_OCCUPANCY_ENTITY,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
@@ -313,6 +314,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             flat_rate=self._flat_rate,
             blend_mode=self._blend_mode,
             blend_outlier_threshold_f=self._blend_outlier_threshold_f,
+            humidity_squelch_pairs=self._parse_squelch_pairs(
+                opts.get(CONF_HUMIDITY_SQUELCH_PAIRS, "")
+            ),
         )
 
         # Auxiliary appliance manager (optional — HPWH, dryer, etc.)
@@ -857,12 +861,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         elif not self._paused:
             override = self.watchdog.check_override(
                 self.thermostat.last_written_setpoint,
-                thermo_state.target_temp,
+                thermo_state.effective_setpoint,
             )
             if override:
                 self.override_tracker.record_override(
                     expected_setpoint=self.thermostat.last_written_setpoint or 0,
-                    actual_setpoint=thermo_state.target_temp or 0,
+                    actual_setpoint=thermo_state.effective_setpoint or 0,
                 )
                 self._phase = PHASE_PAUSED
                 return self._build_data(thermo_state)
@@ -944,16 +948,18 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             elif tactical_result.should_write_setpoint and tactical_result.corrected_setpoint is not None:
                 target = tactical_result.corrected_setpoint
                 comfort = self._active_comfort_range()
-                target = self._apply_rate_limit(target, thermo_state.target_temp)
-                if thermo_state.target_temp is None or abs(thermo_state.target_temp - target) > 0.5:
+                current_sp = thermo_state.effective_setpoint
+                target = self._apply_rate_limit(target, current_sp)
+                if current_sp is None or abs(current_sp - target) > 0.5:
                     if self._check_dwell_time(now):
                         await self.thermostat.async_set_temperature(target, *comfort)
                         self._last_written_setpoint_time = now
             else:
                 # Write scheduled setpoint if different from current
-                if thermo_state.target_temp is not None:
-                    target = self._apply_rate_limit(current_entry.target_temp, thermo_state.target_temp)
-                    diff = abs(thermo_state.target_temp - target)
+                current_sp = thermo_state.effective_setpoint
+                if current_sp is not None:
+                    target = self._apply_rate_limit(current_entry.target_temp, current_sp)
+                    diff = abs(current_sp - target)
                     if diff > 0.5:
                         if self._check_dwell_time(now):
                             comfort = self._active_comfort_range()
@@ -1022,7 +1028,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             if outdoor_temp is not None and thermo_state.indoor_temp is not None:
                 _setpoint_delta = abs(
                     thermo_state.indoor_temp
-                    - (thermo_state.target_temp or thermo_state.indoor_temp)
+                    - (thermo_state.effective_setpoint or thermo_state.indoor_temp)
                 )
                 _hum_reading = self.sensor_hub.read_outdoor_humidity(
                     forecast_snapshot=self.strategic.forecast_snapshot
@@ -1086,10 +1092,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # ── Baseline capture (during learning phase) ───────────────
 
         try:
-            if self._is_learning_active() and thermo_state.target_temp is not None:
+            effective_sp = thermo_state.effective_setpoint
+            if self._is_learning_active() and effective_sp is not None:
                 self.baseline_capture.record_observation(
                     now=now,
-                    setpoint=thermo_state.target_temp,
+                    setpoint=effective_sp,
                     mode=self.strategic.mode or "off",
                 )
                 if self.baseline_capture.is_ready and self.baseline_capture.template is None:
@@ -1485,6 +1492,25 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 profile["travel_sensor"] = travel
             return [profile]
 
+        return []
+
+    @staticmethod
+    def _parse_squelch_pairs(raw: str) -> list[dict]:
+        """Parse humidity squelch pairs from JSON string."""
+        if not raw:
+            return []
+        import json as _json
+        try:
+            pairs = _json.loads(raw)
+            if isinstance(pairs, list):
+                return [
+                    p for p in pairs
+                    if isinstance(p, dict)
+                    and p.get("temp_entity")
+                    and p.get("humidity_entity")
+                ]
+        except (ValueError, TypeError):
+            pass
         return []
 
     async def _check_departure_trigger(
@@ -2313,9 +2339,16 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     # ── Persistence ─────────────────────────────────────────────────
 
+    # Internal schema version for the persisted state dict.
+    # Bump this when the state format changes and add migration logic
+    # in _restore_learning_state(). Separate from HA's STORAGE_VERSION
+    # which controls the on-disk container format.
+    _STATE_SCHEMA_VERSION = 1
+
     async def _persist_state(self) -> None:
         """Persist learning data and coordinator state to HA storage."""
         data = {
+            "_schema_version": self._STATE_SCHEMA_VERSION,
             "last_optimization_time": (
                 self.strategic.last_optimization_time.isoformat()
                 if self.strategic.last_optimization_time
@@ -2342,7 +2375,28 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         await self._store.async_save(data)
 
     def _restore_learning_state(self, stored: dict) -> None:
-        """Restore learning data from persisted storage."""
+        """Restore learning data from persisted storage.
+
+        Each component is restored independently with error handling so that
+        a corrupt or incompatible sub-dict doesn't prevent the rest from loading.
+        On failure, the component stays at its default (fresh) state and a
+        warning is logged instead of crashing async_setup().
+        """
+        schema = stored.get("_schema_version", 0)
+        if schema > self._STATE_SCHEMA_VERSION:
+            _LOGGER.warning(
+                "Stored state has schema version %d but we only support up to %d "
+                "— ignoring persisted state to avoid corruption. "
+                "The model will re-learn from scratch.",
+                schema, self._STATE_SCHEMA_VERSION,
+            )
+            return
+        if schema < self._STATE_SCHEMA_VERSION:
+            _LOGGER.info(
+                "Migrating stored state from schema version %d to %d",
+                schema, self._STATE_SCHEMA_VERSION,
+            )
+            # Add migration logic here when _STATE_SCHEMA_VERSION is bumped
         if stored.get("forced_occupancy_mode") is not None:
             try:
                 self.occupancy.force_mode(
@@ -2350,67 +2404,106 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 )
                 _LOGGER.debug("Restored forced occupancy mode: %s",
                               stored["forced_occupancy_mode"])
-            except ValueError:
+            except (ValueError, KeyError, TypeError):
                 _LOGGER.warning("Invalid stored occupancy mode: %s",
                                 stored["forced_occupancy_mode"])
 
         if "model_tracker" in stored:
-            self.model_tracker = ModelTracker.from_dict(stored["model_tracker"])
-            _LOGGER.debug("Restored model tracker state")
+            try:
+                self.model_tracker = ModelTracker.from_dict(stored["model_tracker"])
+                _LOGGER.debug("Restored model tracker state")
+            except Exception:
+                _LOGGER.warning("Failed to restore model tracker — using fresh state",
+                                exc_info=True)
         if "solar_adjuster" in stored:
-            self.solar_adjuster = SolarAdjuster.from_dict(stored["solar_adjuster"])
-            _LOGGER.debug("Restored solar adjuster (coefficient=%.3f)",
-                          self.solar_adjuster.solar_coefficient)
+            try:
+                self.solar_adjuster = SolarAdjuster.from_dict(stored["solar_adjuster"])
+                _LOGGER.debug("Restored solar adjuster (coefficient=%.3f)",
+                              self.solar_adjuster.solar_coefficient)
+            except Exception:
+                _LOGGER.warning("Failed to restore solar adjuster — using fresh state",
+                                exc_info=True)
         if "override_tracker" in stored:
-            self.override_tracker = OverrideTracker.from_dict(stored["override_tracker"])
-            _LOGGER.debug("Restored %d override records",
-                          self.override_tracker.record_count)
+            try:
+                self.override_tracker = OverrideTracker.from_dict(stored["override_tracker"])
+                _LOGGER.debug("Restored %d override records",
+                              self.override_tracker.record_count)
+            except Exception:
+                _LOGGER.warning("Failed to restore override tracker — using fresh state",
+                                exc_info=True)
         if "savings_tracker" in stored:
-            self.savings_tracker = SavingsTracker.from_dict(stored["savings_tracker"])
-            totals = self.savings_tracker.cumulative_totals()
-            _LOGGER.debug("Restored savings tracker (%.1f kWh saved cumulative)",
-                          totals["kwh_saved"])
+            try:
+                self.savings_tracker = SavingsTracker.from_dict(stored["savings_tracker"])
+                totals = self.savings_tracker.cumulative_totals()
+                _LOGGER.debug("Restored savings tracker (%.1f kWh saved cumulative)",
+                              totals["kwh_saved"])
+            except Exception:
+                _LOGGER.warning("Failed to restore savings tracker — using fresh state",
+                                exc_info=True)
         if "thermal_estimator" in stored:
-            self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
-            self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
-            self.strategic.greybox_optimizer = self.greybox_optimizer
-            _LOGGER.info(
-                "Restored Kalman filter (%d observations, confidence=%.0f%%)",
-                self.estimator._n_obs,
-                self.estimator.confidence * 100,
-            )
+            try:
+                self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
+                self.adaptive_model = AdaptivePerformanceModel(self.estimator)
+                self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+                self.strategic.greybox_optimizer = self.greybox_optimizer
+                _LOGGER.info(
+                    "Restored Kalman filter (%d observations, confidence=%.0f%%)",
+                    self.estimator._n_obs,
+                    self.estimator.confidence * 100,
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Failed to restore thermal estimator — using fresh state. "
+                    "The model will re-learn from scratch.",
+                    exc_info=True,
+                )
         if "baseline_capture" in stored:
-            self.baseline_capture = BaselineCapture.from_dict(stored["baseline_capture"])
-            _LOGGER.debug(
-                "Restored baseline capture (%d days, confidence=%.0f%%)",
-                self.baseline_capture.sample_days,
-                self.baseline_capture.confidence * 100,
-            )
+            try:
+                self.baseline_capture = BaselineCapture.from_dict(stored["baseline_capture"])
+                _LOGGER.debug(
+                    "Restored baseline capture (%d days, confidence=%.0f%%)",
+                    self.baseline_capture.sample_days,
+                    self.baseline_capture.confidence * 100,
+                )
+            except Exception:
+                _LOGGER.warning("Failed to restore baseline capture — using fresh state",
+                                exc_info=True)
         if "counterfactual" in stored:
-            self.counterfactual = CounterfactualSimulator.from_dict(stored["counterfactual"])
-            _LOGGER.debug(
-                "Restored counterfactual simulator (virtual_temp=%.1f°F)",
-                self.counterfactual.virtual_indoor_temp,
-            )
+            try:
+                self.counterfactual = CounterfactualSimulator.from_dict(stored["counterfactual"])
+                _LOGGER.debug(
+                    "Restored counterfactual simulator (virtual_temp=%.1f°F)",
+                    self.counterfactual.virtual_indoor_temp,
+                )
+            except Exception:
+                _LOGGER.warning("Failed to restore counterfactual simulator — using fresh state",
+                                exc_info=True)
         if "performance_profiler" in stored:
-            self.profiler = PerformanceProfiler.from_dict(stored["performance_profiler"])
-            _LOGGER.debug(
-                "Restored performance profiler (%d observations, confidence=%.0f%%)",
-                self.profiler.total_observations,
-                self.profiler.confidence() * 100,
-            )
+            try:
+                self.profiler = PerformanceProfiler.from_dict(stored["performance_profiler"])
+                _LOGGER.debug(
+                    "Restored performance profiler (%d observations, confidence=%.0f%%)",
+                    self.profiler.total_observations,
+                    self.profiler.confidence() * 100,
+                )
+            except Exception:
+                _LOGGER.warning("Failed to restore performance profiler — using fresh state",
+                                exc_info=True)
         if "aux_heat_learner" in stored:
-            self.aux_heat_learner = AuxHeatLearner.from_dict(
-                stored["aux_heat_learner"],
-                default_hp_watts=self._power_default_watts,
-            )
-            _LOGGER.debug(
-                "Restored aux heat learner (%d events, threshold=%.1f°F, hp_watts=%.0fW)",
-                self.aux_heat_learner.event_count,
-                self.aux_heat_learner.threshold_f,
-                self.aux_heat_learner.learned_hp_watts,
-            )
+            try:
+                self.aux_heat_learner = AuxHeatLearner.from_dict(
+                    stored["aux_heat_learner"],
+                    default_hp_watts=self._power_default_watts,
+                )
+                _LOGGER.debug(
+                    "Restored aux heat learner (%d events, threshold=%.1f°F, hp_watts=%.0fW)",
+                    self.aux_heat_learner.event_count,
+                    self.aux_heat_learner.threshold_f,
+                    self.aux_heat_learner.learned_hp_watts,
+                )
+            except Exception:
+                _LOGGER.warning("Failed to restore aux heat learner — using fresh state",
+                                exc_info=True)
 
     async def async_try_history_bootstrap_if_needed(self) -> None:
         """Public entry point: attempt history bootstrap if not already done.
@@ -2699,6 +2792,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 getattr(self, "_thermostat_blend_suspected", False)
                 and self._blend_mode != BLEND_MODE_NONE
             ),
+
+            # Humidity squelch diagnostics
+            "humidity_squelch_active": bool(self.sensor_hub.squelched_entities),
+            "squelched_entities": self.sensor_hub.squelched_entities,
 
             # Apparent temperature (humidity-adjusted)
             "apparent_temperature": self._current_apparent_temp,

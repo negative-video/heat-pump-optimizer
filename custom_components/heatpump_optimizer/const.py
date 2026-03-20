@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.15"
+VERSION = "0.1.16"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -235,6 +235,11 @@ BLEND_MODE_MEDIAN = "median"
 DEFAULT_BLEND_OUTLIER_THRESHOLD_F = 3.0   # °F from median to count as outlier
 DEFAULT_BLEND_SCHEDULE_START = "22:00"    # start of nightly suppression window
 DEFAULT_BLEND_SCHEDULE_END = "08:00"      # end of nightly suppression window
+
+# Humidity-gated sensor squelching (wet room exclusion)
+CONF_HUMIDITY_SQUELCH_PAIRS = "humidity_squelch_pairs"
+DEFAULT_HUMIDITY_SQUELCH_ON = 65.0    # %RH — activate squelch above this
+DEFAULT_HUMIDITY_SQUELCH_OFF = 55.0   # %RH — deactivate squelch below this
 
 # Setpoint switching penalty
 DEFAULT_SWITCHING_PENALTY_WEIGHT = 0.3  # soft penalty for consecutive setpoint changes

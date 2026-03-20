@@ -87,6 +87,19 @@ _PRECIPITATION_OFFSET_F = 3.0
 # Typical residential: 2-3% per mph at moderate speeds, diminishing at high speeds.
 _WIND_INFILTRATION_COEFF = 0.025
 
+# Cap infiltration multiplier to prevent unrealistic heat loss with many
+# open doors/windows. 3+ open contacts stacked linearly would exceed any
+# physical air exchange rate; capping at 4× prevents the model from
+# attributing all heat loss to infiltration and corrupting R-value learning.
+_MAX_INFILTRATION_MULTIPLIER = 4.0
+
+# Stack effect coefficient: buoyancy-driven infiltration from warm air rising
+# out through upper-story cracks and drawing cold air in below.
+# Per ASHRAE Fundamentals Ch. 26, stack-driven leakage scales with sqrt(ΔT).
+# Coefficient of 0.02 per sqrt(°F) yields ~0.11 at 30°F delta, ~0.14 at 50°F —
+# a modest contribution that compounds with wind infiltration.
+_STACK_EFFECT_COEFF = 0.02
+
 # Physical bounds for parameter clamping
 BOUNDS = {
     IDX_R_INV: (0.01, 2.0),       # R: 0.5 to 100 °F·hr/BTU
@@ -125,8 +138,15 @@ class ThermalEstimator:
     # Process noise covariance
     Q: np.ndarray = field(default_factory=lambda: np.eye(N_STATES))
 
-    # Measurement noise variance (°F²)
-    R_meas: float = 0.25  # ±0.5°F thermostat accuracy
+    # Measurement noise variance (°F²).
+    # Set to 0.5 (std ≈ 0.71°F) to account for thermostat quantization.
+    # Most thermostats report integer °F, creating a staircase signal.
+    # With R_meas=0.25 the filter over-reacts to ±1°F boundary crossings
+    # and over-trusts during flat periods, causing parameter oscillation.
+    R_meas: float = 0.5
+
+    # Last observed temperature — used to detect quantization no-change
+    _last_observed_temp: float | None = None
 
     # Innovation (prediction error) history for accuracy reporting
     _innovations: list[tuple[datetime, float]] = field(default_factory=list)
@@ -134,6 +154,9 @@ class ThermalEstimator:
     _last_update: datetime | None = None
     _initialized: bool = False
     _P_initial: np.ndarray = field(default_factory=lambda: np.eye(N_STATES))
+
+    # High-water mark for confidence — prevents user-facing metric from dropping
+    _confidence_hwm: float = 0.0
 
     # Envelope area (ft²) — scales per-area R_inv to whole-building conductance
     _envelope_area: float = 2000.0
@@ -421,7 +444,30 @@ class ThermalEstimator:
             self.x, outdoor_temp, hvac_mode, hvac_running,
             cloud_cover, sun_elevation, dt_hours,
         )
-        P_pred = F @ self.P @ F.T + self.Q
+
+        # ── Process noise gating ────────────────────────────────
+        # Gate HVAC capacity process noise by observability to prevent
+        # covariance leakage: unobserved states (e.g. Q_cool during heating
+        # season) drift through off-diagonal P coupling, causing systematic
+        # parameter drift toward clamp bounds.
+        Q_effective = self.Q.copy()
+        if not (hvac_running and hvac_mode == "cool"):
+            Q_effective[IDX_Q_COOL, IDX_Q_COOL] = 0.0
+        if not (hvac_running and hvac_mode == "heat"):
+            Q_effective[IDX_Q_HEAT, IDX_Q_HEAT] = 0.0
+
+        P_pred = F @ self.P @ F.T + Q_effective
+
+        # Zero cross-correlations for unobserved HVAC capacity states
+        # to prevent covariance leakage from dragging them via Kalman gain.
+        if not (hvac_running and hvac_mode == "cool"):
+            P_pred[IDX_Q_COOL, :] = 0.0
+            P_pred[:, IDX_Q_COOL] = 0.0
+            P_pred[IDX_Q_COOL, IDX_Q_COOL] = self.P[IDX_Q_COOL, IDX_Q_COOL]
+        if not (hvac_running and hvac_mode == "heat"):
+            P_pred[IDX_Q_HEAT, :] = 0.0
+            P_pred[:, IDX_Q_HEAT] = 0.0
+            P_pred[IDX_Q_HEAT, IDX_Q_HEAT] = self.P[IDX_Q_HEAT, IDX_Q_HEAT]
 
         # ── UPDATE ───────────────────────────────────────────────
         # Observation model: z = H @ x = T_air
@@ -433,6 +479,18 @@ class ThermalEstimator:
         z_pred = x_pred[IDX_T_AIR]
         innovation = z - z_pred
 
+        # ── Quantization-aware measurement noise ────────────────
+        # Most thermostats report integer °F, creating a staircase signal.
+        # When the observation hasn't changed, the innovation is artificially
+        # small (the sensor just hasn't crossed a boundary yet). Freeze
+        # parameter learning during these "no-change" steps to prevent the
+        # filter from shrinking P based on false confirmation.
+        temp_unchanged = (
+            self._last_observed_temp is not None
+            and observed_temp == self._last_observed_temp
+        )
+        self._last_observed_temp = observed_temp
+
         # Innovation covariance — scale R_meas when sensor trust is reduced
         effective_R = self.R_meas * measurement_noise_scale
         S = H @ P_pred @ H.T + effective_R
@@ -440,6 +498,13 @@ class ThermalEstimator:
 
         # Kalman gain
         K = P_pred @ H.T / S_scalar  # (N,1)
+
+        # Quantization pause: when thermostat reports same integer as last
+        # time, freeze parameter learning. The zero innovation carries no
+        # real information about building parameters — it just means the
+        # sensor hasn't crossed a degree boundary. T_air/T_mass still update.
+        if temp_unchanged:
+            K[_IDX_FIRST_PARAM:, :] = 0.0
 
         # Door/window learning pause: freeze parameter rows when doors/windows
         # are open to prevent infiltration from corrupting building estimates.
@@ -516,7 +581,12 @@ class ThermalEstimator:
         wind_infiltration = 0.0
         if self._current_wind_speed is not None and self._current_wind_speed > 0:
             wind_infiltration = _WIND_INFILTRATION_COEFF * self._current_wind_speed
-        infiltration = 1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration
+        # Stack effect: buoyancy-driven infiltration scales with sqrt(|ΔT|)
+        stack_effect = _STACK_EFFECT_COEFF * math.sqrt(abs(effective_outdoor - T_air))
+        infiltration = min(
+            _MAX_INFILTRATION_MULTIPLIER,
+            1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration + stack_effect,
+        )
         Q_env = UA * infiltration * (effective_outdoor - T_air)
 
         # Internal coupling
@@ -546,15 +616,20 @@ class ThermalEstimator:
             Q_internal = DEFAULT_INTERNAL_GAIN_BTU
 
         # ── Boundary zone heat transfer ──────────────────────────
+        # Scale conductances by home size (base values assume 2000 ft²)
+        area_scale = self._envelope_area / 2000.0
+        k_attic = _K_ATTIC * area_scale
+        k_crawl = _K_CRAWLSPACE * area_scale
+
         Q_boundary = 0.0
         k_boundary = 0.0  # total boundary conductance for exponential integrator
         crawl_temp = self._current_crawlspace_temp
         if attic_temp is not None:
-            Q_boundary += _K_ATTIC * (attic_temp - T_air)
-            k_boundary += _K_ATTIC
+            Q_boundary += k_attic * (attic_temp - T_air)
+            k_boundary += k_attic
         if crawl_temp is not None:
-            Q_boundary += _K_CRAWLSPACE * (crawl_temp - T_air)
-            k_boundary += _K_CRAWLSPACE
+            Q_boundary += k_crawl * (crawl_temp - T_air)
+            k_boundary += k_crawl
 
         # ── Temperature updates (exponential decay integration) ──
         # Unconditionally stable: avoids oscillation at extreme parameter
@@ -563,7 +638,7 @@ class ThermalEstimator:
         # Air node: dT_air/dt = C_inv * [-λ_air * T_air + forcing_air]
         # where λ_air = total conductance away from air node
         # and forcing_air = conductance-weighted source temps + non-temp heat
-        lambda_air = UA * infiltration + R_int_inv + k_boundary
+        lambda_air = max(1e-10, UA * infiltration + R_int_inv + k_boundary)
         alpha = lambda_air * C_inv * dt_hours
         # Forcing: Q that doesn't depend on T_air
         # Q_env(T_air=0) = UA * infiltration * effective_outdoor
@@ -582,9 +657,9 @@ class ThermalEstimator:
         )
         # Add boundary zone source terms (conductance × source temp)
         if attic_temp is not None:
-            forcing_air += _K_ATTIC * attic_temp
+            forcing_air += k_attic * attic_temp
         if crawl_temp is not None:
-            forcing_air += _K_CRAWLSPACE * crawl_temp
+            forcing_air += k_crawl * crawl_temp
 
         if alpha > 1e-8:
             exp_neg_alpha = math.exp(-alpha)
@@ -636,7 +711,11 @@ class ThermalEstimator:
         wind_infiltration = 0.0
         if self._current_wind_speed is not None and self._current_wind_speed > 0:
             wind_infiltration = _WIND_INFILTRATION_COEFF * self._current_wind_speed
-        infiltration = 1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration
+        stack_effect = _STACK_EFFECT_COEFF * math.sqrt(abs(effective_outdoor - T_air))
+        infiltration = min(
+            _MAX_INFILTRATION_MULTIPLIER,
+            1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration + stack_effect,
+        )
 
         # UA = per-area R_inv × envelope area (total building conductance)
         UA = R_inv * self._envelope_area
@@ -654,17 +733,21 @@ class ThermalEstimator:
         else:
             Q_internal = DEFAULT_INTERNAL_GAIN_BTU
 
-        # Boundary zone heat transfer
+        # Boundary zone heat transfer (scaled by home size)
+        area_scale = self._envelope_area / 2000.0
+        k_attic = _K_ATTIC * area_scale
+        k_crawl = _K_CRAWLSPACE * area_scale
+
         Q_boundary = 0.0
         k_boundary = 0.0  # total boundary conductance affecting dT_air/dT_air
         attic_temp = self._current_attic_temp
         if attic_temp is not None:
-            Q_boundary += _K_ATTIC * (attic_temp - T_air)
-            k_boundary += _K_ATTIC
+            Q_boundary += k_attic * (attic_temp - T_air)
+            k_boundary += k_attic
         crawl_temp = self._current_crawlspace_temp
         if crawl_temp is not None:
-            Q_boundary += _K_CRAWLSPACE * (crawl_temp - T_air)
-            k_boundary += _K_CRAWLSPACE
+            Q_boundary += k_crawl * (crawl_temp - T_air)
+            k_boundary += k_crawl
 
         Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
         Q_aux_resistive = getattr(self, "_current_aux_resistive_btu", 0.0)
@@ -910,6 +993,11 @@ class ThermalEstimator:
         Uses per-parameter relative variance reduction so that envelope
         parameters (R, C) can drive confidence even when HVAC capacity
         parameters haven't been observed yet.
+
+        Returns the high-water mark of instantaneous confidence so that
+        the user-facing metric never decreases. Instantaneous drops occur
+        when unobserved parameters accumulate process noise (e.g. Q_cool
+        during heating season), but this doesn't reflect actual knowledge loss.
         """
         if self._n_obs < 10:
             return 0.0
@@ -924,8 +1012,12 @@ class ThermalEstimator:
 
         # Convert to per-parameter confidence and average
         param_confidences = 1.0 - np.minimum(ratios, 1.0)
-        confidence = float(np.mean(param_confidences))
-        return max(0.0, min(1.0, confidence))
+        instantaneous = float(np.mean(param_confidences))
+        instantaneous = max(0.0, min(1.0, instantaneous))
+
+        # Return monotonically non-decreasing high-water mark
+        self._confidence_hwm = max(self._confidence_hwm, instantaneous)
+        return self._confidence_hwm
 
     @property
     def parameter_uncertainty(self) -> dict[str, float]:
@@ -1012,6 +1104,7 @@ class ThermalEstimator:
             "last_update": self._last_update.isoformat() if self._last_update else None,
             "initial_covariance": self._P_initial.tolist(),
             "envelope_area": self._envelope_area,
+            "confidence_hwm": self._confidence_hwm,
         }
 
     @classmethod
@@ -1045,6 +1138,7 @@ class ThermalEstimator:
 
         # Restore envelope area (default 2000 for legacy data)
         est._envelope_area = data.get("envelope_area", 2000.0)
+        est._confidence_hwm = data.get("confidence_hwm", 0.0)
 
         # ── Migration: 8-state → 9-state (add solar_gain_btu) ────
         if len(est.x) == 8:

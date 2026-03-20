@@ -33,6 +33,8 @@ from ..const import (
     DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
     DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS,
     DEFAULT_EMA_ALPHA,
+    DEFAULT_HUMIDITY_SQUELCH_OFF,
+    DEFAULT_HUMIDITY_SQUELCH_ON,
     DEFAULT_SENSOR_STALE_MINUTES,
 )
 from ..engine.data_types import ForecastPoint
@@ -90,6 +92,8 @@ class SensorHub:
         # Thermostat satellite blend mitigation (optional)
         blend_mode: str = BLEND_MODE_NONE,
         blend_outlier_threshold_f: float = DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
+        # Humidity-gated sensor squelching (wet rooms)
+        humidity_squelch_pairs: list[dict] | None = None,
     ) -> None:
         self.hass = hass
 
@@ -147,6 +151,12 @@ class SensorHub:
         # Public diagnostic state (updated by read_indoor_temp each cycle)
         self.thermostat_blend_suspected: bool = False
         self.cross_sensor_spread_f: float = 0.0
+
+        # Humidity-gated sensor squelching (wet rooms)
+        self._humidity_squelch_pairs: list[dict] = humidity_squelch_pairs or []
+        self._squelch_active: dict[str, bool] = {}  # hysteresis state per pair
+        self._current_squelched: set[str] = set()    # cached per cycle
+        self.squelched_entities: list[str] = []       # public diagnostic
 
     # ── Core validation ─────────────────────────────────────────────
 
@@ -216,12 +226,56 @@ class SensorHub:
             return current
         return alpha * current + (1.0 - alpha) * previous
 
+    # ── Humidity-gated squelching ──────────────────────────────────
+
+    def _get_squelched_entities(self) -> set[str]:
+        """Check humidity squelch pairs and return entity IDs to exclude.
+
+        Uses hysteresis: activates at DEFAULT_HUMIDITY_SQUELCH_ON (65%),
+        deactivates at DEFAULT_HUMIDITY_SQUELCH_OFF (55%).
+        """
+        squelched: set[str] = set()
+        for pair in self._humidity_squelch_pairs:
+            hum_eid = pair.get("humidity_entity", "")
+            temp_eid = pair.get("temp_entity", "")
+            if not hum_eid or not temp_eid:
+                continue
+
+            humidity = self._read_entity(hum_eid, 0.0, 100.0, "Squelch humidity")
+            if humidity is None:
+                continue  # Can't read sensor — don't squelch
+
+            was_active = self._squelch_active.get(hum_eid, False)
+            if was_active:
+                now_active = humidity >= DEFAULT_HUMIDITY_SQUELCH_OFF
+            else:
+                now_active = humidity >= DEFAULT_HUMIDITY_SQUELCH_ON
+
+            if now_active != was_active:
+                _LOGGER.info(
+                    "Humidity squelch %s for %s (humidity=%.1f%% via %s)",
+                    "activated" if now_active else "deactivated",
+                    temp_eid,
+                    humidity,
+                    hum_eid,
+                )
+            self._squelch_active[hum_eid] = now_active
+
+            if now_active:
+                squelched.add(temp_eid)
+                squelched.add(hum_eid)
+
+        self._current_squelched = squelched
+        self.squelched_entities = sorted(squelched)
+        return squelched
+
     # ── Multi-sensor averaging ─────────────────────────────────────
 
     def _read_multi_temp(
         self,
         entity_ids: list[str],
         label: str,
+        exclude_entities: set[str] | None = None,
     ) -> SensorReading | None:
         """Read multiple temperature sensors, average valid ones, auto-convert to °F.
 
@@ -237,6 +291,8 @@ class SensorHub:
         stale_entities: list[str] = []
 
         for eid in entity_ids:
+            if exclude_entities and eid in exclude_entities:
+                continue
             value, unit = self._read_entity_with_unit(eid, -80.0, 200.0, label)
             if value is None:
                 continue
@@ -280,6 +336,7 @@ class SensorHub:
         self,
         entity_ids: list[str],
         label: str,
+        exclude_entities: set[str] | None = None,
     ) -> SensorReading | None:
         """Read multiple humidity sensors, average valid ones.
 
@@ -294,6 +351,8 @@ class SensorHub:
         stale_entities: list[str] = []
 
         for eid in entity_ids:
+            if exclude_entities and eid in exclude_entities:
+                continue
             value = self._read_entity(eid, 0.0, 100.0, label)
             if value is None:
                 continue
@@ -435,7 +494,9 @@ class SensorHub:
 
     # ── Indoor temperature ────────────────────────────────────────────
 
-    def _get_fresh_indoor_entity_values(self) -> list[float]:
+    def _get_fresh_indoor_entity_values(
+        self, exclude_entities: set[str] | None = None,
+    ) -> list[float]:
         """Return fresh °F readings from each configured indoor temp entity.
 
         Used by the median outlier filter to get individual values before
@@ -444,6 +505,8 @@ class SensorHub:
         """
         values: list[float] = []
         for eid in self._indoor_temp_entities:
+            if exclude_entities and eid in exclude_entities:
+                continue
             value, unit = self._read_entity_with_unit(eid, -80.0, 200.0, "Indoor temp")
             if value is None:
                 continue
@@ -513,9 +576,14 @@ class SensorHub:
         source = "thermostat"
         sensor_count = 1
 
+        # ── Humidity-gated squelching (wet rooms)
+        squelched = self._get_squelched_entities()
+
         # ── Median-filter mode (requires ≥3 sensors for reliable outlier rejection)
         if self._blend_mode == BLEND_MODE_MEDIAN and self._indoor_temp_entities:
-            entity_values = self._get_fresh_indoor_entity_values()
+            entity_values = self._get_fresh_indoor_entity_values(
+                exclude_entities=squelched,
+            )
             filtered_avg, excluded, filter_source = self._median_filter_indoor_temps(
                 entity_values, thermostat_temp, self._blend_outlier_threshold_f
             )
@@ -544,7 +612,10 @@ class SensorHub:
 
         # ── Standard mode (occupancy/schedule exclusion handled by caller via thermostat_temp=None)
         # 1. Additional room sensors
-        reading = self._read_multi_temp(self._indoor_temp_entities, "Indoor temp")
+        reading = self._read_multi_temp(
+            self._indoor_temp_entities, "Indoor temp",
+            exclude_entities=squelched,
+        )
         if reading and not reading.stale:
             # If thermostat also available, include it in the average
             if thermostat_temp is not None:
@@ -584,8 +655,10 @@ class SensorHub:
         thermostat_humidity: float | None = None,
     ) -> SensorReading | None:
         """Indoor humidity: entity average → thermostat."""
+        squelched = self._current_squelched or self._get_squelched_entities()
         reading = self._read_multi_humidity(
-            self._indoor_humidity_entities, "Indoor humidity"
+            self._indoor_humidity_entities, "Indoor humidity",
+            exclude_entities=squelched,
         )
         if reading and not reading.stale:
             return reading

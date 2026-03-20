@@ -74,7 +74,7 @@
       },
       "comfort": {
         "title": "Temperature Boundaries",
-        "description": "The optimizer saves energy by shifting when your HVAC runs. During cheap/efficient hours it pre-cools or pre-heats toward one end of your range; during expensive/inefficient hours it coasts toward the other end.\n\nA wider optimization range means more savings. Safety limits are absolute guardrails that are never exceeded.",
+        "description": "The optimizer saves energy by shifting when your HVAC runs.\n\nCOOLING: pre-cool toward the minimum during efficient hours, coast up toward the maximum during expensive hours.\nHEATING: pre-heat toward the maximum during efficient hours, coast down toward the minimum during expensive hours.\n\nA wider range means more savings. Safety limits are absolute guardrails that are never exceeded.",
         "data": {
           "safety_heat_min": "Safety minimum (heating guardrail)",
           "safety_cool_max": "Safety maximum (cooling guardrail)",
@@ -84,12 +84,12 @@
           "comfort_heat_max": "Warmest the optimizer will target (heating)"
         },
         "data_description": {
-          "safety_heat_min": "Your home will never be cooler than this, even when away or during demand response.",
-          "safety_cool_max": "Your home will never be warmer than this, even when away or during demand response.",
-          "comfort_cool_min": "During efficient hours, the optimizer pre-cools toward this temperature.",
-          "comfort_cool_max": "During inefficient hours, the optimizer lets your home coast up to this temperature.",
-          "comfort_heat_min": "During inefficient hours, the optimizer lets your home coast down to this temperature.",
-          "comfort_heat_max": "During efficient hours, the optimizer pre-heats toward this temperature."
+          "safety_heat_min": "Absolute floor. Your home will never be cooler than this, even when away or during demand response. Example: 45\u00b0F.",
+          "safety_cool_max": "Absolute ceiling. Your home will never be warmer than this, even when away or during demand response. Example: 90\u00b0F.",
+          "comfort_cool_min": "Pre-cool target during efficient hours (e.g. cool mornings). Example: 72\u00b0F.",
+          "comfort_cool_max": "How warm you'll accept during expensive/inefficient afternoon hours. Example: 78\u00b0F.",
+          "comfort_heat_min": "How cool you'll accept during expensive/inefficient hours. Example: 62\u00b0F.",
+          "comfort_heat_max": "Pre-heat target during efficient hours (e.g. mild afternoons). Example: 70\u00b0F."
         }
       }
     },
@@ -109,15 +109,21 @@
     "step": {
       "init": {
         "menu_options": {
-          "equipment": "Thermostat & weather source",
-          "outdoor_sensors": "Outdoor & building sensors",
-          "indoor_sensing": "Indoor sensing",
-          "blend_mitigation": "Thermostat sensor blending",
+          "comfort": "Temperature boundaries",
           "presence": "Presence & away",
           "energy": "Energy & cost tracking",
+          "equipment": "Thermostat & weather source",
+          "advanced": "Advanced settings"
+        }
+      },
+      "advanced": {
+        "menu_options": {
           "behavior": "Optimizer behavior",
-          "comfort": "Temperature boundaries",
           "schedule": "Calendar scheduling & pre-conditioning",
+          "indoor_sensing": "Indoor sensing",
+          "outdoor_sensors": "Outdoor & building sensors",
+          "blend_mitigation": "Thermostat sensor blending",
+          "humidity_squelch": "Wet room squelch",
           "appliances": "Auxiliary appliances"
         }
       },
@@ -175,7 +181,7 @@
           "solar_production_entity": "A sensor reporting current solar panel output in watts.",
           "grid_import_entity": "A sensor reporting current grid import in watts.",
           "solar_export_rate_entity": "A sensor reporting the current solar export rate in $/kWh.",
-          "tou_schedule": "Define time-of-use electricity rate periods as JSON. Format: [{\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35}]. Days: 0=Monday through 6=Sunday. Leave empty to use the rate entity or flat rate instead.",
+          "tou_schedule": "Time-of-use electricity rates let the optimizer shift HVAC runtime to cheaper hours.\n\nPaste a JSON array like this example (weekday afternoon peak at $0.35/kWh, everything else at $0.12/kWh):\n[{\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35}, {\"days\": [0,1,2,3,4,5,6], \"start_hour\": 0, \"end_hour\": 24, \"rate\": 0.12}]\n\nDays: 0=Monday through 6=Sunday. The optimizer checks rates from first to last and uses the first match, so put specific periods before general ones. Leave empty to use the rate entity or flat rate instead.",
           "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode — widening the comfort range to reduce HVAC load during grid stress events."
         }
       },
@@ -205,7 +211,7 @@
       },
       "comfort": {
         "title": "Temperature Boundaries",
-        "description": "Adjust safety limits and the optimization range. A wider optimization range means more savings opportunity.",
+        "description": "The optimizer saves energy by shifting when your HVAC runs.\n\nCOOLING: pre-cool toward the minimum during efficient hours, coast up toward the maximum during expensive hours.\nHEATING: pre-heat toward the maximum during efficient hours, coast down toward the minimum during expensive hours.\n\nA wider range means more savings. Safety limits are absolute guardrails that are never exceeded.",
         "data": {
           "safety_heat_min": "Safety minimum (heating guardrail)",
           "safety_cool_max": "Safety maximum (cooling guardrail)",
@@ -215,12 +221,12 @@
           "comfort_heat_max": "Warmest the optimizer will target (heating)"
         },
         "data_description": {
-          "safety_heat_min": "Your home will never be cooler than this, even when away or during demand response.",
-          "safety_cool_max": "Your home will never be warmer than this, even when away or during demand response.",
-          "comfort_cool_min": "During efficient hours, the optimizer pre-cools toward this temperature.",
-          "comfort_cool_max": "During inefficient hours, the optimizer lets your home coast up to this temperature.",
-          "comfort_heat_min": "During inefficient hours, the optimizer lets your home coast down to this temperature.",
-          "comfort_heat_max": "During efficient hours, the optimizer pre-heats toward this temperature."
+          "safety_heat_min": "Absolute floor. Your home will never be cooler than this, even when away or during demand response. Example: 45\u00b0F.",
+          "safety_cool_max": "Absolute ceiling. Your home will never be warmer than this, even when away or during demand response. Example: 90\u00b0F.",
+          "comfort_cool_min": "Pre-cool target during efficient hours (e.g. cool mornings). Example: 72\u00b0F.",
+          "comfort_cool_max": "How warm you'll accept during expensive/inefficient afternoon hours. Example: 78\u00b0F.",
+          "comfort_heat_min": "How cool you'll accept during expensive/inefficient hours. Example: 62\u00b0F.",
+          "comfort_heat_max": "Pre-heat target during efficient hours (e.g. mild afternoons). Example: 70\u00b0F."
         }
       },
       "presence": {
@@ -370,6 +376,18 @@
           "blend_schedule_end": "Time to stop suppressing the thermostat reading (e.g., 08:00). Only used in Time Schedule mode.",
           "blend_outlier_threshold_f": "How far a sensor can deviate from the median before being excluded. Lower values are stricter. Only used in Multi-Sensor Median mode."
         }
+      },
+      "humidity_squelch": {
+        "title": "Wet Room Squelch",
+        "description": "If a temperature sensor is in a bathroom or laundry room, pair it with a co-located humidity sensor. The temperature and humidity sensors will be excluded from indoor averages when humidity spikes (e.g., during showers). Activates at 65% RH, deactivates at 55% RH (hysteresis).",
+        "data": {
+          "squelch_temp_entity": "Temperature sensor to squelch",
+          "squelch_humidity_entity": "Co-located humidity sensor (trigger)"
+        },
+        "data_description": {
+          "squelch_temp_entity": "The indoor temperature sensor in the wet room (bathroom, laundry). It will be excluded from the indoor average when the paired humidity sensor indicates a moisture event.",
+          "squelch_humidity_entity": "The humidity sensor in the same room. When it exceeds 65% RH, the paired temperature sensor is squelched until humidity drops below 55% RH."
+        }
       }
     },
     "error": {
@@ -483,6 +501,71 @@
     "door_window_sensor_unavailable": {
       "title": "Door/window sensor unavailable",
       "description": "One or more configured door/window sensors are unavailable: {entities}. The optimizer cannot detect infiltration from these openings until connectivity is restored.\n\nCheck the sensor's battery or connectivity in **Settings \u2192 Devices & Services**."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_phase": { "name": "Current Phase", "description": "What the optimizer is doing right now: pre-cooling, coasting, maintaining, or idle." },
+      "target_setpoint": { "name": "Target Setpoint", "description": "The temperature the optimizer wants your thermostat set to right now." },
+      "next_action": { "name": "Next Action", "description": "A plain-English summary of the next scheduled temperature change and when it will happen." },
+      "predicted_indoor_temp": { "name": "Predicted Indoor Temp", "description": "Where the thermal model thinks your indoor temperature is heading based on weather, insulation, and HVAC state." },
+      "prediction_error": { "name": "Prediction Error", "description": "How far off the model's last prediction was from reality. Smaller is better." },
+      "model_accuracy": { "name": "Prediction Accuracy", "description": "Overall accuracy of the thermal model's temperature predictions. Lower values mean better predictions." },
+      "estimated_savings": { "name": "Estimated Savings", "description": "Percentage of HVAC runtime saved today compared to your old thermostat schedule." },
+      "model_confidence": { "name": "Model Confidence", "description": "How well the optimizer understands your home's thermal behavior. Grows over days and weeks as it observes more heating and cooling cycles." },
+      "envelope_r_value": { "name": "Insulation R-Value", "description": "How well your home resists heat flow through walls, roof, and windows. Higher values mean better insulation and less energy needed." },
+      "thermal_mass": { "name": "Building Heat Storage", "description": "How much heat your home's walls, floors, and furnishings can absorb. Higher values mean temperatures change slowly, which is good for coasting." },
+      "cooling_capacity": { "name": "Cooling Capacity", "description": "The maximum cooling output your HVAC system can deliver, estimated from observed performance." },
+      "heating_capacity": { "name": "Heating Capacity", "description": "The maximum heating output your HVAC system can deliver, estimated from observed performance." },
+      "thermal_mass_temperature": { "name": "Building Mass Temperature", "description": "The estimated temperature of your home's walls and floors. This hidden heat reservoir affects how quickly indoor air temperature changes." },
+      "schedule": { "name": "Optimization Schedule", "description": "The optimizer's current plan showing when it will pre-heat, pre-cool, or coast over the next 24 hours." },
+      "outdoor_temp_source": { "name": "Outdoor Temperature", "description": "The outdoor temperature the optimizer is using, sourced from your weather entity or outdoor sensors." },
+      "indoor_temp_source": { "name": "Indoor Temperature", "description": "The indoor temperature reading the optimizer is using, which may be averaged from multiple sensors." },
+      "net_hvac_power": { "name": "HVAC Power Draw", "description": "Current electrical power consumption of your HVAC system in watts." },
+      "savings_kwh_today": { "name": "Energy Saved Today", "description": "Kilowatt-hours of electricity saved today compared to what your old thermostat schedule would have used." },
+      "savings_kwh_cumulative": { "name": "Energy Saved Total", "description": "Total kilowatt-hours saved since the optimizer was installed." },
+      "savings_cost_today": { "name": "Cost Saved Today", "description": "Money saved on your electricity bill today by running HVAC more efficiently." },
+      "savings_cost_cumulative": { "name": "Cost Saved Total", "description": "Total money saved since the optimizer was installed." },
+      "savings_co2_today": { "name": "CO2 Avoided Today", "description": "Grams of carbon dioxide emissions avoided today by using less electricity or shifting to cleaner grid hours." },
+      "savings_co2_cumulative": { "name": "CO2 Avoided Total", "description": "Total carbon dioxide emissions avoided since the optimizer was installed." },
+      "baseline_kwh_today": { "name": "Baseline Energy Today", "description": "How much energy your old thermostat schedule would have used today without the optimizer." },
+      "worst_case_kwh_today": { "name": "Worst Case Energy Today", "description": "Maximum possible energy usage if HVAC ran continuously all day. Used as an upper bound for savings calculations." },
+      "occupancy_forecast": { "name": "Occupancy Forecast", "description": "The optimizer's prediction of when people will be home or away, based on presence sensors and calendar events." },
+      "preconditioning_status": { "name": "Pre-conditioning Status", "description": "Whether the optimizer is warming or cooling your home in advance of someone's arrival." },
+      "apparent_temperature": { "name": "Feels-Like Temperature", "description": "Indoor temperature adjusted for humidity. High humidity makes warm air feel hotter; low humidity makes cool air feel colder." },
+      "occupied_rooms": { "name": "Occupied Rooms", "description": "Which rooms currently have detected occupancy. Used to weight temperature readings toward rooms people are actually in." },
+      "weighted_indoor_temp": { "name": "Weighted Indoor Temp", "description": "Indoor temperature averaged across rooms, with occupied rooms weighted more heavily than empty ones." },
+      "runtime_savings_today": { "name": "Runtime Savings Today", "description": "Energy saved today by running the HVAC system fewer total minutes than your old schedule would have." },
+      "cop_savings_today": { "name": "Efficiency Savings Today", "description": "Energy saved today by running the HVAC during hours when the compressor operates more efficiently (milder outdoor temperatures)." },
+      "rate_savings_today": { "name": "Rate Shift Savings Today", "description": "Money saved today by shifting HVAC runtime to hours with cheaper electricity rates." },
+      "carbon_shift_savings_today": { "name": "Carbon Shift Savings Today", "description": "CO2 avoided today by shifting HVAC runtime to hours when the electrical grid was producing less carbon." },
+      "baseline_avg_cop": { "name": "Baseline Efficiency (COP)", "description": "The average efficiency your HVAC would have achieved today under your old schedule. COP = units of heating/cooling per unit of electricity." },
+      "optimized_avg_cop": { "name": "Optimized Efficiency (COP)", "description": "The average efficiency your HVAC actually achieved today with optimization. Higher is better." },
+      "cop_improvement_pct": { "name": "Efficiency Improvement", "description": "Percentage improvement in HVAC efficiency compared to your old thermostat schedule." },
+      "comfort_hours_gained": { "name": "Comfort Hours Gained", "description": "Additional hours your home stayed within the comfort range today compared to what your old schedule would have achieved." },
+      "baseline_comfort_violations": { "name": "Baseline Comfort Violations", "description": "Number of times your old thermostat schedule would have let the temperature drift outside the comfort range today." },
+      "baseline_avg_indoor_temp": { "name": "Baseline Avg Indoor Temp", "description": "The average indoor temperature your old schedule would have maintained today." },
+      "baseline_confidence": { "name": "Baseline Confidence", "description": "How well the optimizer has captured your old thermostat routine. Needs 7 days of observation to complete." },
+      "savings_accuracy_tier": { "name": "Savings Accuracy", "description": "How reliable the savings numbers are: Learning (no data yet), Estimated, Simulated (digital twin active), or Calibrated (fully confident)." },
+      "profiler_status": { "name": "Performance Profiler", "description": "Status of the performance profiler that measures your HVAC's actual heating/cooling rates at different outdoor temperatures." },
+      "learning_progress": { "name": "Learning Progress", "description": "Detailed status of the thermal model's learning process, including which parameters are still converging." },
+      "appliance_thermal_load": { "name": "Appliance Thermal Load", "description": "Net heating or cooling effect of tracked appliances (water heater, dryer, etc.) on your indoor temperature right now." },
+      "active_appliances": { "name": "Active Appliances", "description": "Which tracked appliances are currently running and affecting indoor temperature." },
+      "aux_heat_threshold": { "name": "Aux Heat Threshold", "description": "The outdoor temperature below which your system tends to activate auxiliary/emergency heat. Learned automatically from observed events." },
+      "aux_heat_kwh_today": { "name": "Aux Heat Energy Today", "description": "Energy consumed by auxiliary/emergency resistive heat strips today. This is expensive backup heat the optimizer tries to avoid." },
+      "avoided_aux_heat_kwh_today": { "name": "Avoided Aux Heat Today", "description": "Energy that would have been consumed by auxiliary heat strips if not for the optimizer pre-heating your home earlier." },
+      "cross_sensor_spread": { "name": "Thermostat Sensor Spread", "description": "The temperature difference between your thermostat's built-in sensor and your independent sensors. Large spreads may indicate satellite sensor blending." }
+    },
+    "binary_sensor": {
+      "optimizer_active": { "name": "Optimizer Active", "description": "Whether the optimizer is actively controlling your thermostat right now." },
+      "override_detected": { "name": "Override Detected", "description": "Someone manually changed the thermostat. The optimizer will pause for the grace period before resuming." },
+      "sensor_stale": { "name": "Sensor Stale", "description": "The thermostat's temperature reading hasn't changed in over 24 hours, which may indicate a sensor problem." },
+      "aux_heat_active": { "name": "Aux Heat Active", "description": "Auxiliary/emergency resistive heat is currently running. This is expensive backup heat that activates in very cold conditions." },
+      "learning_active": { "name": "Learning Active", "description": "The thermal model is still learning your home's characteristics. Optimization improves as confidence grows." },
+      "thermostat_blend_suspected": { "name": "Thermostat Blend Suspected", "description": "The thermostat may be invisibly blending its temperature reading with a satellite sensor, which can confuse the thermal model." }
+    },
+    "switch": {
+      "enabled": { "name": "Optimizer Enabled", "description": "Master switch to enable or disable the optimizer. When off, the thermostat holds its current setpoint." }
     }
   }
 }

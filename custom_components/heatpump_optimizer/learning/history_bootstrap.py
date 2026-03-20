@@ -266,9 +266,19 @@ def _build_aligned_timeline(
         if hvac_action:
             action_timeline.append((ts, str(hvac_action)))
 
-        # Setpoint
+        # Setpoint (single or dual-setpoint mode)
         setpoint = attrs.get("temperature")
-        if setpoint is not None:
+        if setpoint is None or setpoint == "":
+            # Dual-setpoint: derive from high/low based on hvac_action
+            high = attrs.get("target_temp_high")
+            low = attrs.get("target_temp_low")
+            if hvac_action == "heating" and low is not None:
+                setpoint = low
+            elif hvac_action == "cooling" and high is not None:
+                setpoint = high
+            elif low is not None:
+                setpoint = low  # default to heating bound when idle
+        if setpoint is not None and setpoint != "":
             try:
                 sp_f = _to_fahrenheit(float(setpoint), attrs)
                 setpoint_timeline.append((ts, sp_f))
@@ -402,9 +412,14 @@ def _batch_feed_estimator(
         if last_valid_time is not None:
             dt_seconds = (point.timestamp - last_valid_time).total_seconds()
             dt_hours = dt_seconds / 3600.0
-            # Cap dt to prevent numerical instability
+            # Skip data points with large gaps (e.g. HA restart, DB maintenance).
+            # Previously this reset dt to DT_HOURS (5 min), which compressed
+            # multi-hour gaps into a single step — the EKF would see an
+            # impossibly fast temperature change and learn wrong parameters.
             if dt_hours > MAX_DT_HOURS:
-                dt_hours = DT_HOURS
+                skipped_count += 1
+                last_valid_time = point.timestamp
+                continue
         else:
             dt_hours = DT_HOURS
 
