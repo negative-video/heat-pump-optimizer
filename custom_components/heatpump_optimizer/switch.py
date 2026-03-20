@@ -9,7 +9,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, VERSION
+from .const import CONF_MONITOR_ONLY, DOMAIN, VERSION
 from .coordinator import HeatPumpOptimizerCoordinator
 
 
@@ -19,6 +19,9 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up switch entities from a config entry."""
+    monitor_only = entry.options.get(CONF_MONITOR_ONLY, entry.data.get(CONF_MONITOR_ONLY, False))
+    if monitor_only:
+        return  # No enable/disable switch in monitor-only mode
     coordinator: HeatPumpOptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
     async_add_entities([OptimizerEnabledSwitch(coordinator, entry)])
 

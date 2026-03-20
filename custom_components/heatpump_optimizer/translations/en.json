@@ -6,7 +6,11 @@
         "description": "Select your thermostat and one or more weather sources. The first weather entity is primary; additional ones serve as fallbacks if the primary is unavailable.",
         "data": {
           "climate_entity": "Climate entity (thermostat)",
-          "weather_entities": "Weather entities (first = primary, rest = fallback)"
+          "weather_entities": "Weather entities (first = primary, rest = fallback)",
+          "monitor_only": "Monitor only (no thermostat control)"
+        },
+        "data_description": {
+          "monitor_only": "Run the full optimization pipeline without writing setpoints. Safe to point at a thermostat already controlled by another instance."
         }
       },
       "thermal_profile": {
@@ -109,12 +113,23 @@
     "step": {
       "init": {
         "menu_options": {
+          "mode": "Operating mode",
           "comfort": "Temperature boundaries",
           "sleep_schedule": "Sleep schedule",
           "presence": "Presence & away",
           "energy": "Energy & cost tracking",
           "equipment": "Thermostat & weather source",
           "advanced": "Advanced settings"
+        }
+      },
+      "mode": {
+        "title": "Operating Mode",
+        "description": "Toggle between active control and monitor-only observation.",
+        "data": {
+          "monitor_only": "Monitor only (no thermostat control)"
+        },
+        "data_description": {
+          "monitor_only": "When enabled, the optimizer runs the full pipeline (forecasting, scheduling, EKF learning) but never writes setpoints. Useful for running a second instance side-by-side for model comparison."
         }
       },
       "advanced": {

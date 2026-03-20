@@ -1,10 +1,11 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.20"
+VERSION = "0.1.21"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
+CONF_MONITOR_ONLY = "monitor_only"
 CONF_CLIMATE_ENTITY = "climate_entity"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_PROFILE_PATH = "profile_path"

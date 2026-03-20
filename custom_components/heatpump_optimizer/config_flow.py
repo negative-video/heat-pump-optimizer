@@ -77,6 +77,7 @@ from .const import (
     CONF_INITIALIZATION_MODE,
     CONF_MAX_SETPOINT_CHANGE_PER_HOUR,
     CONF_MODEL_IMPORT_DATA,
+    CONF_MONITOR_ONLY,
     CONF_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_OCCUPANCY_ENTITIES,
     CONF_OCCUPIED_WEIGHT_MULTIPLIER,
@@ -390,6 +391,8 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                     domain="weather", multiple=True
                 ),
             )
+
+        schema[vol.Optional(CONF_MONITOR_ONLY, default=False)] = selector.BooleanSelector()
 
         return self.async_show_form(
             step_id="user",
@@ -736,8 +739,9 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors = _validate_comfort_ranges(user_input)
             if not errors:
                 self._config_data.update(user_input)
+                title = "Heat Pump Optimizer (Monitor)" if self._config_data.get(CONF_MONITOR_ONLY) else "Heat Pump Optimizer"
                 return self.async_create_entry(
-                    title="Heat Pump Optimizer",
+                    title=title,
                     data=self._config_data,
                 )
 
@@ -803,7 +807,26 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["comfort", "sleep_schedule", "presence", "energy", "equipment", "advanced"],
+            menu_options=["mode", "comfort", "sleep_schedule", "presence", "energy", "equipment", "advanced"],
+        )
+
+    async def async_step_mode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Toggle monitor-only mode."""
+        if user_input is not None:
+            self._options[CONF_MONITOR_ONLY] = user_input.get(CONF_MONITOR_ONLY, False)
+            return self.async_create_entry(data=self._options)
+
+        current = self._options.get(
+            CONF_MONITOR_ONLY,
+            self.config_entry.data.get(CONF_MONITOR_ONLY, False),
+        )
+        return self.async_show_form(
+            step_id="mode",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_MONITOR_ONLY, default=current): selector.BooleanSelector(),
+            }),
         )
 
     async def async_step_advanced(

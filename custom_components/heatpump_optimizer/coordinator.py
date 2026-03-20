@@ -196,6 +196,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         behavior: dict[str, Any] | None = None,
         profile_json: str | None = None,
         sleep_config: dict | None = None,
+        monitor_only: bool = False,
     ):
         super().__init__(
             hass,
@@ -205,6 +206,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         )
 
         # Configuration
+        self._monitor_only = monitor_only
         self.climate_entity_id = climate_entity_id
         self.weather_entity_id = weather_entity_id
         self._weather_entity_ids = weather_entity_ids or [weather_entity_id]
@@ -612,7 +614,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Write safe midpoint so thermostat doesn't hold an extreme temp
         thermo_state = self.thermostat.read_state()
-        if thermo_state.available and self._baseline_ready_for_control:
+        if thermo_state.available and self._baseline_ready_for_control and not self._monitor_only:
             comfort = self._active_comfort_range()
             await self.thermostat.async_write_safe_default(*comfort)
 
@@ -854,15 +856,15 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # ── Watchdog checks ─────────────────────────────────────────
 
-        # Override detection
-        if self.watchdog.is_override_active:
+        # Override detection (skip in monitor mode — we never write setpoints)
+        if not self._monitor_only and self.watchdog.is_override_active:
             if self.watchdog.check_grace_period():
                 # Grace expired — resume
                 await self._run_strategic_optimization()
             else:
                 self._phase = PHASE_PAUSED
                 return self._build_data(thermo_state)
-        elif not self._paused:
+        elif not self._monitor_only and not self._paused:
             override = self.watchdog.check_override(
                 self.thermostat.last_written_setpoint,
                 thermo_state.effective_setpoint,
@@ -913,7 +915,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="forecast_unavailable",
             )
-            if self._baseline_ready_for_control:
+            if self._baseline_ready_for_control and not self._monitor_only:
                 comfort = self._active_comfort_range()
                 await self.thermostat.async_write_safe_default(*comfort)
             # Don't return — let EKF, baseline, and savings continue below
@@ -955,14 +957,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 comfort = self._active_comfort_range()
                 current_sp = thermo_state.effective_setpoint
                 target = self._apply_rate_limit(target, current_sp)
-                if current_sp is None or abs(current_sp - target) > 0.5:
+                if not self._monitor_only and (current_sp is None or abs(current_sp - target) > 0.5):
                     if self._check_dwell_time(now):
                         await self.thermostat.async_set_temperature(target, *comfort)
                         self._last_written_setpoint_time = now
             else:
                 # Write scheduled setpoint if different from current
                 current_sp = thermo_state.effective_setpoint
-                if current_sp is not None:
+                if not self._monitor_only and current_sp is not None:
                     target = self._apply_rate_limit(current_entry.target_temp, current_sp)
                     diff = abs(current_sp - target)
                     if diff > 0.5:
@@ -1759,12 +1761,18 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     def pause(self) -> None:
         """Pause optimization (service call)."""
+        if self._monitor_only:
+            _LOGGER.warning("Pause ignored — instance is in monitor-only mode")
+            return
         self._paused = True
         self._phase = PHASE_PAUSED
         _LOGGER.info("Optimization paused by service call")
 
     async def async_resume(self) -> None:
         """Resume optimization (service call)."""
+        if self._monitor_only:
+            _LOGGER.warning("Resume ignored — instance is in monitor-only mode")
+            return
         self._paused = False
         self.watchdog.clear_override()
         _LOGGER.info("Optimization resumed by service call")
@@ -1781,6 +1789,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         DEFAULT_DEMAND_RESPONSE_DELTA_F to reduce HVAC load.
         Auto-restores after duration_minutes.
         """
+        if self._monitor_only:
+            _LOGGER.warning("Demand response ignored — instance is in monitor-only mode")
+            return
         if mode == "restore":
             self._demand_response_active = False
             self._demand_response_end = None
@@ -2830,6 +2841,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Core state
             "phase": self._phase,
             "active": self._active and not self._paused,
+            "monitor_only": self._monitor_only,
             "override_detected": self.watchdog.is_override_active,
             "baseline_only_mode": not self._baseline_ready_for_control,
             "baseline_ready": self.baseline_capture.is_ready,

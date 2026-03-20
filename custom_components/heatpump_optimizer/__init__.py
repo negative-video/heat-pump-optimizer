@@ -29,6 +29,7 @@ from .const import (
     CONF_INITIALIZATION_MODE,
     CONF_MAX_SETPOINT_CHANGE_PER_HOUR,
     CONF_MODEL_IMPORT_DATA,
+    CONF_MONITOR_ONLY,
     CONF_OCCUPANCY_ENTITIES,
     CONF_OCCUPANCY_ENTITY,
     CONF_OPTIMIZATION_AGGRESSIVENESS,
@@ -188,6 +189,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except (FileNotFoundError, OSError) as err:
             _LOGGER.error("Cannot read Beestat profile '%s': %s", profile_path, err)
 
+    # Monitor-only mode: run full pipeline without writing setpoints
+    monitor_only = opts.get(CONF_MONITOR_ONLY, entry.data.get(CONF_MONITOR_ONLY, False))
+
     # Create coordinator
     coordinator = HeatPumpOptimizerCoordinator(
         hass,
@@ -205,6 +209,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         model_import_data=model_import_data,
         behavior=behavior,
         sleep_config=sleep_config,
+        monitor_only=monitor_only,
     )
 
     # Initialize (loads persisted state, starts watchdog, runs first optimization)
