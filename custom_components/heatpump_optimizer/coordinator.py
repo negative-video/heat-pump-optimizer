@@ -2379,6 +2379,25 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._last_model_alert = alert
         return alert
 
+    def _compute_net_passive_load(self) -> float | None:
+        """Net passive thermal load on the house (BTU/hr).
+
+        Sum of all non-HVAC, non-coupling heat flows: envelope, solar,
+        internal gains, boundary zones, appliances, and aux resistive heat.
+        Positive = house gaining heat, negative = losing heat.
+        """
+        comps = self.estimator.thermal_load_components
+        if not comps:
+            return None
+        return (
+            comps.get("q_env", 0.0)
+            + comps.get("q_solar", 0.0)
+            + comps.get("q_internal", 0.0)
+            + comps.get("q_boundary", 0.0)
+            + comps.get("q_appliances", 0.0)
+            + comps.get("q_aux_resistive", 0.0)
+        )
+
     # ── Event firing ──────────────────────────────────────────────
 
     @callback
@@ -2905,6 +2924,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "initialization_mode": self._initialization_mode,
             "history_bootstrap_completed": self._history_bootstrap_completed,
             "history_bootstrap_result": self._history_bootstrap_result,
+
+            # Thermal load breakdown (BTU/hr components from EKF)
+            "thermal_load_components": self.estimator.thermal_load_components,
+            "house_thermal_load_btu": self._compute_net_passive_load(),
 
             # Overrides
             "override_count_30d": override_stats.get("total_overrides_30d", 0),

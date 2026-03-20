@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.18"
+VERSION = "0.1.19"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys

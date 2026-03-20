@@ -15,7 +15,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from datetime import datetime, timezone
 
-from .const import DOMAIN, VERSION
+from .const import DEFAULT_MODEL_CONFIDENCE_THRESHOLD, DOMAIN, VERSION
 from .coordinator import HeatPumpOptimizerCoordinator
 
 
@@ -89,6 +89,12 @@ async def async_setup_entry(
         AvoidedAuxHeatKwhSensor(coordinator, entry),
         # Thermostat blend mitigation diagnostics
         CrossSensorSpreadSensor(coordinator, entry),
+        # House thermal load breakdown
+        HouseThermalLoadSensor(coordinator, entry),
+        WeatherHeatTransferSensor(coordinator, entry),
+        SolarHeatGainSensor(coordinator, entry),
+        OccupancyHeatGainSensor(coordinator, entry),
+        BoundaryZoneHeatTransferSensor(coordinator, entry),
     ]
     async_add_entities(entities)
 
@@ -1499,4 +1505,249 @@ class CrossSensorSpreadSensor(OptimizerBaseSensor):
         return {
             "blend_mode": self.coordinator.data.get("thermostat_blend_mode"),
             "blend_active": self.coordinator.data.get("thermostat_blend_suspected", False),
+        }
+
+
+# ── House thermal load breakdown sensors ─────────────────────────────
+
+
+class _ThermalLoadMixin:
+    """Shared helpers for thermal load component sensors."""
+
+    def _get_components(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return self.coordinator.data.get("thermal_load_components") or {}
+
+    def _confidence_attrs(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        confidence = self.coordinator.data.get("kalman_confidence", 0.0)
+        return {
+            "model_confidence": round(confidence, 2),
+            "reliable": confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD,
+        }
+
+
+class HouseThermalLoadSensor(_ThermalLoadMixin, OptimizerBaseSensor):
+    """Net passive thermal load on the house.
+
+    Sums all non-HVAC heat flows: weather, solar, occupancy, boundary zones,
+    and appliances. Positive means the house is gaining heat; negative means
+    it is losing heat. This is the load that the HVAC system must counteract.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "house_thermal_load", "House Thermal Load"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:home-thermometer"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("house_thermal_load_btu")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        comps = self._get_components()
+        if not comps:
+            return {}
+        load = self.coordinator.data.get("house_thermal_load_btu")
+        if load is not None and load > 50:
+            direction = "gaining heat"
+        elif load is not None and load < -50:
+            direction = "losing heat"
+        else:
+            direction = "balanced"
+        return {
+            "direction": direction,
+            "weather_heat_transfer": round(comps.get("q_env", 0.0), 0),
+            "solar_heat_gain": round(comps.get("q_solar", 0.0), 0),
+            "occupancy_heat_gain": round(comps.get("q_internal", 0.0), 0),
+            "boundary_zone_heat_transfer": round(comps.get("q_boundary", 0.0), 0),
+            "appliance_load": round(comps.get("q_appliances", 0.0), 0),
+            "aux_resistive_heat": round(comps.get("q_aux_resistive", 0.0), 0),
+            "hvac_output": round(comps.get("q_hvac", 0.0), 0),
+            "stored_heat_exchange": round(comps.get("q_int", 0.0), 0),
+            **self._confidence_attrs(),
+        }
+
+
+class WeatherHeatTransferSensor(_ThermalLoadMixin, OptimizerBaseSensor):
+    """Heat flowing through walls, windows, and doors due to outdoor conditions.
+
+    Combines the building envelope conductance with infiltration effects from
+    wind, open doors/windows, and stack effect. Positive when outdoor heat is
+    entering the house; negative when heat is escaping.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "weather_heat_transfer", "Weather Heat Transfer"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:weather-windy"
+
+    @property
+    def native_value(self) -> float | None:
+        comps = self._get_components()
+        if not comps:
+            return None
+        return comps.get("q_env")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        comps = self._get_components()
+        if not comps:
+            return {}
+        return {
+            "outdoor_temp": comps.get("effective_outdoor_temp"),
+            "indoor_temp": comps.get("indoor_temp"),
+            "wind_speed_mph": comps.get("wind_speed_mph"),
+            "infiltration_factor": (
+                round(comps["infiltration_factor"], 2)
+                if comps.get("infiltration_factor") is not None else None
+            ),
+            "doors_windows_open": comps.get("doors_windows_open", 0),
+            **self._confidence_attrs(),
+        }
+
+
+class SolarHeatGainSensor(_ThermalLoadMixin, OptimizerBaseSensor):
+    """Heat entering the house from sunlight.
+
+    Uses a learned peak solar gain value scaled by current cloud cover and
+    sun elevation. Higher when skies are clear and the sun is high.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "solar_heat_gain", "Solar Heat Gain"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:white-balance-sunny"
+
+    @property
+    def native_value(self) -> float | None:
+        comps = self._get_components()
+        if not comps:
+            return None
+        return comps.get("q_solar")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        comps = self._get_components()
+        if not comps:
+            return {}
+        cloud = comps.get("cloud_cover")
+        return {
+            "cloud_cover_pct": round(cloud * 100, 0) if cloud is not None else None,
+            "sun_elevation": (
+                round(comps["sun_elevation"], 1)
+                if comps.get("sun_elevation") is not None else None
+            ),
+            "learned_peak_solar_gain": (
+                round(comps["learned_peak_solar_gain"], 0)
+                if comps.get("learned_peak_solar_gain") is not None else None
+            ),
+            **self._confidence_attrs(),
+        }
+
+
+class OccupancyHeatGainSensor(_ThermalLoadMixin, OptimizerBaseSensor):
+    """Heat produced by people, electronics, and lighting inside the house.
+
+    Includes a baseline for always-on electronics/lighting plus additional
+    heat per detected occupant. This value is always positive.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "occupancy_heat_gain", "Occupancy Heat Gain"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:account-group"
+
+    @property
+    def native_value(self) -> float | None:
+        comps = self._get_components()
+        if not comps:
+            return None
+        return comps.get("q_internal")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        comps = self._get_components()
+        if not comps:
+            return {}
+        return {
+            "people_count": comps.get("people_count"),
+            "base_electronics_gain_btu": 800,
+            **self._confidence_attrs(),
+        }
+
+
+class BoundaryZoneHeatTransferSensor(_ThermalLoadMixin, OptimizerBaseSensor):
+    """Heat flowing from the attic and crawlspace into the living space.
+
+    Only meaningful when attic or crawlspace temperature sensors are
+    configured. A hot attic pushes heat down; a cold crawlspace pulls
+    heat through the floor.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "boundary_zone_heat_transfer",
+            "Boundary Zone Heat Transfer",
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:home-roof"
+
+    @property
+    def native_value(self) -> float | None:
+        comps = self._get_components()
+        if not comps:
+            return None
+        return comps.get("q_boundary")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        comps = self._get_components()
+        if not comps:
+            return {}
+        return {
+            "attic_temp": comps.get("attic_temp"),
+            "crawlspace_temp": comps.get("crawlspace_temp"),
+            "attic_contribution_btu": (
+                round(comps["attic_contribution_btu"], 0)
+                if comps.get("attic_contribution_btu") is not None else None
+            ),
+            "crawlspace_contribution_btu": (
+                round(comps["crawlspace_contribution_btu"], 0)
+                if comps.get("crawlspace_contribution_btu") is not None else None
+            ),
+            **self._confidence_attrs(),
         }

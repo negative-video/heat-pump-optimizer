@@ -6,7 +6,7 @@
 
 A Home Assistant integration that learns the thermal behavior of your home and uses weather forecasts to schedule your heat pump more efficiently. It shifts *when* your HVAC runs — pre-heating or pre-cooling during favorable conditions and coasting through unfavorable ones — while staying within a comfort range you define.
 
-Works with any thermostat Home Assistant can control (Ecobee, Nest, Z-Wave, generic climate entities).
+Works with any thermostat Home Assistant can control (Ecobee, Nest, Z-Wave, generic climate entities), including dual-setpoint thermostats that accept separate heat and cool targets.
 
 ## Background
 
@@ -29,11 +29,13 @@ The integration builds a physics-based thermal model of your home (insulation, t
 - **Savings tracking** — A counterfactual simulation of what your thermostat would have done without optimization, decomposed into runtime, COP, rate, and carbon components.
 - **Occupancy-aware** — Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
 - **Room-aware sensing** — Weights indoor temperature by room occupancy instead of averaging all sensors equally.
+- **House thermal load breakdown** — Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
 - **Auxiliary appliances** — Model thermal impacts of other equipment (heat pump water heaters, dryers, ovens) so the Kalman filter doesn't confuse their effects with building parameter changes.
 - **Aux/emergency heat awareness** — Automatically learns your heat pump's baseline power draw and derives the resistive strip's BTU contribution so the EKF treats it as a known input rather than a surprise heating event.
+- **Sleep schedule** — Configure tighter nighttime comfort bounds with separate heating and cooling targets, active during a customizable sleep window.
 - **Demand response** — Temporarily widen comfort bounds via service call or automation.
 - **Tier-aware dashboard** — Custom sidebar panel adapts its layout to your current learning stage: live observation cards and a retrospective chart during learning mode; savings, forecast, and thermal profile views once calibrated.
-- **Diagnostic sensors** — 45+ entities exposing model state, predictions, savings breakdowns, and confidence levels.
+- **Diagnostic sensors** — 50+ entities exposing model state, thermal load breakdown, predictions, savings breakdowns, and confidence levels.
 
 ## Getting Started
 
@@ -72,8 +74,8 @@ After setup, open **Configure** on the integration card for advanced options: se
 
 | Timeline | What's happening | Dashboard shows |
 |----------|-----------------|-----------------|
-| **Day 1** | Conservative setpoint shifts begin. Model starts collecting observations. | Learning mode layout: retrospective 48h chart, three learning-progress cards (thermal model, baseline schedule, profiler), milestone checklist, today's snapshot |
-| **Week 1** | Baseline capture completes (7 day minimum). Model is learning basic thermal characteristics. | Same as Day 1 until baseline completes; milestone "Baseline schedule" marks as done |
+| **Day 1** | Passive observation only — the optimizer watches your thermostat without changing it. Model starts collecting observations. | Learning mode layout: retrospective 48h chart, three learning-progress cards (thermal model, baseline schedule, profiler), milestone checklist, today's snapshot |
+| **Week 1** | Baseline capture completes (7 day minimum). No setpoint writes until this finishes. | Same as Day 1 until baseline completes; milestone "Baseline schedule" marks as done |
 | **Week 2–3** | With a reasonable temperature range, the model starts producing useful estimates. | Estimated-tier layout: conservative savings with uncertainty band, rough indoor forecast (dashed), baseline schedule grid |
 | **Month 1–2+** | Confidence grows as it observes different weather patterns. Full calibration depends on temperature variety. | Calibrated-tier layout: full savings panel, 24h forecast chart, thermal profile card with plain-English narrative and per-parameter position bars |
 
@@ -230,6 +232,19 @@ When multiple indoor temperature sensors are configured with area assignments:
 | **Occupied only** | Only rooms with detected motion contribute |
 | **Weighted** | Occupied rooms get higher weight (default 3×), unoccupied rooms still contribute |
 
+### Sleep Schedule
+
+If you prefer different temperatures at night, enable the sleep schedule in **Configure → Sleep Schedule**. During the configured sleep window, the optimizer uses tighter comfort bounds instead of the standard daytime range.
+
+| Setting | Default |
+|---------|---------|
+| **Sleep start** | 10:00 PM |
+| **Sleep end** | 7:00 AM |
+| **Cooling range** | 70–76°F |
+| **Heating range** | 60–66°F |
+
+Sleep bounds only apply when someone is home. If the house is unoccupied during sleeping hours, the normal away-mode comfort range is used instead.
+
 ### Wet Room Squelch
 
 Bathrooms and laundry rooms cause large temperature spikes during showers or dryer use (typically +5–6°F lasting 3–4 hours). These spikes corrupt the thermal model if included in the indoor average.
@@ -292,6 +307,18 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 |--------|-------------|------|
 | Appliance Thermal Load | Net thermal impact of all active appliances | BTU/hr |
 | Active Appliances | Count and names of currently active appliances | — |
+
+#### House Thermal Load
+
+| Entity | Description | Unit |
+|--------|-------------|------|
+| House Thermal Load | Net passive thermal load on the house (positive = gaining heat, negative = losing heat) | BTU/hr |
+| Weather Heat Transfer | Heat flowing through walls, windows, and doors due to outdoor conditions and infiltration | BTU/hr |
+| Solar Heat Gain | Heat entering from sunlight, scaled by cloud cover and sun elevation | BTU/hr |
+| Occupancy Heat Gain | Heat from people, electronics, and lighting inside the house | BTU/hr |
+| Boundary Zone Heat Transfer | Heat from attic and crawlspace into the living space | BTU/hr |
+
+Each sensor includes a `model_confidence` attribute and a `reliable` flag (false when the thermal model is still learning). The House Thermal Load sensor includes a full component breakdown and a `direction` attribute ("gaining heat", "losing heat", or "balanced").
 
 #### Aux/Emergency Heat
 
@@ -649,7 +676,7 @@ Coordinator (5-min update cycle)
     |-- CounterfactualSimulator (digital twin)
     |-- SavingsTracker (energy/cost/CO2 accounting; uses learned HP baseline for aux kWh)
     |
-Sensor Entities (45+)
+Sensor Entities (50+)
 ```
 
 </details>

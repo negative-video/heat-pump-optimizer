@@ -174,6 +174,9 @@ class ThermalEstimator:
     _current_crawlspace_temp: float | None = None
     _current_precipitation: bool = False
 
+    # Last computed thermal load components (BTU/hr), populated by _predict_state
+    _last_thermal_loads: dict = field(default_factory=dict)
+
     def __post_init__(self):
         if not self._initialized:
             self._setup_default_noise()
@@ -677,6 +680,37 @@ class ThermalEstimator:
         else:
             T_mass_new = T_mass + C_mass_inv * R_int_inv * (T_air - T_mass) * dt_hours
 
+        # ── Cache thermal load components for sensor exposure ───────
+        # Attic/crawlspace individual contributions for attribute breakdown
+        attic_contribution = k_attic * (attic_temp - T_air) if attic_temp is not None else 0.0
+        crawl_contribution = k_crawl * (crawl_temp - T_air) if crawl_temp is not None else 0.0
+        self._last_thermal_loads = {
+            # Heat flow components (BTU/hr)
+            "q_env": Q_env,
+            "q_int": Q_int,
+            "q_hvac": Q_hvac,
+            "q_solar": Q_solar,
+            "q_internal": Q_internal,
+            "q_boundary": Q_boundary,
+            "q_appliances": Q_appliances,
+            "q_aux_resistive": Q_aux_resistive,
+            # Context values for sensor attributes
+            "infiltration_factor": infiltration,
+            "ua_value": UA,
+            "effective_outdoor_temp": effective_outdoor,
+            "indoor_temp": T_air,
+            "people_count": self._current_people_count,
+            "wind_speed_mph": self._current_wind_speed,
+            "doors_windows_open": self._current_open_doors_windows,
+            "cloud_cover": cloud_cover,
+            "sun_elevation": sun_elevation,
+            "learned_peak_solar_gain": solar_gain_btu,
+            "attic_temp": attic_temp,
+            "crawlspace_temp": crawl_temp,
+            "attic_contribution_btu": attic_contribution,
+            "crawlspace_contribution_btu": crawl_contribution,
+        }
+
         x_new = x.copy()
         x_new[IDX_T_AIR] = T_air_new
         x_new[IDX_T_MASS] = T_mass_new
@@ -945,6 +979,11 @@ class ThermalEstimator:
     def solar_gain_btu(self) -> float:
         """Learned peak solar heat gain (BTU/hr at clear-sky noon)."""
         return float(self.x[IDX_SOLAR_GAIN])
+
+    @property
+    def thermal_load_components(self) -> dict[str, float | None]:
+        """Last computed thermal load breakdown (BTU/hr) from the EKF predict step."""
+        return dict(self._last_thermal_loads)
 
     @property
     def R_value(self) -> float:
