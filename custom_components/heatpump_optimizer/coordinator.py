@@ -1298,7 +1298,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             occupancy_timeline
             and effective_mode == OccupancyMode.HOME
         ):
-            from .controllers.strategic import StrategicPlanner
             cal_mode = StrategicPlanner._lookup_occupancy_at(
                 datetime.now(timezone.utc), occupancy_timeline
             )
