@@ -339,8 +339,10 @@ class StrategicPlanner:
         """Check if a time falls within the sleep window (handles overnight)."""
         start_str = sleep_config.get("start", "22:00")
         end_str = sleep_config.get("end", "07:00")
-        start_h, start_m = map(int, start_str.split(":"))
-        end_h, end_m = map(int, end_str.split(":"))
+        start_parts = start_str.split(":")
+        end_parts = end_str.split(":")
+        start_h, start_m = int(start_parts[0]), int(start_parts[1])
+        end_h, end_m = int(end_parts[0]), int(end_parts[1])
 
         try:
             from homeassistant.util import dt as dt_util
