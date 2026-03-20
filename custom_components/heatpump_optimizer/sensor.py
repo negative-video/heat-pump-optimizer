@@ -256,6 +256,25 @@ class ModelAccuracySensor(OptimizerBaseSensor):
         return attrs
 
 
+class _LearningNullMixin:
+    """Return None for savings values while in learning mode.
+
+    During the learning tier, savings are meaningless (always zero).
+    Returning None renders as 'Unknown' in HA, which is more honest
+    than showing $0.00 / 0.00 kWh on day one.
+    """
+
+    def _suppress_during_learning(self, value):
+        if value is None:
+            return None
+        tier = (self.coordinator.data or {}).get(
+            "savings_accuracy_tier", "learning"
+        )
+        if tier == "learning":
+            return None
+        return value
+
+
 class SavingsPercentSensor(_LearningNullMixin, OptimizerBaseSensor):
     """Estimated runtime savings percentage from current schedule."""
 
@@ -577,25 +596,6 @@ class _DailyResetMixin:
         return datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-
-
-class _LearningNullMixin:
-    """Return None for savings values while in learning mode.
-
-    During the learning tier, savings are meaningless (always zero).
-    Returning None renders as 'Unknown' in HA, which is more honest
-    than showing $0.00 / 0.00 kWh on day one.
-    """
-
-    def _suppress_during_learning(self, value):
-        if value is None:
-            return None
-        tier = (self.coordinator.data or {}).get(
-            "savings_accuracy_tier", "learning"
-        )
-        if tier == "learning":
-            return None
-        return value
 
 
 class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
