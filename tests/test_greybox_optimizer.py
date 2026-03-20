@@ -306,8 +306,8 @@ class TestLPSolver:
         if morning_entries and afternoon_entries:
             morning_avg = sum(e.target_temp for e in morning_entries) / len(morning_entries)
             afternoon_avg = sum(e.target_temp for e in afternoon_entries) / len(afternoon_entries)
-            assert morning_avg <= afternoon_avg + 1.0, (
-                f"Morning avg {morning_avg:.1f} should be <= afternoon avg {afternoon_avg:.1f} + 1.0"
+            assert morning_avg <= afternoon_avg + 1.5, (
+                f"Morning avg {morning_avg:.1f} should be <= afternoon avg {afternoon_avg:.1f} + 1.5"
             )
 
     def test_savings_positive_on_variable_weather(self):

@@ -364,7 +364,7 @@ function renderSavingsCard(states, hass) {
 
   // Tier accuracy note for sub-calibrated tiers
   const tierNote = tierVal !== "calibrated"
-    ? `<div class="tier-note">Savings are ${tierInfo.label.toLowerCase()}-grade — accuracy improves as the model learns your home.</div>`
+    ? `<div class="tier-note">These numbers will get more accurate as the model learns your patterns.</div>`
     : "";
 
   // Context bar: savings as % of baseline
@@ -723,40 +723,36 @@ function renderBuildingCard(states, hass) {
     else if (rv < R_POOR) { rBand = "poor"; rLabel = "Leaky envelope"; }
   }
 
-  let massBand = "medium", massLabel = "Moderate — mixed construction";
+  let massBand = "medium", massLabel = "Mixed construction";
   if (hasValue(thermalMass)) {
     const tm = Number(thermalMass.state);
-    if (tm >= 5000) { massBand = "high"; massLabel = "Heavy — masonry or tile"; }
-    else if (tm < 1500) { massBand = "low"; massLabel = "Light — wood frame"; }
+    if (tm >= 5000) { massBand = "high"; massLabel = "Masonry / concrete"; }
+    else if (tm < 1500) { massBand = "low"; massLabel = "Wood frame"; }
   }
 
   let coolSizeLabel = "";
   if (hasValue(coolCap)) {
     const qk = Number(coolCap.state) / 1000;
-    if (qk < 12) coolSizeLabel = "Compact system";
-    else if (qk < 24) coolSizeLabel = "Small\u2013medium home";
-    else if (qk < 36) coolSizeLabel = "Medium\u2013large home";
-    else coolSizeLabel = "Large system";
+    coolSizeLabel = qk < 12 ? "< 1 ton" : `${(qk / 12).toFixed(1)} ton`;
   }
 
   // ── Plain-English narrative ──
   let narrative = "";
   if (hasValue(rValue) && hasValue(thermalMass)) {
     if (rBand === "good" && massBand === "high")
-      narrative = "Well-sealed with high thermal inertia \u2014 your home stays comfortable for hours without HVAC. Pre-conditioning well ahead of occupancy pays off most.";
+      narrative = "Tight envelope and heavy thermal mass \u2014 holds temperature well, ideal for pre-conditioning ahead of rate changes.";
     else if (rBand === "good" && massBand === "low")
-      narrative = "Good insulation but temperatures shift quickly. Timing pre-conditioning close to arrival gives the best comfort-to-energy ratio.";
+      narrative = "Well insulated but lightweight \u2014 heats and cools fast, best served by just-in-time pre-conditioning.";
     else if (rBand === "good")
-      narrative = "Good insulation keeps heat loss in check. The optimizer focuses on occupancy-timed pre-conditioning and rate windows.";
+      narrative = "Low heat loss lets the optimizer focus on shifting runtime to cheaper, cleaner hours.";
     else if (massBand === "high")
-      narrative = "High thermal mass buffers outdoor swings, but the envelope loses heat faster than typical. Rate-timed HVAC cycles save the most here.";
+      narrative = "Heavy construction absorbs temperature swings, but the envelope leaks more than average. Rate-timed cycles save the most.";
     else if (rBand === "poor" && massBand === "low")
-      narrative = "Your home responds quickly to both HVAC and outdoor temperatures \u2014 the optimizer prioritizes staying ahead of swings rather than coasting.";
+      narrative = "Responds quickly to outdoor conditions \u2014 the optimizer stays ahead of swings rather than coasting.";
     else if (rBand === "poor")
-      narrative = "Heat loss is higher than typical for your region. The optimizer focuses on running HVAC during the cheapest, cleanest rate windows.";
+      narrative = "Higher-than-average heat loss. The optimizer prioritizes running during the cheapest, most efficient windows.";
     else
-      narrative = "Typical construction \u2014 the optimizer balances pre-conditioning timing, rate windows, and occupancy patterns.";
-    if (converging) narrative += " (Estimates are still refining \u2014 improving with each cycle.)";
+      narrative = "Typical thermal characteristics \u2014 the optimizer balances pre-conditioning, rate windows, and occupancy.";
   }
 
   // ── Position bar: track with a dot marker ──
@@ -816,10 +812,10 @@ function renderBuildingCard(states, hass) {
   if (solarGain != null) {
     const sg = Number(solarGain);
     let solarDesc;
-    if (sg < 1000) solarDesc = "Minimal \u2014 shaded or north-facing";
-    else if (sg < 3000) solarDesc = "Low \u2014 partial shade or small windows";
-    else if (sg < 6000) solarDesc = "Moderate \u2014 typical exposure";
-    else solarDesc = "High \u2014 south-facing or large windows";
+    if (sg < 1000) solarDesc = "Minimal exposure";
+    else if (sg < 3000) solarDesc = "Partial shade";
+    else if (sg < 6000) solarDesc = "Typical exposure";
+    else solarDesc = "High exposure";
     const pct = Math.min(100, (sg / 10000) * 100);
     profileRows.push(`
       <div class="profile-row">
@@ -835,7 +831,7 @@ function renderBuildingCard(states, hass) {
       <div class="profile-row">
         <div class="profile-row-header">
           <span class="profile-label">Solar Gain</span>
-          <span class="profile-qual quality-medium">Estimating\u2026 needs more sunny days</span>
+          <span class="profile-qual quality-medium">Measuring\u2026</span>
         </div>
       </div>`);
   }
@@ -856,7 +852,7 @@ function renderBuildingCard(states, hass) {
     if (greybox.state === "on" || greybox.state === "true") mt = "Grey-Box LP";
     else if (gba.using_adaptive === true || gba.using_adaptive === "true") mt = "Kalman Filter";
     else mt = "Heuristic";
-    modelTypeLine = `<div class="model-type">${mt}${confPct > 0 ? ` \u00b7 ${confPct.toFixed(0)}% confidence` : ""}${converging ? " \u00b7 still learning" : ""}</div>`;
+    modelTypeLine = `<div class="model-type">${mt}${confPct > 0 ? ` \u00b7 ${confPct.toFixed(0)}% confidence` : ""}</div>`;
   }
 
   // ── Parameter uncertainty (power users) ──
@@ -879,8 +875,8 @@ function renderBuildingCard(states, hass) {
   return `
     <div class="card building-card">
       <div class="building-header">
-        <h2>Your Home</h2>
-        ${converging ? `<span class="converging-tag">Converging\u2026</span>` : ""}
+        <h2>Building Profile</h2>
+        ${converging ? `<span class="converging-tag">Learning</span>` : ""}
       </div>
       ${narrative ? `<p class="profile-narrative">${narrative}</p>` : ""}
       <div class="profile-rows">${profileRows.join("")}</div>
@@ -1501,13 +1497,13 @@ function renderWelcomeCard(states) {
     <div class="card welcome-card">
       <h2>Welcome</h2>
       <p class="welcome-text">
-        The optimizer is now learning how your home responds to temperature changes.
-        Over the next 2-3 weeks, it will build a thermal model of your home and start
-        shifting HVAC runtime to save energy while keeping you comfortable.
+        The optimizer is observing your thermostat and weather data to learn how
+        your home behaves. It will not change your thermostat settings during this
+        initial observation period.
       </p>
       <p class="welcome-text">
-        No action is needed. It works in the background using your thermostat and weather
-        data. You can check back here anytime to see its progress.
+        After about a week of baseline data, it will begin shifting HVAC runtime
+        to save energy while keeping you comfortable. No action needed.
       </p>
     </div>`;
 }
@@ -1791,7 +1787,7 @@ const PANEL_CSS = `
   .toggle-btn:hover { filter: brightness(0.95); }
 
   /* ── Forecast Chart ── */
-  .forecast-card { }
+  .forecast-card { overflow: hidden; }
   .forecast-placeholder {
     color: var(--text-secondary);
     font-size: 14px;
@@ -1801,7 +1797,8 @@ const PANEL_CSS = `
   }
   .chart-legend {
     display: flex;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 6px 12px;
     margin-bottom: 8px;
     font-size: 11px;
     color: var(--text-secondary);
@@ -1986,7 +1983,7 @@ const PANEL_CSS = `
   }
 
   /* ── Unified Timeline Card ── */
-  .unified-card { }
+  .unified-card { overflow: hidden; }
 
   /* ── Schedule Timeline (legacy, kept for compatibility) ── */
   .timeline-card { }

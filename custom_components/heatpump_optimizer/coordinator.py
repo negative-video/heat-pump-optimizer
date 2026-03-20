@@ -195,6 +195,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         model_import_data: str | None = None,
         behavior: dict[str, Any] | None = None,
         profile_json: str | None = None,
+        sleep_config: dict | None = None,
     ):
         super().__init__(
             hass,
@@ -209,6 +210,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._weather_entity_ids = weather_entity_ids or [weather_entity_id]
         self.comfort_cool = comfort_cool
         self.comfort_heat = comfort_heat
+        self.sleep_config = sleep_config or {}
 
         # Safety limits (absolute guardrails)
         from .const import DEFAULT_SAFETY_HEAT_MIN, DEFAULT_SAFETY_COOL_MAX
@@ -357,6 +359,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Engine initialization — varies by mode
         self._initialization_mode = initialization_mode
+        self._profile_path = profile_path
         self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
         self._use_greybox = opts.get(CONF_USE_GREYBOX_MODEL, False)
 
@@ -499,6 +502,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             optimizer=self.optimizer,
             resist_balance_point=self.model.resist_balance_point or 50.0,
             greybox_optimizer=self.greybox_optimizer,
+            sleep_config=self.sleep_config,
         )
 
         # Layer 2: Tactical Controller
@@ -1278,6 +1282,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.comfort_heat, "heat", effective_mode
         )
 
+        # Apply sleep comfort bounds when HOME and within sleep window
+        if (
+            self.sleep_config.get("enabled")
+            and effective_mode == OccupancyMode.HOME
+            and StrategicPlanner._is_in_sleep_window(
+                datetime.now(timezone.utc), self.sleep_config
+            )
+        ):
+            comfort_cool = self.sleep_config.get("comfort_cool", comfort_cool)
+            comfort_heat = self.sleep_config.get("comfort_heat", comfort_heat)
+
         # If reactive overrides calendar (person came home early), fire event
         if (
             occupancy_timeline
@@ -1664,12 +1679,37 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         except Exception:
             init_indoor = 72.0
 
-        # Reset EKF thermal estimator (preserve user-provided priors)
-        self.estimator = ThermalEstimator.cold_start(
-            indoor_temp=init_indoor,
-            tonnage=self._hvac_tonnage,
-            sqft=self._home_sqft,
-        )
+        # Reset EKF thermal estimator — re-apply beestat priors if available
+        if self._initialization_mode == "beestat" and self._profile_path:
+            try:
+                from pathlib import Path
+                profile_json = await self.hass.async_add_executor_job(
+                    Path(self._profile_path).read_text
+                )
+                model = PerformanceModel.from_file_data(profile_json)
+                self.estimator = ThermalEstimator.from_beestat(
+                    model._raw, indoor_temp=init_indoor
+                )
+                _LOGGER.info(
+                    "Reset: re-loaded beestat profile from %s",
+                    self._profile_path,
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Reset: failed to re-load beestat profile — using cold start",
+                    exc_info=True,
+                )
+                self.estimator = ThermalEstimator.cold_start(
+                    indoor_temp=init_indoor,
+                    tonnage=self._hvac_tonnage,
+                    sqft=self._home_sqft,
+                )
+        else:
+            self.estimator = ThermalEstimator.cold_start(
+                indoor_temp=init_indoor,
+                tonnage=self._hvac_tonnage,
+                sqft=self._home_sqft,
+            )
         self.adaptive_model = AdaptivePerformanceModel(self.estimator)
         try:
             self.adaptive_model.cool_differential = self.model.cool_differential

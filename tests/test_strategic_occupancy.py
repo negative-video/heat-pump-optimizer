@@ -50,6 +50,15 @@ ha_core = types.ModuleType("homeassistant.core")
 ha_core.HomeAssistant = MagicMock
 sys.modules.setdefault("homeassistant.core", ha_core)
 
+ha_util = types.ModuleType("homeassistant.util")
+ha_util.__path__ = ["homeassistant/util"]
+sys.modules.setdefault("homeassistant.util", ha_util)
+
+ha_util_dt = types.ModuleType("homeassistant.util.dt")
+ha_util_dt.as_local = lambda t: t  # identity by default
+sys.modules.setdefault("homeassistant.util.dt", ha_util_dt)
+ha_util.dt = ha_util_dt
+
 
 def _load(full_name: str, path: str):
     spec = importlib.util.spec_from_file_location(full_name, path)
@@ -435,6 +444,206 @@ class TestGetEffectiveMode:
         adapter = occ_mod.OccupancyAdapter(hass, entity_ids=["person.alice"])
         result = adapter.get_effective_mode(calendar_timeline=None)
         assert result == OccupancyMode.AWAY
+
+
+# ── Tests: Sleep Schedule ────────────────────────────────────────────
+
+
+def _sleep_config(enabled=True, start="22:00", end="07:00"):
+    """Build a sleep_config dict for testing."""
+    return {
+        "enabled": enabled,
+        "start": start,
+        "end": end,
+        "comfort_cool": (70.0, 76.0),
+        "comfort_heat": (60.0, 66.0),
+    }
+
+
+class TestSleepSchedule:
+    """Test sleep schedule comfort bound overrides."""
+
+    def test_sleep_bounds_applied_during_sleep_window(self):
+        """HOME hours within the sleep window get sleep comfort bounds."""
+        optimizer = _mock_optimizer()
+        planner = StrategicPlanner(
+            optimizer=optimizer,
+            resist_balance_point=50.2,
+            sleep_config=_sleep_config(start="22:00", end="07:00"),
+        )
+
+        # Create forecast spanning 22:00-04:00 UTC (all within sleep window)
+        base = datetime(2026, 3, 12, 22, 0, 0, tzinfo=timezone.utc)
+        forecast = [
+            ForecastPoint(time=base + timedelta(hours=h), outdoor_temp=90.0)
+            for h in range(6)
+        ]
+        # All HOME timeline
+        timeline = [
+            OccupancyForecastPoint(base, base + timedelta(hours=6), "home", "calendar"),
+        ]
+
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            planner._stamp_per_hour_comfort(forecast, (72.0, 78.0), "cool", timeline)
+
+        for pt in forecast:
+            assert pt.comfort_min == pytest.approx(70.0), f"Expected sleep cool min at {pt.time}"
+            assert pt.comfort_max == pytest.approx(76.0), f"Expected sleep cool max at {pt.time}"
+
+    def test_sleep_bounds_not_applied_when_away(self):
+        """AWAY hours during the sleep window still get AWAY bounds, not sleep."""
+        optimizer = _mock_optimizer()
+        planner = StrategicPlanner(
+            optimizer=optimizer,
+            resist_balance_point=50.2,
+            sleep_config=_sleep_config(start="22:00", end="07:00"),
+        )
+
+        base = datetime(2026, 3, 12, 23, 0, 0, tzinfo=timezone.utc)
+        forecast = [
+            ForecastPoint(time=base + timedelta(hours=h), outdoor_temp=90.0)
+            for h in range(4)
+        ]
+        timeline = [
+            OccupancyForecastPoint(base, base + timedelta(hours=4), "away", "calendar"),
+        ]
+
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            planner._stamp_per_hour_comfort(forecast, (72.0, 78.0), "cool", timeline)
+
+        # Should get AWAY bounds (72-4=68, 78+4=82), NOT sleep bounds
+        for pt in forecast:
+            assert pt.comfort_min == pytest.approx(68.0)
+            assert pt.comfort_max == pytest.approx(82.0)
+
+    def test_sleep_overnight_window(self):
+        """Overnight window (22:00-07:00) correctly wraps across midnight."""
+        optimizer = _mock_optimizer()
+        planner = StrategicPlanner(
+            optimizer=optimizer,
+            resist_balance_point=50.2,
+            sleep_config=_sleep_config(start="22:00", end="07:00"),
+        )
+
+        # Forecast spanning 20:00-10:00 (14 hours), all HOME
+        base = datetime(2026, 3, 12, 20, 0, 0, tzinfo=timezone.utc)
+        forecast = [
+            ForecastPoint(time=base + timedelta(hours=h), outdoor_temp=30.0)
+            for h in range(14)
+        ]
+        timeline = [
+            OccupancyForecastPoint(base, base + timedelta(hours=14), "home", "calendar"),
+        ]
+
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            planner._stamp_per_hour_comfort(forecast, (62.0, 70.0), "heat", timeline)
+
+        # Hours 0-1 (20:00-21:00) → HOME base comfort
+        for i in range(2):
+            assert forecast[i].comfort_min == pytest.approx(62.0)
+            assert forecast[i].comfort_max == pytest.approx(70.0)
+
+        # Hours 2-10 (22:00-06:00) → sleep comfort
+        for i in range(2, 11):
+            assert forecast[i].comfort_min == pytest.approx(60.0), f"Hour {i} min"
+            assert forecast[i].comfort_max == pytest.approx(66.0), f"Hour {i} max"
+
+        # Hours 11-13 (07:00-09:00) → HOME base comfort
+        for i in range(11, 14):
+            assert forecast[i].comfort_min == pytest.approx(62.0)
+            assert forecast[i].comfort_max == pytest.approx(70.0)
+
+    def test_sleep_disabled_no_effect(self):
+        """Disabled sleep config has no effect on comfort bounds."""
+        optimizer = _mock_optimizer()
+        planner = StrategicPlanner(
+            optimizer=optimizer,
+            resist_balance_point=50.2,
+            sleep_config=_sleep_config(enabled=False),
+        )
+
+        base = datetime(2026, 3, 12, 23, 0, 0, tzinfo=timezone.utc)
+        forecast = [
+            ForecastPoint(time=base + timedelta(hours=h), outdoor_temp=90.0)
+            for h in range(4)
+        ]
+        timeline = [
+            OccupancyForecastPoint(base, base + timedelta(hours=4), "home", "calendar"),
+        ]
+
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            planner._stamp_per_hour_comfort(forecast, (72.0, 78.0), "cool", timeline)
+
+        # Should get normal HOME bounds, not sleep
+        for pt in forecast:
+            assert pt.comfort_min == pytest.approx(72.0)
+            assert pt.comfort_max == pytest.approx(78.0)
+
+    def test_sleep_same_day_window(self):
+        """Non-overnight window (01:00-06:00) works correctly."""
+        optimizer = _mock_optimizer()
+        planner = StrategicPlanner(
+            optimizer=optimizer,
+            resist_balance_point=50.2,
+            sleep_config=_sleep_config(start="01:00", end="06:00"),
+        )
+
+        # Forecast from 00:00-08:00
+        base = datetime(2026, 3, 13, 0, 0, 0, tzinfo=timezone.utc)
+        forecast = [
+            ForecastPoint(time=base + timedelta(hours=h), outdoor_temp=90.0)
+            for h in range(8)
+        ]
+        timeline = [
+            OccupancyForecastPoint(base, base + timedelta(hours=8), "home", "calendar"),
+        ]
+
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            planner._stamp_per_hour_comfort(forecast, (72.0, 78.0), "cool", timeline)
+
+        # Hour 0 (00:00) → HOME base (before sleep window)
+        assert forecast[0].comfort_min == pytest.approx(72.0)
+        assert forecast[0].comfort_max == pytest.approx(78.0)
+
+        # Hours 1-5 (01:00-05:00) → sleep comfort
+        for i in range(1, 6):
+            assert forecast[i].comfort_min == pytest.approx(70.0), f"Hour {i}"
+            assert forecast[i].comfort_max == pytest.approx(76.0), f"Hour {i}"
+
+        # Hours 6-7 (06:00-07:00) → HOME base (after sleep window)
+        for i in range(6, 8):
+            assert forecast[i].comfort_min == pytest.approx(72.0)
+            assert forecast[i].comfort_max == pytest.approx(78.0)
+
+
+class TestIsInSleepWindow:
+    """Test the static _is_in_sleep_window helper."""
+
+    def test_overnight_before_midnight(self):
+        t = datetime(2026, 3, 12, 23, 30, 0, tzinfo=timezone.utc)
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            assert StrategicPlanner._is_in_sleep_window(t, _sleep_config()) is True
+
+    def test_overnight_after_midnight(self):
+        t = datetime(2026, 3, 13, 3, 0, 0, tzinfo=timezone.utc)
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            assert StrategicPlanner._is_in_sleep_window(t, _sleep_config()) is True
+
+    def test_outside_overnight_window(self):
+        t = datetime(2026, 3, 12, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            assert StrategicPlanner._is_in_sleep_window(t, _sleep_config()) is False
+
+    def test_at_start_boundary(self):
+        t = datetime(2026, 3, 12, 22, 0, 0, tzinfo=timezone.utc)
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            assert StrategicPlanner._is_in_sleep_window(t, _sleep_config()) is True
+
+    def test_at_end_boundary(self):
+        """End boundary is exclusive."""
+        t = datetime(2026, 3, 13, 7, 0, 0, tzinfo=timezone.utc)
+        with patch("homeassistant.util.dt.as_local", side_effect=lambda t: t):
+            assert StrategicPlanner._is_in_sleep_window(t, _sleep_config()) is False
 
 
 if __name__ == "__main__":

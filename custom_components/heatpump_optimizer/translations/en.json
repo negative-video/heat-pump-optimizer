@@ -110,6 +110,7 @@
       "init": {
         "menu_options": {
           "comfort": "Temperature boundaries",
+          "sleep_schedule": "Sleep schedule",
           "presence": "Presence & away",
           "energy": "Energy & cost tracking",
           "equipment": "Thermostat & weather source",
@@ -159,6 +160,7 @@
         "description": "Configure power monitoring, electricity rates, and carbon intensity to enable savings tracking and cost-aware optimization. Detected entities are pre-filled where possible.",
         "data": {
           "hvac_power_entity": "HVAC power sensor",
+          "hvac_seer": "HVAC SEER1 rating",
           "hvac_power_default_watts": "Fallback HVAC power (watts)",
           "co2_entity": "CO₂ intensity sensor",
           "electricity_rate_entity": "Electricity rate entity",
@@ -173,6 +175,7 @@
         },
         "data_description": {
           "hvac_power_entity": "A sensor that reports your HVAC system's current power draw in watts.",
+          "hvac_seer": "Enter the SEER1 rating (not SEER2). If you only have a SEER2 rating, multiply it by 1.04 to approximate SEER1 (e.g. SEER2 15.2 \u2192 enter 15.8).",
           "hvac_power_default_watts": "Fallback power estimate when no HVAC power sensor is available. Set to your system's typical draw.",
           "electricity_rate_entity": "A sensor or input_number that provides your current electricity rate in $/kWh. Accepts sensor entities or helpers like input_number.",
           "electricity_flat_rate": "Flat electricity rate in $/kWh. Only used when no rate entity is configured. Set to 0 to disable.",
@@ -181,7 +184,7 @@
           "solar_production_entity": "A sensor reporting current solar panel output in watts.",
           "grid_import_entity": "A sensor reporting current grid import in watts.",
           "solar_export_rate_entity": "A sensor reporting the current solar export rate in $/kWh.",
-          "tou_schedule": "Time-of-use electricity rates let the optimizer shift HVAC runtime to cheaper hours.\n\nPaste a JSON array like this example (weekday afternoon peak at $0.35/kWh, everything else at $0.12/kWh):\n[{\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35}, {\"days\": [0,1,2,3,4,5,6], \"start_hour\": 0, \"end_hour\": 24, \"rate\": 0.12}]\n\nDays: 0=Monday through 6=Sunday. The optimizer checks rates from first to last and uses the first match, so put specific periods before general ones. Leave empty to use the rate entity or flat rate instead.",
+          "tou_schedule": "Time-of-use electricity rates let the optimizer shift HVAC runtime to cheaper hours.\n\nPaste a JSON array like this example (weekday afternoon peak at $0.35/kWh, everything else at $0.12/kWh):\n['{'\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35'}', '{'\"days\": [0,1,2,3,4,5,6], \"start_hour\": 0, \"end_hour\": 24, \"rate\": 0.12'}']\n\nDays: 0=Monday through 6=Sunday. The optimizer checks rates from first to last and uses the first match, so put specific periods before general ones. Leave empty to use the rate entity or flat rate instead.",
           "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode — widening the comfort range to reduce HVAC load during grid stress events."
         }
       },
@@ -227,6 +230,27 @@
           "comfort_cool_max": "How warm you'll accept during expensive/inefficient afternoon hours. Example: 78\u00b0F.",
           "comfort_heat_min": "How cool you'll accept during expensive/inefficient hours. Example: 62\u00b0F.",
           "comfort_heat_max": "Pre-heat target during efficient hours (e.g. mild afternoons). Example: 70\u00b0F."
+        }
+      },
+      "sleep_schedule": {
+        "title": "Sleep Schedule",
+        "description": "Optional tighter comfort bounds during sleeping hours. When enabled, the optimizer uses these narrower ranges at night so it won't pre-heat or pre-cool aggressively while you're sleeping.",
+        "data": {
+          "sleep_schedule_enabled": "Enable sleep schedule",
+          "sleep_schedule_start": "Bedtime",
+          "sleep_schedule_end": "Wake time",
+          "sleep_comfort_cool_min": "Sleep: coolest target (cooling)",
+          "sleep_comfort_cool_max": "Sleep: warmest allowed (cooling)",
+          "sleep_comfort_heat_min": "Sleep: coolest allowed (heating)",
+          "sleep_comfort_heat_max": "Sleep: warmest target (heating)"
+        },
+        "data_description": {
+          "sleep_schedule_start": "When to switch to sleep comfort bounds (e.g. 22:00).",
+          "sleep_schedule_end": "When to switch back to daytime comfort bounds (e.g. 07:00).",
+          "sleep_comfort_cool_min": "How cool the optimizer will target at night when cooling. Example: 70\u00b0F.",
+          "sleep_comfort_cool_max": "How warm you'll accept at night when cooling. Example: 76\u00b0F.",
+          "sleep_comfort_heat_min": "How cool you'll accept at night when heating. Example: 60\u00b0F.",
+          "sleep_comfort_heat_max": "How warm the optimizer will target at night when heating. Example: 66\u00b0F."
         }
       },
       "presence": {
@@ -292,6 +316,14 @@
         "description": "Pick a common appliance type to pre-fill typical values, or choose Custom to enter your own.\n\nEach preset provides default thermal impact (BTU/hr) and power draw estimates. You'll configure the state entity (the sensor that tells HA when it's running) on the next screen.",
         "data": {
           "appliance_preset": "Appliance type"
+        }
+      },
+      "appliance_device": {
+        "title": "Select Device",
+        "description": "Pick the device to monitor. Its state and power entities will be detected automatically. Toggle 'Configure manually' to skip device selection.",
+        "data": {
+          "appliance_device": "Device",
+          "skip_device": "Configure manually"
         }
       },
       "appliance_edit": {

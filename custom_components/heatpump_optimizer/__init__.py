@@ -39,6 +39,13 @@ from .const import (
     CONF_REOPTIMIZE_INTERVAL_HOURS,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
+    CONF_SLEEP_COMFORT_COOL_MAX,
+    CONF_SLEEP_COMFORT_COOL_MIN,
+    CONF_SLEEP_COMFORT_HEAT_MAX,
+    CONF_SLEEP_COMFORT_HEAT_MIN,
+    CONF_SLEEP_SCHEDULE_ENABLED,
+    CONF_SLEEP_SCHEDULE_END,
+    CONF_SLEEP_SCHEDULE_START,
     CONF_DWELL_TIME_MINUTES,
     CONF_THERMOSTAT_DEADBAND,
     CONF_WEATHER_ENTITIES,
@@ -59,6 +66,13 @@ from .const import (
     DEFAULT_REOPTIMIZE_INTERVAL_HOURS,
     DEFAULT_SAFETY_COOL_MAX,
     DEFAULT_SAFETY_HEAT_MIN,
+    DEFAULT_SLEEP_COMFORT_COOL_MAX,
+    DEFAULT_SLEEP_COMFORT_COOL_MIN,
+    DEFAULT_SLEEP_COMFORT_HEAT_MAX,
+    DEFAULT_SLEEP_COMFORT_HEAT_MIN,
+    DEFAULT_SLEEP_SCHEDULE_ENABLED,
+    DEFAULT_SLEEP_SCHEDULE_END,
+    DEFAULT_SLEEP_SCHEDULE_START,
     DEFAULT_DWELL_TIME_MINUTES,
     DEFAULT_THERMOSTAT_DEADBAND,
     DOMAIN,
@@ -151,6 +165,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "dwell_time_minutes": opts.get(CONF_DWELL_TIME_MINUTES, DEFAULT_DWELL_TIME_MINUTES),
     }
 
+    # Sleep schedule (optional — tighter comfort during sleeping hours)
+    sleep_config = {
+        "enabled": opts.get(CONF_SLEEP_SCHEDULE_ENABLED, DEFAULT_SLEEP_SCHEDULE_ENABLED),
+        "start": opts.get(CONF_SLEEP_SCHEDULE_START, DEFAULT_SLEEP_SCHEDULE_START),
+        "end": opts.get(CONF_SLEEP_SCHEDULE_END, DEFAULT_SLEEP_SCHEDULE_END),
+        "comfort_cool": (
+            opts.get(CONF_SLEEP_COMFORT_COOL_MIN, DEFAULT_SLEEP_COMFORT_COOL_MIN),
+            opts.get(CONF_SLEEP_COMFORT_COOL_MAX, DEFAULT_SLEEP_COMFORT_COOL_MAX),
+        ),
+        "comfort_heat": (
+            opts.get(CONF_SLEEP_COMFORT_HEAT_MIN, DEFAULT_SLEEP_COMFORT_HEAT_MIN),
+            opts.get(CONF_SLEEP_COMFORT_HEAT_MAX, DEFAULT_SLEEP_COMFORT_HEAT_MAX),
+        ),
+    }
+
     # Pre-read beestat profile off the event loop (blocking I/O)
     profile_json: str | None = None
     if profile_path and init_mode == INIT_MODE_BEESTAT:
@@ -177,6 +206,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         initialization_mode=init_mode,
         model_import_data=model_import_data,
         behavior=behavior,
+        sleep_config=sleep_config,
     )
 
     # Initialize (loads persisted state, starts watchdog, runs first optimization)

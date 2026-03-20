@@ -212,10 +212,11 @@ class TestSetupEntry:
             bs_mod.async_setup_entry(mock_hass, entry, async_add_entities)
         )
 
-        assert len(added) == 5
+        assert len(added) == 6
         types_found = {type(e).__name__ for e in added}
         assert "OptimizerActiveSensor" in types_found
         assert "OverrideDetectedSensor" in types_found
         assert "StaleSensorDetectedSensor" in types_found
         assert "AuxHeatActiveSensor" in types_found
         assert "LearningActiveSensor" in types_found
+        assert "ThermostatBlendSuspectedSensor" in types_found

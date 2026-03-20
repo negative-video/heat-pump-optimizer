@@ -89,6 +89,13 @@ from .const import (
     CONF_REOPTIMIZE_INTERVAL_HOURS,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
+    CONF_SLEEP_COMFORT_COOL_MAX,
+    CONF_SLEEP_COMFORT_COOL_MIN,
+    CONF_SLEEP_COMFORT_HEAT_MAX,
+    CONF_SLEEP_COMFORT_HEAT_MIN,
+    CONF_SLEEP_SCHEDULE_ENABLED,
+    CONF_SLEEP_SCHEDULE_END,
+    CONF_SLEEP_SCHEDULE_START,
     CONF_SOLAR_EXPORT_RATE_ENTITY,
     CONF_SOLAR_IRRADIANCE_ENTITY,
     CONF_SOLAR_PRODUCTION_ENTITY,
@@ -125,6 +132,13 @@ from .const import (
     DEFAULT_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     DEFAULT_SAFETY_COOL_MAX,
     DEFAULT_SAFETY_HEAT_MIN,
+    DEFAULT_SLEEP_COMFORT_COOL_MAX,
+    DEFAULT_SLEEP_COMFORT_COOL_MIN,
+    DEFAULT_SLEEP_COMFORT_HEAT_MAX,
+    DEFAULT_SLEEP_COMFORT_HEAT_MIN,
+    DEFAULT_SLEEP_SCHEDULE_ENABLED,
+    DEFAULT_SLEEP_SCHEDULE_END,
+    DEFAULT_SLEEP_SCHEDULE_START,
     DEFAULT_SUN_ENTITY,
     DOMAIN,
     WEIGHTING_MODE_EQUAL,
@@ -230,6 +244,8 @@ def _convert_comfort_input_to_f(user_input: dict[str, Any], hass: HomeAssistant)
         CONF_COMFORT_COOL_MIN, CONF_COMFORT_COOL_MAX,
         CONF_COMFORT_HEAT_MIN, CONF_COMFORT_HEAT_MAX,
         CONF_SAFETY_HEAT_MIN, CONF_SAFETY_COOL_MAX,
+        CONF_SLEEP_COMFORT_COOL_MIN, CONF_SLEEP_COMFORT_COOL_MAX,
+        CONF_SLEEP_COMFORT_HEAT_MIN, CONF_SLEEP_COMFORT_HEAT_MAX,
     }
     converted = dict(user_input)
     for key in temp_keys:
@@ -787,7 +803,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = dict(self.config_entry.options)
         return self.async_show_menu(
             step_id="init",
-            menu_options=["comfort", "presence", "energy", "equipment", "advanced"],
+            menu_options=["comfort", "sleep_schedule", "presence", "energy", "equipment", "advanced"],
         )
 
     async def async_step_advanced(
@@ -1014,6 +1030,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain="binary_sensor",
+                            device_class=["door", "window", "opening", "garage_door"],
                             multiple=True,
                         ),
                     ),
@@ -1114,7 +1131,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=8, max=30, step=0.5,
-                            unit_of_measurement="SEER",
+                            unit_of_measurement="SEER1",
                             mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
@@ -1381,6 +1398,70 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_COMFORT_HEAT_MAX,
                         default=_get_default(CONF_COMFORT_HEAT_MAX, DEFAULT_COMFORT_HEAT_MAX),
+                    ): _comfort_selector(self.hass, 55, 78),
+                }
+            ),
+        )
+
+    # ── Sleep Schedule ────────────────────────────────────────────────
+
+    async def async_step_sleep_schedule(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Configure optional sleep schedule with tighter comfort bounds."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            user_input = _convert_comfort_input_to_f(user_input, self.hass)
+            # Validate sleep comfort ranges
+            s_cool_min = user_input.get(CONF_SLEEP_COMFORT_COOL_MIN, DEFAULT_SLEEP_COMFORT_COOL_MIN)
+            s_cool_max = user_input.get(CONF_SLEEP_COMFORT_COOL_MAX, DEFAULT_SLEEP_COMFORT_COOL_MAX)
+            s_heat_min = user_input.get(CONF_SLEEP_COMFORT_HEAT_MIN, DEFAULT_SLEEP_COMFORT_HEAT_MIN)
+            s_heat_max = user_input.get(CONF_SLEEP_COMFORT_HEAT_MAX, DEFAULT_SLEEP_COMFORT_HEAT_MAX)
+            if s_cool_min >= s_cool_max:
+                errors[CONF_SLEEP_COMFORT_COOL_MIN] = "cool_range_inverted"
+            if s_heat_min >= s_heat_max:
+                errors[CONF_SLEEP_COMFORT_HEAT_MIN] = "heat_range_inverted"
+            if not errors:
+                self._options.update(user_input)
+                return self.async_create_entry(title="", data=self._options)
+
+        data = self.config_entry.data
+
+        def _get(key: str, fallback: float) -> float:
+            return _f_to_display(self._options.get(key, data.get(key, fallback)), self.hass)
+
+        return self.async_show_form(
+            step_id="sleep_schedule",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_SLEEP_SCHEDULE_ENABLED,
+                        default=self._options.get(CONF_SLEEP_SCHEDULE_ENABLED, DEFAULT_SLEEP_SCHEDULE_ENABLED),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_SLEEP_SCHEDULE_START,
+                        default=self._options.get(CONF_SLEEP_SCHEDULE_START, DEFAULT_SLEEP_SCHEDULE_START),
+                    ): selector.TimeSelector(),
+                    vol.Optional(
+                        CONF_SLEEP_SCHEDULE_END,
+                        default=self._options.get(CONF_SLEEP_SCHEDULE_END, DEFAULT_SLEEP_SCHEDULE_END),
+                    ): selector.TimeSelector(),
+                    vol.Optional(
+                        CONF_SLEEP_COMFORT_COOL_MIN,
+                        default=_get(CONF_SLEEP_COMFORT_COOL_MIN, DEFAULT_SLEEP_COMFORT_COOL_MIN),
+                    ): _comfort_selector(self.hass, 58, 80),
+                    vol.Optional(
+                        CONF_SLEEP_COMFORT_COOL_MAX,
+                        default=_get(CONF_SLEEP_COMFORT_COOL_MAX, DEFAULT_SLEEP_COMFORT_COOL_MAX),
+                    ): _comfort_selector(self.hass, 70, 88),
+                    vol.Optional(
+                        CONF_SLEEP_COMFORT_HEAT_MIN,
+                        default=_get(CONF_SLEEP_COMFORT_HEAT_MIN, DEFAULT_SLEEP_COMFORT_HEAT_MIN),
+                    ): _comfort_selector(self.hass, 45, 72),
+                    vol.Optional(
+                        CONF_SLEEP_COMFORT_HEAT_MAX,
+                        default=_get(CONF_SLEEP_COMFORT_HEAT_MAX, DEFAULT_SLEEP_COMFORT_HEAT_MAX),
                     ): _comfort_selector(self.hass, 55, 78),
                 }
             ),
@@ -1814,19 +1895,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         # Build rich description
         if appliances:
-            lines = []
-            for app in appliances:
-                name = app.get("name", "Unnamed")
-                watts = app.get("estimated_watts", 0) or 0
-                factor = app.get("thermal_factor")
-                btu = app.get("thermal_impact_btu", 0)
-                if factor is not None:
-                    effect = "heats" if factor > 0 else "cools"
-                    lines.append(f"- **{name}** — {watts:,.0f}W, {effect} your home")
-                else:
-                    effect = "cools" if btu < 0 else "heats"
-                    lines.append(f"- **{name}** — {effect} your home ({btu:+,.0f} BTU/hr)")
-            summary = "**Configured appliances:**\n" + "\n".join(lines)
+            names = [app.get("name", "Unnamed") for app in appliances]
+            summary = f"**Configured appliances:** {', '.join(names)}"
         else:
             summary = (
                 "No appliances configured yet. Appliances like water heaters, "
@@ -1840,10 +1910,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         ]
         for i, app in enumerate(appliances):
             name = app.get("name", f"Appliance {i+1}")
-            watts = app.get("estimated_watts", 0) or 0
-            label = f"{name} ({watts:,.0f}W)" if watts else name
             options.append(
-                selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {label}")
+                selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {name}")
             )
             options.append(
                 selector.SelectOptionDict(value=f"remove_{i}", label=f"Remove: {name}")
@@ -1876,7 +1944,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._appliance_preset = dict(
                 self.APPLIANCE_PRESETS.get(preset_key, self.APPLIANCE_PRESETS["custom"])
             )
-            return await self.async_step_appliance_edit()
+            self._appliance_device_discovery = None
+            return await self.async_step_appliance_device()
 
         preset_options = [
             selector.SelectOptionDict(
@@ -1913,6 +1982,77 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             }),
         )
 
+    def _discover_appliance_entities(self, device_id: str) -> dict[str, Any]:
+        """Auto-discover state and power entities for a device."""
+        from homeassistant.helpers import device_registry, entity_registry
+
+        entity_reg = entity_registry.async_get(self.hass)
+        device_reg = device_registry.async_get(self.hass)
+        device = device_reg.async_get(device_id)
+
+        result: dict[str, Any] = {}
+        if device and device.name:
+            result["name"] = device.name
+
+        entities = [
+            e for e in entity_reg.entities.values()
+            if e.device_id == device_id and not e.disabled
+        ]
+
+        # State entity: priority order
+        state_entity = None
+        for domain in ("water_heater",):
+            if not state_entity:
+                for e in entities:
+                    if e.domain == domain:
+                        state_entity = e.entity_id
+                        break
+        if not state_entity:
+            for e in entities:
+                if e.domain == "binary_sensor" and e.original_device_class == "running":
+                    state_entity = e.entity_id
+                    break
+        for domain in ("switch", "binary_sensor", "fan"):
+            if not state_entity:
+                for e in entities:
+                    if e.domain == domain:
+                        state_entity = e.entity_id
+                        break
+        if state_entity:
+            result["state_entity"] = state_entity
+
+        # Power entity: sensor with device_class power
+        for e in entities:
+            if e.domain == "sensor" and e.original_device_class == "power":
+                result["power_entity"] = e.entity_id
+                break
+
+        return result
+
+    async def async_step_appliance_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Pick a device to auto-discover its entities, or configure manually."""
+        if user_input is not None:
+            skip = user_input.get("skip_device", False)
+            device_id = user_input.get("appliance_device")
+
+            if not skip and device_id:
+                discovered = self._discover_appliance_entities(device_id)
+                if discovered:
+                    self._appliance_device_discovery = discovered
+            return await self.async_step_appliance_edit()
+
+        return self.async_show_form(
+            step_id="appliance_device",
+            data_schema=vol.Schema({
+                vol.Optional("appliance_device"): selector.DeviceSelector(
+                    selector.DeviceSelectorConfig(),
+                ),
+                vol.Optional("skip_device", default=False): selector.BooleanSelector(),
+            }),
+        )
+
     async def async_step_appliance_edit(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -1920,16 +2060,19 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         appliances = self._load_appliances()
         editing_idx = getattr(self, "_editing_appliance_index", None)
 
-        # Defaults: from existing appliance (edit) or from preset (add)
+        # Defaults: from existing appliance (edit), or preset + device discovery (add)
         if editing_idx is not None and editing_idx < len(appliances):
             existing = appliances[editing_idx]
         else:
             preset = getattr(self, "_appliance_preset", None) or {}
+            discovered = getattr(self, "_appliance_device_discovery", None) or {}
             existing = {
-                "name": preset.get("name", ""),
+                "name": discovered.get("name") or preset.get("name", ""),
                 "thermal_factor": preset.get("thermal_factor", 3.412),
                 "estimated_watts": preset.get("estimated_watts", 0),
                 "active_states": preset.get("active_states", ["on"]),
+                "state_entity": discovered.get("state_entity", ""),
+                "power_entity": discovered.get("power_entity"),
             }
 
         if user_input is not None:
@@ -1986,7 +2129,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     "state_entity",
                     description={"suggested_value": existing.get("state_entity", "")},
                 ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(exclude_entities=own_eids),
+                    selector.EntitySelectorConfig(
+                        domain=["switch", "binary_sensor", "sensor", "input_boolean", "water_heater", "fan", "climate"],
+                        exclude_entities=own_eids,
+                    ),
                 ),
                 vol.Required(
                     "active_states",
@@ -1998,6 +2144,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(
                         domain="sensor",
+                        device_class="power",
                         exclude_entities=own_eids,
                     ),
                 ),

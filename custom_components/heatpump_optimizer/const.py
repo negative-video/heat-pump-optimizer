@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.17"
+VERSION = "0.1.18"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -235,6 +235,23 @@ BLEND_MODE_MEDIAN = "median"
 DEFAULT_BLEND_OUTLIER_THRESHOLD_F = 3.0   # °F from median to count as outlier
 DEFAULT_BLEND_SCHEDULE_START = "22:00"    # start of nightly suppression window
 DEFAULT_BLEND_SCHEDULE_END = "08:00"      # end of nightly suppression window
+
+# Sleep schedule (optional — tighter comfort bounds during sleeping hours)
+CONF_SLEEP_SCHEDULE_ENABLED = "sleep_schedule_enabled"
+CONF_SLEEP_SCHEDULE_START = "sleep_schedule_start"
+CONF_SLEEP_SCHEDULE_END = "sleep_schedule_end"
+CONF_SLEEP_COMFORT_COOL_MIN = "sleep_comfort_cool_min"
+CONF_SLEEP_COMFORT_COOL_MAX = "sleep_comfort_cool_max"
+CONF_SLEEP_COMFORT_HEAT_MIN = "sleep_comfort_heat_min"
+CONF_SLEEP_COMFORT_HEAT_MAX = "sleep_comfort_heat_max"
+
+DEFAULT_SLEEP_SCHEDULE_ENABLED = False
+DEFAULT_SLEEP_SCHEDULE_START = "22:00"
+DEFAULT_SLEEP_SCHEDULE_END = "07:00"
+DEFAULT_SLEEP_COMFORT_COOL_MIN = 70.0
+DEFAULT_SLEEP_COMFORT_COOL_MAX = 76.0
+DEFAULT_SLEEP_COMFORT_HEAT_MIN = 60.0
+DEFAULT_SLEEP_COMFORT_HEAT_MAX = 66.0
 
 # Humidity-gated sensor squelching (wet room exclusion)
 CONF_HUMIDITY_SQUELCH_PAIRS = "humidity_squelch_pairs"

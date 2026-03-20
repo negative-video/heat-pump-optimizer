@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 
 from ..adapters.occupancy import OccupancyAdapter, OccupancyMode
 from ..engine.comfort import calculate_apparent_temperature
@@ -37,6 +37,7 @@ class StrategicPlanner:
 
     # Optional grey-box optimizer (LP-based, set by coordinator)
     greybox_optimizer: object | None = None
+    sleep_config: dict | None = None
     _use_greybox: bool = False
 
     _last_optimization_time: datetime | None = None
@@ -318,8 +319,42 @@ class StrategicPlanner:
             adjusted = OccupancyAdapter.adjust_comfort_for_mode(
                 base_comfort, mode, occ_mode
             )
+            # Apply sleep bounds when HOME and within sleep window
+            if (
+                self.sleep_config
+                and self.sleep_config.get("enabled")
+                and occ_mode == OccupancyMode.HOME
+                and self._is_in_sleep_window(pt.time, self.sleep_config)
+            ):
+                sleep_comfort = self.sleep_config.get(
+                    "comfort_cool" if mode == "cool" else "comfort_heat"
+                )
+                if sleep_comfort:
+                    adjusted = sleep_comfort
             pt.comfort_min = adjusted[0]
             pt.comfort_max = adjusted[1]
+
+    @staticmethod
+    def _is_in_sleep_window(time: datetime, sleep_config: dict) -> bool:
+        """Check if a time falls within the sleep window (handles overnight)."""
+        start_str = sleep_config.get("start", "22:00")
+        end_str = sleep_config.get("end", "07:00")
+        start_h, start_m = map(int, start_str.split(":"))
+        end_h, end_m = map(int, end_str.split(":"))
+
+        try:
+            from homeassistant.util import dt as dt_util
+            local_time = dt_util.as_local(time).time()
+        except ImportError:
+            local_time = time.astimezone().time()
+
+        start = dt_time(start_h, start_m)
+        end = dt_time(end_h, end_m)
+
+        if start <= end:  # same-day window (e.g., 01:00-06:00)
+            return start <= local_time < end
+        else:  # overnight window (e.g., 22:00-07:00)
+            return local_time >= start or local_time < end
 
     @staticmethod
     def _lookup_occupancy_at(

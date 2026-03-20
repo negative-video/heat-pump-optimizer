@@ -654,7 +654,8 @@ class GreyBoxOptimizer:
             # Sensitivity of T_air[t+1] to each parameter (R_inv enters as UA = R_inv * area)
             # Q_total includes all heat sources, not just envelope + HVAC, so the
             # C_inv sensitivity captures the full thermal load uncertainty.
-            cloud = hourly_forecast[t].get("cloud_cover", 0.5) if t < len(hourly_forecast) else 0.5
+            cloud = hourly_forecast[t].get("cloud_cover") if t < len(hourly_forecast) else None
+            cloud = cloud if cloud is not None else 0.5
             Q_solar = params.get("solar_gain_btu", 0.0) * 0.5 * (1.0 - cloud)
             Q_internal = 1200.0  # typical occupied home
             Q_total_abs = abs(UA * (T_out - T_air) + Q_hvac_abs + Q_solar + Q_internal)
