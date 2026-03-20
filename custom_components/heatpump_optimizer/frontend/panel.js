@@ -113,6 +113,13 @@ function renderAlerts(states) {
   if (override?.state === "on")
     alerts.push({ cls: "alert-info", msg: "Manual override detected \u2014 optimizer paused" });
 
+  const learning = findEntity(states, "learning_progress");
+  if (learning?.state?.startsWith("Day ") && learning.state.includes("Observing")) {
+    alerts.push({ cls: "alert-info", msg: `${learning.state} \u2014 thermostat unchanged` });
+  } else if (learning?.state?.startsWith("Baseline captured")) {
+    alerts.push({ cls: "alert-info", msg: `${learning.state}` });
+  }
+
   if (alerts.length === 0) return "";
   return alerts
     .map((a) => `<div class="alert ${a.cls}">${a.msg}</div>`)

@@ -608,7 +608,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Write safe midpoint so thermostat doesn't hold an extreme temp
         thermo_state = self.thermostat.read_state()
-        if thermo_state.available:
+        if thermo_state.available and self._baseline_ready_for_control:
             comfort = self._active_comfort_range()
             await self.thermostat.async_write_safe_default(*comfort)
 
@@ -909,8 +909,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="forecast_unavailable",
             )
-            comfort = self._active_comfort_range()
-            await self.thermostat.async_write_safe_default(*comfort)
+            if self._baseline_ready_for_control:
+                comfort = self._active_comfort_range()
+                await self.thermostat.async_write_safe_default(*comfort)
             # Don't return — let EKF, baseline, and savings continue below
 
         # ── Tactical: reality check & setpoint execution ────────────
@@ -918,7 +919,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         schedule = self.strategic.schedule
         current_entry = self._get_current_entry(now)
 
-        if schedule and self._active and current_entry and thermo_state.indoor_temp is not None:
+        if schedule and self._active and current_entry and thermo_state.indoor_temp is not None and self._baseline_ready_for_control:
             # Run tactical evaluation
             tactical_result = self.tactical.evaluate(
                 actual_indoor_temp=thermo_state.indoor_temp,
@@ -1093,7 +1094,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         try:
             effective_sp = thermo_state.effective_setpoint
-            if self._is_learning_active() and effective_sp is not None:
+            if not self.baseline_capture.is_ready and effective_sp is not None:
                 self.baseline_capture.record_observation(
                     now=now,
                     setpoint=effective_sp,
@@ -2172,6 +2173,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Check if the model is still calibrating (below confidence threshold)."""
         return self.estimator.confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD
 
+    @property
+    def _baseline_ready_for_control(self) -> bool:
+        """Optimizer may only write setpoints after baseline is captured and model is confident."""
+        return (
+            self.baseline_capture.is_ready
+            and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
+        )
+
     def _update_accuracy_tier(self) -> None:
         """Update the savings accuracy tier based on baseline and model confidence."""
         baseline_conf = self.baseline_capture.confidence
@@ -2764,6 +2773,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "phase": self._phase,
             "active": self._active and not self._paused,
             "override_detected": self.watchdog.is_override_active,
+            "baseline_only_mode": not self._baseline_ready_for_control,
+            "baseline_ready": self.baseline_capture.is_ready,
             "sensor_stale": self._is_sensor_stale(),
             "aux_heat_active": self._is_aux_heat_running(thermo_state),
 

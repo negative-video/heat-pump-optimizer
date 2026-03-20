@@ -1283,27 +1283,26 @@ class LearningProgressSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
 
-        learning = self.coordinator.data.get("learning_active", True)
+        baseline_only = self.coordinator.data.get("baseline_only_mode", True)
         tier = self.coordinator.data.get("savings_accuracy_tier", "learning")
         days = self.coordinator.data.get("baseline_sample_days", 0)
+        baseline_ready = self.coordinator.data.get("baseline_ready", False)
         confidence = self.coordinator.data.get("kalman_confidence")
         conf_pct = round(confidence * 100) if confidence is not None else 0
 
-        if not learning and tier == "calibrated":
+        if not baseline_only and tier == "calibrated":
             return "Fully calibrated"
-        if not learning:
-            return f"Model ready ({conf_pct}% confidence)"
-        if days < 7:
-            return f"Day {days} of ~14: Capturing baseline"
-        if days < 14:
-            return f"Day {days}: Baseline ready, model learning ({conf_pct}%)"
-        return f"Day {days}: Still learning ({conf_pct}% confidence)"
+        if not baseline_only:
+            return f"Optimizer active ({conf_pct}% confidence)"
+        if not baseline_ready:
+            return f"Day {days} of 7: Observing your schedule"
+        return f"Baseline captured — model training ({conf_pct}%)"
 
     @property
     def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
             return {}
-        learning = self.coordinator.data.get("learning_active", True)
+        baseline_only = self.coordinator.data.get("baseline_only_mode", True)
         attrs = {
             "sample_days": self.coordinator.data.get("baseline_sample_days"),
             "model_confidence": self.coordinator.data.get("kalman_confidence"),
@@ -1316,11 +1315,11 @@ class LearningProgressSensor(OptimizerBaseSensor):
                 "history_bootstrap_result"
             ),
         }
-        if learning:
+        if baseline_only:
             attrs["comfort_band_note"] = (
-                "During learning, setpoints use the inner 60% of your comfort "
-                "range to stay conservative while the model calibrates. Full "
-                "range unlocks after learning completes (~2-3 weeks)."
+                "The optimizer is passively observing your schedule to establish "
+                "a baseline. It will not change your thermostat until baseline "
+                "capture is complete (7 days) and model confidence is sufficient."
             )
         return attrs
 
