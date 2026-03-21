@@ -1730,6 +1730,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Reset profiler, model tracker, solar adjuster
         self.profiler = PerformanceProfiler()
+        if hasattr(self.model, "_raw"):
+            self.profiler.seed_from_beestat(self.model._raw)
         self.model_tracker = ModelTracker()
         self.solar_adjuster = SolarAdjuster(latitude=self._get_latitude())
 
