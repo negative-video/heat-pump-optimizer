@@ -115,7 +115,7 @@ All sensors are also available as standard HA entities for dashboards and automa
 | Mode | Description |
 |------|-------------|
 | **Learn automatically** | Starts with conservative defaults and learns from thermostat readings (weeks to months depending on weather variety) |
-| **Import Beestat profile** | Uses measured temperature deltas from a [Beestat](https://beestat.io/) export; Kalman filter continues refining (faster start, still needs 1–2 weeks) |
+| **Import Beestat profile** | Uses measured temperature deltas from a [Beestat](https://beestat.io/) export; seeds both the Kalman filter (R/C/Q priors) and the performance profiler (°F/hr lookup tables across all modes and outdoor temps). Dramatically reduces learning time vs. starting from scratch. |
 | **Restore exported model** | Loads a previously exported model via the `export_model` service (immediate) |
 
 ### Optional Sensors
@@ -380,6 +380,8 @@ The profiler builds lookup tables of observed HVAC performance (°F/hr change vs
 | Passive Drift | 20–90°F | Natural temperature decay rate without HVAC |
 
 Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across modes with at least 30 observations — modes with fewer observations are excluded from the calculation and hidden from the card until they accumulate enough data. This prevents seasonal modes (e.g., aux heat in spring) from permanently dragging confidence to 0%.
+
+If a Beestat profile was imported, the profiler is seeded with its temperature deltas on first startup (or after a model reset). This gives every mode immediate coverage across its expected outdoor temperature range, so confidence starts high and live observations refine the values over time rather than building from zero.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
@@ -945,9 +947,12 @@ A temporary drop is normal and expected. The filter will re-converge as it accum
 
 ### I imported a Beestat profile — why do I still need to wait 7 days?
 
-Beestat gives the thermal model a head start on *building physics* (R-value, thermal mass, capacity). That's what the Kalman filter estimates, and importing a Beestat profile reduces the learning period from weeks to roughly 3–5 days.
+A Beestat import gives the model a head start in two ways:
 
-Baseline capture is a separate process that records *your routine* — what setpoints you normally run, what times of day the HVAC runs, how your schedule varies by day of week. There's no equivalent shortcut for that. The 7-day minimum ensures the baseline covers a full week (including weekend patterns) before savings comparisons begin. On day 6 of baseline capture, the integration genuinely doesn't know what you normally do on Saturdays yet.
+1. **Thermal model (EKF)** — Seeds R-value, thermal mass, and HVAC capacity priors so the Kalman filter starts close to the right answer instead of searching blindly. Reduces convergence from weeks to roughly 3–5 days.
+2. **Performance profiler** — Seeds the °F/hr lookup tables across all modes (cooling, heating, aux heat, passive drift) and outdoor temperature bins. Without Beestat, the profiler needs weeks to months of varied weather to cover all modes and temperature ranges. With Beestat, it starts with full coverage and live observations refine the values over time.
+
+Baseline capture is a separate process that records *your routine* — what setpoints you normally run, what times of day the HVAC runs, how your schedule varies by day of week. There's no equivalent shortcut for that. The 7-day minimum ensures the baseline covers a full week (including weekend patterns) before savings comparisons begin.
 
 ---
 
