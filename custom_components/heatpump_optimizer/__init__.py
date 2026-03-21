@@ -80,6 +80,7 @@ from .const import (
     INIT_MODE_BEESTAT,
     INIT_MODE_LEARNING,
     PLATFORMS,
+    VERSION,
 )
 from .coordinator import HeatPumpOptimizerCoordinator
 from .services import async_setup_services, async_unload_services
@@ -284,7 +285,7 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
         config={
             "_panel_custom": {
                 "name": "heatpump-optimizer-panel",
-                "module_url": f"/api/{DOMAIN}/frontend/panel.js",
+                "module_url": f"/api/{DOMAIN}/frontend/panel.js?v={VERSION}",
             }
         },
     )
