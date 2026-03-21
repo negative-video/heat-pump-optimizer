@@ -349,10 +349,12 @@ class PerformanceProfiler:
         if mode is not None:
             return self._mode_confidence(mode)
 
-        # Overall: min across modes that have any data
+        # Overall: min across modes with enough data to be meaningful
+        MIN_OBS_FOR_CONFIDENCE = 30
         confidences = []
         for m in MODES:
-            if self._bins[m]:
+            total = sum(acc.count for acc in self._bins[m].values())
+            if total >= MIN_OBS_FOR_CONFIDENCE:
                 confidences.append(self._mode_confidence(m))
 
         if not confidences:

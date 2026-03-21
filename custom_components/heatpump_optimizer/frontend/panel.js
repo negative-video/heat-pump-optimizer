@@ -1479,14 +1479,16 @@ function renderLearningProgressCards(states) {
   // ── Performance Profiler card ──
   const obsCount = profilerStatus?.attributes?.observations != null ? Number(profilerStatus.attributes.observations) : 0;
   const modeDetail = profilerStatus?.attributes?.mode_detail || {};
-  const MODE_LABELS = {"resist": "Passive Drift", "heat_1": "Heat Pump", "cool_1": "Cooling", "auxiliary_heat_1": "Aux Heat"};
+  const MODE_LABELS = {"resist": "Passive Drift", "heat_1": "Heating", "cool_1": "Cooling", "auxiliary_heat_1": "Aux Heat"};
   const ALL_MODES = ["resist", "heat_1", "cool_1", "auxiliary_heat_1"];
-  const modeConfs = Object.values(modeDetail).map(d => d.confidence || 0);
-  const bestPct = modeConfs.length ? Math.max(...modeConfs) : 0;
+  const MIN_OBS_DISPLAY = 30;
+  const significantModes = ALL_MODES.filter(m => modeDetail[m] && modeDetail[m].observations >= MIN_OBS_DISPLAY);
+  const significantConfs = significantModes.map(m => modeDetail[m].confidence || 0);
+  const bestPct = significantConfs.length ? Math.max(...significantConfs) : 0;
   const modeRows = ALL_MODES.map(mode => {
     const d = modeDetail[mode];
     const label = MODE_LABELS[mode];
-    if (!d) return `<div class="lp-param"><span class="lp-param-label">${label}</span><span class="lp-param-val lp-dim">No data yet</span></div>`;
+    if (!d || d.observations < MIN_OBS_DISPLAY) return "";
     const pct = d.confidence || 0;
     const obs = d.observations || 0;
     return `<div class="lp-param"><span class="lp-param-label">${label}</span><span class="lp-param-val">${pct}% \u00b7 ${obs} obs</span></div>`;
@@ -1495,7 +1497,7 @@ function renderLearningProgressCards(states) {
     <div class="card lp-card">
       <div class="lp-card-title">Performance Data</div>
       <div class="lp-bar-track"><div class="lp-bar-fill lp-bar-profiler" style="width:${bestPct}%"></div></div>
-      <div class="lp-conf-pct">${bestPct.toFixed(0)}% confident (best mode)</div>
+      <div class="lp-conf-pct">${bestPct.toFixed(0)}% confident</div>
       <div class="lp-params">${modeRows}</div>
       <div class="lp-obs-note">${obsCount.toLocaleString()} total \u00b7 +1 every 5 min</div>
     </div>`;

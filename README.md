@@ -370,16 +370,16 @@ Each sensor includes a `model_confidence` attribute and a `reliable` flag (false
 
 #### Performance Profiler
 
-The profiler builds lookup tables of observed HVAC performance (°F/hr change vs outdoor temperature) across four modes: cooling, heat pump heating, auxiliary heat, and passive drift (no HVAC). It needs observations spread across each mode's expected outdoor temperature range to become confident:
+The profiler builds lookup tables of observed HVAC performance (°F/hr change vs outdoor temperature) across four modes: cooling, heating, auxiliary heat, and passive drift (no HVAC). It needs observations spread across each mode's expected outdoor temperature range to become confident:
 
 | Mode | Expected outdoor range | What it measures |
 |------|----------------------|------------------|
 | Cooling | 65–100°F | How fast the system cools at each outdoor temp |
-| Heat Pump | 0–55°F | How fast the heat pump heats at each outdoor temp |
+| Heating | 0–55°F | How fast the system heats at each outdoor temp |
 | Aux Heat | 0–35°F | Auxiliary/emergency heat performance |
 | Passive Drift | 20–90°F | Natural temperature decay rate without HVAC |
 
-Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across all modes that have data — so a warm-weather installation will show 0% until it experiences cold enough weather to populate the heating bins. The Performance Data card shows per-mode breakdowns so you can see exactly which modes have data and which are waiting for different weather.
+Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across modes with at least 30 observations — modes with fewer observations are excluded from the calculation and hidden from the card until they accumulate enough data. This prevents seasonal modes (e.g., aux heat in spring) from permanently dragging confidence to 0%.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
