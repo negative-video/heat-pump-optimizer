@@ -1477,7 +1477,6 @@ function renderLearningProgressCards(states) {
     </div>`;
 
   // ── Performance Profiler card ──
-  const obsCount = profilerStatus?.attributes?.observations != null ? Number(profilerStatus.attributes.observations) : 0;
   const modeDetail = profilerStatus?.attributes?.mode_detail || {};
   const MODE_LABELS = {"resist": "Passive Drift", "heat_1": "Heating", "cool_1": "Cooling", "auxiliary_heat_1": "Aux Heat"};
   const ALL_MODES = ["resist", "heat_1", "cool_1", "auxiliary_heat_1"];
@@ -1499,7 +1498,7 @@ function renderLearningProgressCards(states) {
       <div class="lp-bar-track"><div class="lp-bar-fill lp-bar-profiler" style="width:${bestPct}%"></div></div>
       <div class="lp-conf-pct">${bestPct.toFixed(0)}% confident</div>
       <div class="lp-params">${modeRows}</div>
-      <div class="lp-obs-note">${obsCount.toLocaleString()} total \u00b7 +1 every 5 min</div>
+      <div class="lp-obs-note">+1 observation every 5 min</div>
     </div>`;
 
   return `<div class="lp-grid">${modelCard}${baselineCard}${profilerCard}</div>`;
