@@ -1011,12 +1011,24 @@ function bucketHistory(series, startMs, numBuckets, bucketMs) {
 
 /** Compute HVAC state per bucket from retro history: 'aux', 'heat', 'cool', or null. */
 function computeHvacBuckets(retro, startMs, numBuckets, bucketMs) {
+  const ptTs = pt => { const r = pt.last_changed; return typeof r === "number" ? r * 1000 : new Date(r).getTime(); };
+
+  // Build hvac_action lookup: find the most recent action at any timestamp
+  const actionTimeline = (retro.hvacAction || []).map(pt => ({ ts: ptTs(pt), action: pt.state })).sort((a, b) => a.ts - b.ts);
+  const getAction = (ts) => {
+    let action = "idle";
+    for (const entry of actionTimeline) {
+      if (entry.ts > ts) break;
+      action = entry.action;
+    }
+    return action;
+  };
+
   return Array.from({ length: numBuckets }, (_, i) => {
     const bStart = startMs + i * bucketMs;
     const bEnd = bStart + bucketMs;
 
     // Check if HVAC was on (avg power > 50W)
-    const ptTs = pt => { const r = pt.last_changed; return typeof r === "number" ? r * 1000 : new Date(r).getTime(); };
     const powerReadings = retro.power.filter(pt => {
       const ts = ptTs(pt);
       return ts >= bStart && ts < bEnd && !isNaN(Number(pt.state));
@@ -1037,7 +1049,17 @@ function computeHvacBuckets(retro, startMs, numBuckets, bucketMs) {
       }
     }
 
-    // Heat vs cool: compare avg indoor to avg outdoor
+    // Use actual hvac_action from climate entity if available
+    if (actionTimeline.length) {
+      const midpoint = bStart + bucketMs / 2;
+      const action = getAction(midpoint);
+      if (action === "cooling") return "cool";
+      if (action === "heating") return "heat";
+      // "idle", "fan", "off" — HVAC not actively heating/cooling
+      return null;
+    }
+
+    // Fallback: compare avg indoor to avg outdoor (legacy heuristic)
     const inReadings = retro.indoor.filter(pt => {
       const ts = ptTs(pt);
       return ts >= bStart && ts < bEnd && !isNaN(Number(pt.state));
@@ -1648,17 +1670,35 @@ class HeatPumpOptimizerPanel extends HTMLElement {
       const predictedE = findEntity(s, "predicted_indoor_temp");
       const powerE = findEntity(s, "net_hvac_power");
       const auxE = findBinary(s, "aux_heat_active");
+      // Find the climate entity for hvac_action history
+      const climateE = Object.values(s).find(e => e.entity_id.startsWith("climate.") && e.attributes?.hvac_action != null);
       const ids = [indoorE, outdoorE, predictedE, powerE, auxE].filter(Boolean).map(e => e.entity_id).join(",");
       if (!ids) return;
       const start = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-      const data = await this._hass.callApi(
-        "GET",
-        `history/period/${start}?filter_entity_id=${ids}&minimal_response&no_attributes`
-      );
+      const fetches = [
+        this._hass.callApi("GET", `history/period/${start}?filter_entity_id=${ids}&minimal_response&no_attributes`),
+      ];
+      // Fetch climate entity separately (needs attributes for hvac_action)
+      if (climateE) {
+        fetches.push(this._hass.callApi("GET", `history/period/${start}?filter_entity_id=${climateE.entity_id}&significant_changes_only`));
+      }
+      const [data, climateData] = await Promise.all(fetches);
       if (!Array.isArray(data)) return;
       const byId = {};
       for (const series of data) {
         if (series.length > 0) byId[series[0].entity_id] = series;
+      }
+      // Extract hvac_action timeline from climate entity history
+      let hvacActions = [];
+      if (Array.isArray(climateData)) {
+        for (const series of climateData) {
+          if (series.length > 0 && series[0].entity_id === climateE?.entity_id) {
+            hvacActions = series.map(pt => ({
+              last_changed: pt.last_changed,
+              state: pt.attributes?.hvac_action || "idle",
+            }));
+          }
+        }
       }
       this._retro = {
         indoor:    byId[indoorE?.entity_id]    || [],
@@ -1666,6 +1706,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         predicted: byId[predictedE?.entity_id] || [],
         power:     byId[powerE?.entity_id]     || [],
         aux:       byId[auxE?.entity_id]       || [],
+        hvacAction: hvacActions,
       };
       this._retroFetchedAt = now;
       this._render();
