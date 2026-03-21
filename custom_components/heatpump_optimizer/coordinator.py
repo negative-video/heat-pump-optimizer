@@ -588,6 +588,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 "_history_bootstrap_completed", False
             )
 
+        # Seed profiler from Beestat profile if available and profiler is empty
+        if (
+            self.profiler.total_observations == 0
+            and not self.profiler._seeded
+            and hasattr(self.model, "_raw")
+        ):
+            self.profiler.seed_from_beestat(self.model._raw)
+
         # NOTE: History bootstrap moved to async_at_started callback
         # (called from __init__.py) where the recorder is guaranteed ready.
 
