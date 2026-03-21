@@ -804,7 +804,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Show the options menu."""
         if not self._options:
-            self._options = dict(self.config_entry.options)
+            # Merge .data (from initial setup) with .options (from previous
+            # option edits) so that onboarding values carry over.  Options
+            # take precedence when the same key exists in both.
+            self._options = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_menu(
             step_id="init",
             menu_options=["mode", "comfort", "sleep_schedule", "presence", "energy", "equipment", "advanced"],
