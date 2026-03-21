@@ -1050,12 +1050,23 @@ function computeHvacBuckets(retro, startMs, numBuckets, bucketMs) {
     }
 
     // Use actual hvac_action from climate entity if available
+    // Check all action transitions within the bucket for any active period
     if (actionTimeline.length) {
-      const midpoint = bStart + bucketMs / 2;
-      const action = getAction(midpoint);
-      if (action === "cooling") return "cool";
-      if (action === "heating") return "heat";
-      // "idle", "fan", "off" — HVAC not actively heating/cooling
+      let hadCooling = false, hadHeating = false;
+      // Check the action at bucket start (carried from before)
+      const startAction = getAction(bStart);
+      if (startAction === "cooling") hadCooling = true;
+      if (startAction === "heating") hadHeating = true;
+      // Check any transitions within the bucket
+      for (const entry of actionTimeline) {
+        if (entry.ts >= bEnd) break;
+        if (entry.ts >= bStart) {
+          if (entry.action === "cooling") hadCooling = true;
+          if (entry.action === "heating") hadHeating = true;
+        }
+      }
+      if (hadCooling) return "cool";
+      if (hadHeating) return "heat";
       return null;
     }
 
