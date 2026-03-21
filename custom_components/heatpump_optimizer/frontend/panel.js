@@ -1444,20 +1444,27 @@ function renderLearningProgressCards(states) {
     </div>`;
 
   // ── Performance Profiler card ──
-  const profPct = profilerStatus?.attributes?.confidence != null ? Math.min(100, Number(profilerStatus.attributes.confidence)) : 0;
   const obsCount = profilerStatus?.attributes?.observations != null ? Number(profilerStatus.attributes.observations) : 0;
+  const modeDetail = profilerStatus?.attributes?.mode_detail || {};
+  const MODE_LABELS = {"resist": "Passive Drift", "heat_1": "Heat Pump", "cool_1": "Cooling", "auxiliary_heat_1": "Aux Heat"};
+  const ALL_MODES = ["resist", "heat_1", "cool_1", "auxiliary_heat_1"];
+  const modeConfs = Object.values(modeDetail).map(d => d.confidence || 0);
+  const bestPct = modeConfs.length ? Math.max(...modeConfs) : 0;
+  const modeRows = ALL_MODES.map(mode => {
+    const d = modeDetail[mode];
+    const label = MODE_LABELS[mode];
+    if (!d) return `<div class="lp-param"><span class="lp-param-label">${label}</span><span class="lp-param-val lp-dim">No data yet</span></div>`;
+    const pct = d.confidence || 0;
+    const obs = d.observations || 0;
+    return `<div class="lp-param"><span class="lp-param-label">${label}</span><span class="lp-param-val">${pct}% \u00b7 ${obs} obs</span></div>`;
+  }).join("");
   const profilerCard = `
     <div class="card lp-card">
       <div class="lp-card-title">Performance Data</div>
-      <div class="lp-bar-track"><div class="lp-bar-fill lp-bar-profiler" style="width:${profPct}%"></div></div>
-      <div class="lp-conf-pct">${profPct.toFixed(0)}% confident</div>
-      <div class="lp-params">
-        <div class="lp-param">
-          <span class="lp-param-label">Observations</span>
-          <span class="lp-param-val">${obsCount.toLocaleString()}</span>
-        </div>
-      </div>
-      <div class="lp-obs-note">+1 every 5 minutes</div>
+      <div class="lp-bar-track"><div class="lp-bar-fill lp-bar-profiler" style="width:${bestPct}%"></div></div>
+      <div class="lp-conf-pct">${bestPct.toFixed(0)}% confident (best mode)</div>
+      <div class="lp-params">${modeRows}</div>
+      <div class="lp-obs-note">${obsCount.toLocaleString()} total \u00b7 +1 every 5 min</div>
     </div>`;
 
   return `<div class="lp-grid">${modelCard}${baselineCard}${profilerCard}</div>`;
@@ -2787,6 +2794,7 @@ const PANEL_CSS = `
     margin-top: 4px;
     font-style: italic;
   }
+  .lp-dim { opacity: 0.45; font-style: italic; }
   .day-dots {
     display: flex;
     gap: 4px;

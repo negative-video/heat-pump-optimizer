@@ -91,8 +91,8 @@ A **Heat Pump** tab appears in the sidebar after installation. Its layout adapts
 
 While the system is building its baseline, the panel shifts focus from forecasting to observing:
 
-- **Retrospective chart** — 48h of actual indoor and outdoor temperatures with HVAC on/off shading and a dashed overlay of the model's predicted temperature ("what we think happened"). Useful for spotting drafty conditions and verifying the model is tracking reality.
-- **Three progress cards** — Thermal Model (confidence %, R-value with climate-relative quality label, thermal mass, capacity), Baseline Schedule (day-of-week dot grid showing which days have been captured), and Performance Profiler (observation count and confidence).
+- **Retrospective chart** — 48h of actual indoor and outdoor temperatures with HVAC on/off shading. The "Model" trace shows the EKF's measurement-corrected estimate of indoor temperature — every 5 minutes the Kalman filter predicts where the temperature should be, compares that prediction to the actual thermostat reading, and corrects its estimate using the Kalman gain. The Model dots should track actual readings closely (typically within 0.5°F); persistent divergence indicates the filter hasn't converged yet or conditions are outside its experience. The separate "Forecast" trace (hollow circles, right of the "Now" line) shows forward-looking simulation using the currently learned parameters — these have no future measurements to correct against, so they may drift.
+- **Three progress cards** — Thermal Model (confidence %, R-value with climate-relative quality label, thermal mass, capacity), Baseline Schedule (day-of-week dot grid showing which days have been captured), and Performance Data (per-mode observation counts and confidence).
 - **Milestone checklist** — Step-by-step progress from "sensors connected" through "full optimization enabled." Shows which step is currently in progress.
 - **Today's Snapshot** — Objective energy facts for the day (estimated kWh, current draw, outdoor temp range, aux heat if any). No savings comparisons until the baseline completes.
 
@@ -291,7 +291,7 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Predicted Temperature | Model's prediction of current indoor temperature | °F |
+| Predicted Temperature | EKF posterior estimate of indoor temperature (measurement-corrected each cycle) | °F |
 | Prediction Error | Difference between actual and predicted temperature | °F |
 | Model Accuracy | Rolling mean absolute error of predictions | °F |
 | Tactical Correction | Real-time setpoint correction from Layer 2 | °F |
@@ -370,9 +370,20 @@ Each sensor includes a `model_confidence` attribute and a `reliable` flag (false
 
 #### Performance Profiler
 
+The profiler builds lookup tables of observed HVAC performance (°F/hr change vs outdoor temperature) across four modes: cooling, heat pump heating, auxiliary heat, and passive drift (no HVAC). It needs observations spread across each mode's expected outdoor temperature range to become confident:
+
+| Mode | Expected outdoor range | What it measures |
+|------|----------------------|------------------|
+| Cooling | 65–100°F | How fast the system cools at each outdoor temp |
+| Heat Pump | 0–55°F | How fast the heat pump heats at each outdoor temp |
+| Aux Heat | 0–35°F | Auxiliary/emergency heat performance |
+| Passive Drift | 20–90°F | Natural temperature decay rate without HVAC |
+
+Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across all modes that have data — so a warm-weather installation will show 0% until it experiences cold enough weather to populate the heating bins. The Performance Data card shows per-mode breakdowns so you can see exactly which modes have data and which are waiting for different weather.
+
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Profiler Confidence | Performance profiler confidence level | % |
+| Profiler Confidence | Performance profiler confidence level (min across modes) | % |
 | Profiler Active | Whether profiler has replaced default model | — |
 | Profiler Observations | Total profiler observations accumulated | — |
 

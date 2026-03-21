@@ -1267,6 +1267,10 @@ class ProfilerStatusSensor(OptimizerBaseSensor):
         obs = self.coordinator.data.get("profiler_observations")
         if obs is not None:
             attrs["observations"] = obs
+        # Per-mode breakdown for panel diagnostics
+        mode_detail = self.coordinator.data.get("profiler_mode_detail")
+        if mode_detail:
+            attrs["mode_detail"] = mode_detail
         # Override intelligence for panel diagnostics
         attrs["override_count_30d"] = self.coordinator.data.get(
             "override_count_30d", 0

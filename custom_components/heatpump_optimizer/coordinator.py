@@ -2901,7 +2901,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 if self.tactical.error_history else None
             ),
             "predicted_indoor_temp": (
-                self.tactical._find_predicted_temp(schedule, now) if schedule else None
+                round(self.estimator.T_air, 2)
+                if self.estimator._n_obs > 0
+                else None
             ),
             "model_accuracy_mae": tactical_mae,
             "model_bias": tactical_bias,
@@ -3076,6 +3078,19 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "profiler_active": self.profiler.confidence() >= 0.7,
             "profiler_observations": self.profiler.total_observations,
             "profiler_status": self._last_profiler_status,
+            "profiler_mode_detail": {
+                mode: {
+                    "confidence": round(
+                        self.profiler.confidence(mode) * 100, 0
+                    ),
+                    "observations": sum(
+                        acc.count
+                        for acc in self.profiler._bins[mode].values()
+                    ),
+                }
+                for mode in ("cool_1", "heat_1", "auxiliary_heat_1", "resist")
+                if self.profiler._bins[mode]
+            },
 
             # Calendar occupancy / pre-conditioning
             "occupancy_forecast_source": (

@@ -281,22 +281,6 @@ class TacticalController:
             (t, e) for t, e in self._error_history if t > cutoff
         ]
 
-    def _find_predicted_temp(
-        self, schedule: OptimizedSchedule | None, now: datetime
-    ) -> float | None:
-        """Find the simulation's predicted indoor temp for the current time."""
-        if not schedule or not schedule.simulation:
-            return None
-
-        closest = min(
-            schedule.simulation,
-            key=lambda pt: abs((pt.time - now).total_seconds()),
-        )
-        # Only valid if within 10 minutes
-        if abs((closest.time - now).total_seconds()) > 600:
-            return None
-        return closest.indoor_temp
-
     @property
     def state(self) -> TacticalState:
         return self._state
