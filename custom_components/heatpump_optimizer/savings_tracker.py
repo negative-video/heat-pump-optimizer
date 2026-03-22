@@ -87,6 +87,13 @@ class SavingsTracker:
     def set_accuracy_tier(self, tier: str) -> None:
         """Update the current accuracy tier."""
         if tier in (TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED):
+            # Reset cumulative totals when upgrading from pre-baseline tiers
+            # to prevent stale phantom data from polluting real savings.
+            if (
+                self._accuracy_tier in (TIER_LEARNING, TIER_PROJECTED)
+                and tier not in (TIER_LEARNING, TIER_PROJECTED)
+            ):
+                self._reset_cumulative()
             self._accuracy_tier = tier
 
     @property
@@ -339,21 +346,24 @@ class SavingsTracker:
 
         self._hourly_records.append(record)
 
-        # Update cumulative totals
-        self._cumulative_kwh_saved += saved_kwh
-        self._cumulative_kwh_baseline += baseline_kwh
-        self._cumulative_kwh_actual += actual_kwh
-        self._cumulative_kwh_worst_case += worst_case_kwh
-        self._cumulative_runtime_savings_kwh += runtime_savings_kwh
-        self._cumulative_cop_savings_kwh += cop_savings_kwh
-        if saved_cost is not None:
-            self._cumulative_cost_saved += saved_cost
-        if saved_co2 is not None:
-            self._cumulative_co2_saved_grams += saved_co2
-        if rate_arbitrage is not None:
-            self._cumulative_rate_arbitrage_savings += rate_arbitrage
-        self._cumulative_aux_heat_kwh += aux_heat_kwh
-        self._cumulative_avoided_aux_kwh += avoided_aux_kwh
+        # Only accumulate cumulative totals when baseline is ready (ESTIMATED+).
+        # At LEARNING/PROJECTED the ratio fallback or stale data would produce
+        # phantom savings before the optimizer is actually controlling anything.
+        if self._accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED):
+            self._cumulative_kwh_saved += saved_kwh
+            self._cumulative_kwh_baseline += baseline_kwh
+            self._cumulative_kwh_actual += actual_kwh
+            self._cumulative_kwh_worst_case += worst_case_kwh
+            self._cumulative_runtime_savings_kwh += runtime_savings_kwh
+            self._cumulative_cop_savings_kwh += cop_savings_kwh
+            if saved_cost is not None:
+                self._cumulative_cost_saved += saved_cost
+            if saved_co2 is not None:
+                self._cumulative_co2_saved_grams += saved_co2
+            if rate_arbitrage is not None:
+                self._cumulative_rate_arbitrage_savings += rate_arbitrage
+            self._cumulative_aux_heat_kwh += aux_heat_kwh
+            self._cumulative_avoided_aux_kwh += avoided_aux_kwh
 
         # Comfort violation tracking
         if baseline_indoor_temp is not None and self._counterfactual is not None:
@@ -399,6 +409,22 @@ class SavingsTracker:
             "aux_heat_kwh": self._cumulative_aux_heat_kwh,
             "avoided_aux_kwh": self._cumulative_avoided_aux_kwh,
         }
+
+    def _reset_cumulative(self) -> None:
+        """Zero all cumulative totals (used on tier upgrade from pre-baseline)."""
+        self._cumulative_kwh_saved = 0.0
+        self._cumulative_kwh_baseline = 0.0
+        self._cumulative_kwh_actual = 0.0
+        self._cumulative_kwh_worst_case = 0.0
+        self._cumulative_cost_saved = 0.0
+        self._cumulative_co2_saved_grams = 0.0
+        self._cumulative_runtime_savings_kwh = 0.0
+        self._cumulative_cop_savings_kwh = 0.0
+        self._cumulative_rate_arbitrage_savings = 0.0
+        self._cumulative_comfort_violations = 0
+        self._cumulative_aux_heat_kwh = 0.0
+        self._cumulative_avoided_aux_kwh = 0.0
+        _LOGGER.info("Cumulative savings reset on tier upgrade")
 
     # ── Persistence ─────────────────────────────────────────────────
 

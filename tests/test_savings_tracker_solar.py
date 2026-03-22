@@ -406,6 +406,7 @@ class TestSavingsTrackerHourBoundary:
     def test_cumulative_totals_update(self):
         """Cumulative totals should accumulate across multiple hours."""
         tracker = SavingsTracker()
+        tracker.set_accuracy_tier("estimated")  # cumulative only accumulates at ESTIMATED+
         tracker.set_baseline_ratio(baseline_runtime=90, optimized_runtime=60)
 
         _record_full_hour(tracker, base_hour=10, power_watts=3000.0)

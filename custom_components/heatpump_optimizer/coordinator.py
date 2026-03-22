@@ -1429,11 +1429,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 schedule.optimized_runtime_minutes,
                 schedule.savings_pct,
             )
-            # Update savings tracker with new baseline ratio
-            self.savings_tracker.set_baseline_ratio(
-                schedule.baseline_runtime_minutes,
-                schedule.optimized_runtime_minutes,
-            )
+            # Update savings tracker with new baseline ratio — only when
+            # the optimizer is actually controlling the thermostat, otherwise
+            # the ratio produces phantom savings during baseline capture.
+            if self._baseline_ready_for_control:
+                self.savings_tracker.set_baseline_ratio(
+                    schedule.baseline_runtime_minutes,
+                    schedule.optimized_runtime_minutes,
+                )
             self._fire_event(EVENT_OPTIMIZATION_COMPLETE, {
                 "mode": self.strategic.mode,
                 "savings_pct": round(schedule.savings_pct, 1),
@@ -3062,15 +3065,21 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "worst_case_kwh_today": today_savings.total_worst_case_kwh,
             "savings_kwh_cumulative": (
                 cumulative["kwh_saved"]
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+                if self.savings_tracker.accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED)
+                else 0.0 if self.savings_tracker.accuracy_tier == TIER_PROJECTED
+                else None
             ),
             "savings_cost_cumulative": (
                 cumulative["cost_saved"]
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+                if self.savings_tracker.accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED)
+                else 0.0 if self.savings_tracker.accuracy_tier == TIER_PROJECTED
+                else None
             ),
             "savings_co2_cumulative_grams": (
                 cumulative["co2_saved_grams"]
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
+                if self.savings_tracker.accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED)
+                else 0.0 if self.savings_tracker.accuracy_tier == TIER_PROJECTED
+                else None
             ),
 
             # Counterfactual digital twin — decomposed savings
