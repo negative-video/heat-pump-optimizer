@@ -20,6 +20,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.util import dt as dt_util
 import homeassistant.helpers.issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -1110,7 +1111,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             effective_sp = thermo_state.effective_setpoint
             if not self.baseline_capture.is_ready and effective_sp is not None:
                 self.baseline_capture.record_observation(
-                    now=now,
+                    now=dt_util.as_local(now),
                     setpoint=effective_sp,
                     mode=self.strategic.mode or "off",
                 )

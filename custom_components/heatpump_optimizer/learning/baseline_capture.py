@@ -72,7 +72,7 @@ class BaselineCapture:
         """Record a thermostat observation during the learning period.
 
         Args:
-            now: Current time (UTC).
+            now: Current time (local timezone).
             setpoint: Current thermostat target temperature (°F).
             mode: Current HVAC mode ("cool", "heat", "off").
         """
