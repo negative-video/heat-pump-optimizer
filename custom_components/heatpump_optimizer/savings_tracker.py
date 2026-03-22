@@ -28,6 +28,7 @@ MAX_HOURLY_RECORDS = 7 * 24
 
 # Savings accuracy tiers
 TIER_LEARNING = "learning"
+TIER_PROJECTED = "projected"
 TIER_ESTIMATED = "estimated"
 TIER_SIMULATED = "simulated"
 TIER_CALIBRATED = "calibrated"
@@ -85,7 +86,7 @@ class SavingsTracker:
 
     def set_accuracy_tier(self, tier: str) -> None:
         """Update the current accuracy tier."""
-        if tier in (TIER_LEARNING, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED):
+        if tier in (TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED):
             self._accuracy_tier = tier
 
     @property

@@ -74,7 +74,8 @@ const PHASE_MAP = {
 /** Accuracy tier → dot count + label */
 const TIER_MAP = {
   learning: { dots: 0, label: "Learning" },
-  estimated: { dots: 1, label: "Estimated" },
+  projected: { dots: 1, label: "Projected" },
+  estimated: { dots: 2, label: "Estimated" },
   simulated: { dots: 3, label: "Simulated" },
   calibrated: { dots: 4, label: "Calibrated" },
 };
@@ -330,7 +331,7 @@ function renderDecisionCard(states, hass) {
 }
 
 /** [E] Savings Card — today + decomposition + all-time. */
-function renderSavingsCard(states, hass) {
+function renderSavingsCard(states, hass, isProjected = false) {
   // Hide during learning — zeros are misleading
   const tier = findEntity(states, "savings_accuracy_tier");
   if ((tier?.state || "learning") === "learning") return "";
@@ -361,6 +362,11 @@ function renderSavingsCard(states, hass) {
   const dots = Array.from({ length: 4 }, (_, i) =>
     `<span class="tier-dot${i < tierInfo.dots ? " filled" : ""}"></span>`
   ).join("");
+
+  // Projected disclaimer banner
+  const projectedBanner = isProjected
+    ? `<div class="projected-banner">Projected &mdash; based on early model estimates. Accuracy improves as baseline observation completes.</div>`
+    : "";
 
   // Tier accuracy note for sub-calibrated tiers
   const tierNote = tierVal !== "calibrated"
@@ -420,6 +426,7 @@ function renderSavingsCard(states, hass) {
         <h2>Savings Today</h2>
         <span class="tier-indicator">${dots} <span class="tier-label-text">${tierInfo.label}</span></span>
       </div>
+      ${projectedBanner}
       ${tierNote}
       <div class="savings-grid">
         ${hasValue(savingsCost) ? `<div class="savings-item"><span class="savings-value">$${fmt(savingsCost, 2)}</span><span class="savings-unit">saved</span></div>` : ""}
@@ -1529,7 +1536,7 @@ function renderLearningMilestones(states) {
       sub: confPct > 0 ? `${confPct.toFixed(0)}% \u2192 50% needed` : null,
       current: confPct > 0 && confPct < 50,
     },
-    { done: tierVal !== "learning", label: "Savings comparison & optimization active", sub: tierVal !== "learning" ? tierVal : null },
+    { done: tierVal !== "learning" && tierVal !== "projected", label: "Savings comparison & optimization active", sub: tierVal === "projected" ? "projected (accumulating baseline)" : (tierVal !== "learning" ? tierVal : null), current: tierVal === "projected" },
   ];
 
   const items = milestones.map(m => {
@@ -1658,16 +1665,36 @@ class HeatPumpOptimizerPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = PANEL_CSS;
+    this.shadowRoot.appendChild(style);
+    this._container = document.createElement("div");
+    this.shadowRoot.appendChild(this._container);
     this._hass = null;
     this._retro = null;          // cached 48h history for retrospective chart
     this._retroFetchedAt = 0;    // timestamp of last successful fetch
     this._retroFetching = false;
+    this._renderScheduled = false;
+    this._rafId = null;
+  }
+
+  disconnectedCallback() {
+    if (this._rafId) {
+      cancelAnimationFrame(this._rafId);
+    }
   }
 
   set hass(hass) {
     this._hass = hass;
     this._maybeRefreshHistory();
-    this._render();
+    if (!this._renderScheduled) {
+      this._renderScheduled = true;
+      this._rafId = requestAnimationFrame(() => {
+        this._renderScheduled = false;
+        this._rafId = null;
+        this._render();
+      });
+    }
   }
 
   async _maybeRefreshHistory() {
@@ -1743,16 +1770,17 @@ class HeatPumpOptimizerPanel extends HTMLElement {
 
     // Preserve <details> open state across re-renders
     const openDetails = new Set();
-    this.shadowRoot.querySelectorAll("details[open]").forEach((el) => {
+    this._container.querySelectorAll("details[open]").forEach((el) => {
       const key = el.className || el.querySelector("summary")?.textContent;
       if (key) openDetails.add(key);
     });
 
     const tierVal = (findEntity(s, "savings_accuracy_tier")?.state || "learning");
     const isLearning = tierVal === "learning";
+    const isProjected = tierVal === "projected";
+    const showSavings = !isLearning;  // projected and above show savings
 
-    this.shadowRoot.innerHTML = `
-      <style>${PANEL_CSS}</style>
+    this._container.innerHTML = `
       <div class="panel">
         <header class="header">
           <h1>Heat Pump Optimizer</h1>
@@ -1763,24 +1791,24 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         ${renderEnvironmentCard(s, this._hass)}
         ${renderThermalLoadCard(s, this._hass)}
         ${(() => {
-          if (!isLearning) return renderUnifiedTimeline(s, this._hass, this._retro);
+          if (showSavings && !isProjected) return renderUnifiedTimeline(s, this._hass, this._retro);
           const fc = findEntity(s, "schedule")?.attributes?.forecast;
           const hasRetro = this._retro && (this._retro.indoor.length > 0 || this._retro.outdoor.length > 0);
           return (fc && Array.isArray(fc) && fc.length >= 2 && hasRetro)
             ? renderUnifiedTimeline(s, this._hass, this._retro)
             : renderRetrospectiveChart(s, this._hass, this._retro);
         })()}
-        ${isLearning ? renderLearningProgressCards(s) : ""}
+        ${(isLearning || isProjected) ? renderLearningProgressCards(s) : ""}
         ${isLearning ? renderLearningMilestones(s) : renderDecisionCard(s, this._hass)}
         ${renderBuildingCard(s, this._hass)}
-        ${isLearning ? renderSnapshotCard(s, this._hass) : renderSavingsCard(s, this._hass)}
+        ${showSavings ? renderSavingsCard(s, this._hass, isProjected) : renderSnapshotCard(s, this._hass)}
         ${renderHealthCard(s, this._hass)}
       </div>
     `;
 
     // Restore <details> open state
     openDetails.forEach((key) => {
-      this.shadowRoot.querySelectorAll("details").forEach((el) => {
+      this._container.querySelectorAll("details").forEach((el) => {
         const elKey = el.className || el.querySelector("summary")?.textContent;
         if (elKey === key) el.setAttribute("open", "");
       });
@@ -1790,12 +1818,14 @@ class HeatPumpOptimizerPanel extends HTMLElement {
   }
 
   _bindEvents() {
-    const btn = this.shadowRoot.getElementById("toggle-optimizer");
+    const btn = this._container.querySelector("#toggle-optimizer");
     if (btn) {
       const enabled = findEntity(this._hass.states, "enabled");
       if (enabled) {
         const isOn = enabled.state === "on";
-        btn.addEventListener("click", () => {
+        const newBtn = btn.cloneNode(true);
+        btn.parentNode.replaceChild(newBtn, btn);
+        newBtn.addEventListener("click", () => {
           this._hass.callService("switch", isOn ? "turn_off" : "turn_on", {
             entity_id: enabled.entity_id,
           });
@@ -2277,6 +2307,15 @@ const PANEL_CSS = `
     color: var(--text-secondary);
     margin-top: 4px;
     font-style: italic;
+  }
+  .projected-banner {
+    background: var(--warning-color, #ff9800);
+    color: var(--text-primary-color, #fff);
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 0.85em;
+    text-align: center;
   }
 
   .savings-grid {

@@ -280,6 +280,14 @@ class _LearningNullMixin:
             return None
         return value
 
+    @property
+    def _is_projected(self) -> bool:
+        """Whether current savings values are projected (early estimates)."""
+        tier = (self.coordinator.data or {}).get(
+            "savings_accuracy_tier", "learning"
+        )
+        return tier == "projected"
+
 
 class SavingsPercentSensor(_LearningNullMixin, OptimizerBaseSensor):
     """Estimated runtime savings percentage from current schedule."""
@@ -631,6 +639,7 @@ class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
             "runtime_component": self.coordinator.data.get("runtime_savings_kwh_today"),
             "cop_component": self.coordinator.data.get("cop_savings_kwh_today"),
             "source": self.coordinator.data.get("savings_accuracy_tier"),
+            "is_projected": self._is_projected,
         }
 
 
@@ -1323,6 +1332,9 @@ class LearningProgressSensor(OptimizerBaseSensor):
             ),
             "history_bootstrap_result": self.coordinator.data.get(
                 "history_bootstrap_result"
+            ),
+            "bootstrap_retry_count": self.coordinator.data.get(
+                "bootstrap_retry_count"
             ),
         }
         if baseline_only:

@@ -159,7 +159,7 @@ from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
 from .learning.thermal_estimator import ThermalEstimator
-from .savings_tracker import SavingsTracker, TIER_LEARNING, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED
+from .savings_tracker import SavingsTracker, TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -551,6 +551,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._last_profiler_status: str = "pending"
         self._history_bootstrap_completed: bool = False
         self._history_bootstrap_result: str | None = None  # "ok", reason, or None
+        self._bootstrap_retry_count: int = 0
+        self._bootstrap_retry_unsub: Any = None  # cancel callback for scheduled retry
         self._demand_response_active: bool = False
         self._demand_response_delta: float = 0.0
         self._demand_response_end: datetime | None = None
@@ -587,6 +589,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Track whether a previous bootstrap succeeded (persisted flag)
             self._history_bootstrap_completed = stored.get(
                 "_history_bootstrap_completed", False
+            )
+            self._bootstrap_retry_count = stored.get(
+                "_bootstrap_retry_count", 0
             )
 
         # Seed profiler from Beestat profile if available and profiler is empty
@@ -1127,7 +1132,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         try:
             if self.baseline_capture.template is not None and outdoor_temp is not None:
                 baseline_setpoint = self.baseline_capture.get_baseline_setpoint(now)
-                baseline_mode = self.baseline_capture.get_baseline_mode(now)
+                stored_mode = self.baseline_capture.get_baseline_mode(now)
+                # Re-derive mode from current weather to avoid cross-season
+                # mismatch (e.g. summer-captured "cool" used in winter).
+                if stored_mode == "off":
+                    baseline_mode = "off"
+                elif stored_mode is not None:
+                    baseline_mode = self.strategic.detect_mode(
+                        self.strategic.forecast_snapshot or []
+                    )
+                    if baseline_mode == "off":
+                        # Near balance point — stored mode is a better guess
+                        baseline_mode = stored_mode
+                else:
+                    baseline_mode = None
                 if baseline_setpoint is not None and baseline_mode is not None:
                     cloud_cover = None
                     sun_elevation = None
@@ -1752,6 +1770,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Re-run history bootstrap for immediate learning
         self._history_bootstrap_completed = False
         self._history_bootstrap_result = None
+        self._bootstrap_retry_count = 0
+        if self._bootstrap_retry_unsub is not None:
+            self._bootstrap_retry_unsub()
+            self._bootstrap_retry_unsub = None
 
         # Persist the clean state
         await self._persist_state()
@@ -2257,6 +2279,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             tier = TIER_SIMULATED
         elif self.baseline_capture.is_ready:
             tier = TIER_ESTIMATED
+        elif model_conf > 0:
+            tier = TIER_PROJECTED
         else:
             tier = TIER_LEARNING
 
@@ -2460,6 +2484,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "performance_profiler": self.profiler.to_dict(),
             "aux_heat_learner": self.aux_heat_learner.to_dict(),
             "_history_bootstrap_completed": self._history_bootstrap_completed,
+            "_bootstrap_retry_count": self._bootstrap_retry_count,
         }
         await self._store.async_save(data)
 
@@ -2603,7 +2628,37 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if self._history_bootstrap_completed:
             _LOGGER.debug("History bootstrap already completed — skipping")
             return
+        if self._bootstrap_retry_unsub is not None:
+            _LOGGER.debug("History bootstrap retry already scheduled — skipping")
+            return
         await self._try_history_bootstrap()
+
+    def _schedule_bootstrap_retry(self) -> None:
+        """Schedule a delayed bootstrap retry if retries remain."""
+        from .const import MAX_BOOTSTRAP_RETRIES, BOOTSTRAP_RETRY_DELAY_SECONDS
+
+        if self._bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES:
+            _LOGGER.warning(
+                "History bootstrap: exhausted %d retries, giving up. "
+                "Baseline will complete via live observation.",
+                MAX_BOOTSTRAP_RETRIES,
+            )
+            self._history_bootstrap_completed = True
+            return
+
+        async def _retry_callback(_now) -> None:
+            self._bootstrap_retry_unsub = None
+            await self._try_history_bootstrap()
+
+        from homeassistant.helpers.event import async_call_later
+
+        self._bootstrap_retry_unsub = async_call_later(
+            self.hass, BOOTSTRAP_RETRY_DELAY_SECONDS, _retry_callback
+        )
+        _LOGGER.info(
+            "History bootstrap: baseline not ready, retry %d/%d scheduled in 24h",
+            self._bootstrap_retry_count + 1, MAX_BOOTSTRAP_RETRIES,
+        )
 
     async def _try_history_bootstrap(self) -> None:
         """Attempt to bootstrap learning subsystems from recorder history.
@@ -2630,8 +2685,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._history_bootstrap_result = result.reason if not result.success else "ok"
 
         if result.success:
-            self._history_bootstrap_completed = True
-
             # Rebuild dependent objects with updated estimator state
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
             self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
@@ -2652,10 +2705,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 result.profiler_observations,
             )
 
-            # Persist immediately (includes bootstrap flag)
+            if self.baseline_capture.is_ready:
+                self._history_bootstrap_completed = True
+            else:
+                # EKF benefited but baseline needs more days — schedule retry
+                self._bootstrap_retry_count += 1
+                self._schedule_bootstrap_retry()
+
+            # Persist immediately (includes bootstrap flag + retry count)
             await self._persist_state()
         else:
             _LOGGER.warning("History bootstrap failed: %s", result.reason)
+            self._bootstrap_retry_count += 1
+            self._schedule_bootstrap_retry()
+            await self._persist_state()
 
     # ── HVAC state helpers ──────────────────────────────────────────
 
@@ -2948,6 +3011,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "initialization_mode": self._initialization_mode,
             "history_bootstrap_completed": self._history_bootstrap_completed,
             "history_bootstrap_result": self._history_bootstrap_result,
+            "bootstrap_retry_count": self._bootstrap_retry_count,
 
             # Thermal load breakdown (BTU/hr components from EKF)
             "thermal_load_components": self.estimator.thermal_load_components,
@@ -3083,6 +3147,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ),
             "baseline_days_remaining": self.baseline_capture.days_remaining,
             "savings_accuracy_tier": self.savings_tracker.accuracy_tier,
+            "savings_is_projected": self.savings_tracker.accuracy_tier == TIER_PROJECTED,
 
             # Performance profiler
             "profiler_confidence": round(self.profiler.confidence() * 100, 0),

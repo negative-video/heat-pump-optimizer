@@ -273,6 +273,22 @@ class TacticalController:
             reason=f"Still disturbed: error {error:+.1f}°F (waiting for recovery)",
         )
 
+    @staticmethod
+    def _find_predicted_temp(
+        schedule: OptimizedSchedule | None, now: datetime
+    ) -> float | None:
+        """Find the predicted indoor temp from the simulation timeline closest to *now*."""
+        if schedule is None or not schedule.simulation:
+            return None
+        best: SimulationPoint | None = None
+        best_gap = float("inf")
+        for pt in schedule.simulation:
+            gap = abs((pt.time - now).total_seconds())
+            if gap < best_gap:
+                best_gap = gap
+                best = pt
+        return best.indoor_temp if best is not None else None
+
     def _record_error(self, now: datetime, error: float) -> None:
         """Store error and trim history to 24 hours."""
         self._error_history.append((now, error))

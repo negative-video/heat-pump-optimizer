@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.22"
+VERSION = "0.1.23"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -214,6 +214,8 @@ DEFAULT_SPIKE_HISTORY_MINUTES = 30
 # History bootstrap
 CONF_HISTORY_BOOTSTRAP_DAYS = "history_bootstrap_days"
 DEFAULT_HISTORY_BOOTSTRAP_DAYS = 10
+MAX_BOOTSTRAP_RETRIES = 3
+BOOTSTRAP_RETRY_DELAY_SECONDS = 86400  # 24 hours
 
 # EMA temperature smoothing
 DEFAULT_EMA_ALPHA = 0.2  # weight for new reading (lower = more smoothing)

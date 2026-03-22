@@ -105,11 +105,13 @@ async def async_bootstrap_from_history(
             timeout=30.0,
         )
     except ImportError:
+        _LOGGER.warning("History bootstrap: recorder component not available")
         return BootstrapResult(success=False, reason="recorder_not_available")
     except asyncio.TimeoutError:
+        _LOGGER.warning("History bootstrap: recorder not ready after 30s timeout")
         return BootstrapResult(success=False, reason="recorder_not_ready")
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Recorder check failed: %s", err)
+        _LOGGER.warning("History bootstrap: recorder check failed: %s", err)
         return BootstrapResult(success=False, reason=f"recorder_error: {err}")
 
     # 2. Fetch historical states
@@ -152,17 +154,35 @@ async def async_bootstrap_from_history(
                 entity_ids,
             )
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("History fetch failed: %s", err)
+            _LOGGER.warning("History bootstrap: fetch failed (fallback API): %s", err)
             return BootstrapResult(success=False, reason=f"history_fetch_error: {err}")
+
+        # Validate that fallback API returned attributes (older HA may omit them)
+        climate_fallback = states.get(climate_entity_id, []) if states else []
+        if climate_fallback and not hasattr(climate_fallback[0], "attributes"):
+            _LOGGER.warning(
+                "History bootstrap: fallback API returned states without attributes"
+            )
+            return BootstrapResult(
+                success=False, reason="fallback_api_no_attributes"
+            )
     except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("History fetch failed: %s", err)
+        _LOGGER.warning("History bootstrap: fetch failed: %s", err)
         return BootstrapResult(success=False, reason=f"history_fetch_error: {err}")
 
     if not states or climate_entity_id not in states:
+        _LOGGER.warning(
+            "History bootstrap: no history found for climate entity %s",
+            climate_entity_id,
+        )
         return BootstrapResult(success=False, reason="no_climate_history")
 
     climate_states = states.get(climate_entity_id, [])
     if len(climate_states) < MIN_VALID_POINTS:
+        _LOGGER.warning(
+            "History bootstrap: only %d climate states (need %d) for %s",
+            len(climate_states), MIN_VALID_POINTS, climate_entity_id,
+        )
         return BootstrapResult(success=False, reason="insufficient_history")
 
     # 3. Build timelines and align to grid
@@ -181,6 +201,15 @@ async def async_bootstrap_from_history(
 
     valid_points = [p for p in data_points if p.valid]
     if len(valid_points) < MIN_VALID_POINTS:
+        total = len(data_points)
+        missing_indoor = sum(1 for p in data_points if p.indoor_temp is None)
+        missing_outdoor = sum(1 for p in data_points if p.outdoor_temp is None)
+        _LOGGER.warning(
+            "History bootstrap: only %d/%d valid points (need %d). "
+            "Missing: %d indoor temp, %d outdoor temp",
+            len(valid_points), total, MIN_VALID_POINTS,
+            missing_indoor, missing_outdoor,
+        )
         return BootstrapResult(
             success=False,
             reason=f"insufficient_valid_points ({len(valid_points)})",
