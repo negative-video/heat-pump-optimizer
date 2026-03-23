@@ -22,6 +22,16 @@ The integration builds a physics-based thermal model of your home (insulation, t
 2. **Tactical controller** — Checks reality against the model every 5 minutes and nudges the setpoint if the house is drifting.
 3. **Watchdog** — Detects manual thermostat changes, mode switches, and sensor failures.
 
+### Model Stability
+
+The Extended Kalman Filter jointly estimates several coupled building parameters (insulation R-value, thermal mass, HVAC capacity, solar gain) from a single observation — your thermostat's temperature reading. Several safeguards prevent these estimates from diverging during low-information conditions:
+
+**Thermal mass and R-value bounds and gating** — Thermal mass is capped at 30,000 BTU/°F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges. When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass − T_air| < 0.5°F`), the filter freezes thermal mass learning entirely — the observation carries no information about mass in this regime, and unchecked updates cause runaway estimates. A smooth gain taper between 0.5–2.0°F provides a gradual transition. Per-cycle rate limiting (5% max change) provides a final safety net.
+
+**Tonnage-anchored HVAC capacity** — When you provide system tonnage at setup, the filter treats it as a strong prior: initial uncertainty is ±10% (not the ±316% blind default), process noise is reduced 100×, and per-cycle drift is capped at 2%. This prevents the capacity estimate from collapsing during early learning when the air thermal capacitance (`C_air`) is still poorly estimated. The filter can still converge to the true value over days — it just can't abandon the rated capacity in a few hours. Without tonnage, the filter converges freely from a generic default.
+
+**HVAC observability gating** — Cooling capacity only learns when cooling is running; heating capacity only learns when heating is running. Cross-correlations are zeroed for unobserved modes to prevent covariance leakage from dragging idle-mode estimates toward bounds.
+
 ## Features
 
 - **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data. Or import a [Beestat](https://beestat.io/) profile to start with measured data.
@@ -152,7 +162,7 @@ The integration asks for a few optional system specs during initial setup. Every
 | Field | Where to find it | Effect |
 |---|---|---|
 | **Home conditioned area (sq ft)** | Listing, property tax record, or floor plan | Seeds air thermal capacitance (`C_air`); a 1,000 ft² condo and a 4,000 ft² house have 4× different thermal mass |
-| **System tonnage** | Outdoor unit nameplate, HVAC permit, or installer paperwork | Seeds `Q_cool` / `Q_heat` priors in the EKF at ±20% rather than the ±316% blind default; reduces capacity convergence from weeks to days |
+| **System tonnage** | Outdoor unit nameplate, HVAC permit, or installer paperwork | Seeds `Q_cool` / `Q_heat` priors in the EKF at ±10% with reduced process noise and per-cycle rate limiting, so the filter respects the rated capacity during early learning rather than overriding it. Without tonnage, the filter starts at a generic default and converges freely over ~2 weeks |
 | **Aux / emergency heat type** | Thermostat wiring label (`W2`/`E`), HVAC documentation, or air handler label | `electric_strip` enables BTU injection into the EKF when no power sensor is present (see below); `gas`/`oil` flags heat as non-electric for cost modeling |
 | **Aux heat capacity (kW)** | Air handler nameplate (e.g., "10 kW" strip kit) | Provides an accurate BTU estimate for each aux heating interval when no circuit power meter is configured |
 
@@ -282,8 +292,10 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 | Model Confidence | Kalman filter confidence level | % |
 | Envelope R-Value | Learned envelope thermal resistance | °F·hr/BTU |
 | Thermal Mass | Learned building thermal mass | BTU/°F |
-| Cooling Capacity | Estimated maximum cooling output | BTU/hr |
-| Heating Capacity | Estimated maximum heating output | BTU/hr |
+| Cooling Capacity | Learned base cooling output at 75°F reference | BTU/hr |
+| Heating Capacity | Learned base heating output at 75°F reference | BTU/hr |
+| Effective Cooling Capacity | Cooling output adjusted for current outdoor temperature | BTU/hr |
+| Effective Heating Capacity | Heating output adjusted for current outdoor temperature | BTU/hr |
 | Thermal Mass Temperature | Hidden thermal mass node temperature | °F |
 | Grey-Box Active | Whether the LP-based optimizer is being used | — |
 

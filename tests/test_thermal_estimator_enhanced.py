@@ -516,5 +516,61 @@ class TestThermalMassStability:
         assert 0.0 < factor_at_1 < 1.0
 
 
+IDX_Q_COOL_LOCAL = te_mod.IDX_Q_COOL
+IDX_Q_HEAT_LOCAL = te_mod.IDX_Q_HEAT
+
+
+class TestTonnagePriorStrength:
+    """Verify user-provided tonnage resists aggressive drift during early learning."""
+
+    def test_tonnage_prior_resists_drift(self):
+        """Q_cool should stay near rated capacity over many cycles."""
+        est = ThermalEstimator.cold_start(indoor_temp=72.0, tonnage=3.5, sqft=2200)
+        initial_q_cool = float(est.x[IDX_Q_COOL_LOCAL])  # 42,000
+        assert abs(initial_q_cool - 42000.0) < 1.0
+
+        # Simulate 200 cycles (~17 hours) of cooling with modest dT
+        for i in range(200):
+            running = (i % 12) < 6  # 50% duty cycle
+            est.update(
+                observed_temp=71.5 if running else 72.0,
+                outdoor_temp=90.0,
+                hvac_mode="cool",
+                hvac_running=running,
+                cloud_cover=0.3,
+                sun_elevation=30.0,
+                dt_hours=DT_HOURS,
+            )
+
+        learned_q = float(est.x[IDX_Q_COOL_LOCAL])
+        # Should still be within 50% of rated after 17 hours
+        assert learned_q > 0.50 * initial_q_cool, (
+            f"Q_cool={learned_q:.0f} drifted too far from rated "
+            f"{initial_q_cool:.0f} ({learned_q/initial_q_cool*100:.0f}%)"
+        )
+
+    def test_tonnage_prior_flag_persisted(self):
+        """_has_tonnage_prior survives serialization round-trip."""
+        est = ThermalEstimator.cold_start(indoor_temp=72.0, tonnage=2.5)
+        assert est._has_tonnage_prior is True
+
+        data = est.to_dict()
+        restored = ThermalEstimator.from_dict(data)
+        assert restored._has_tonnage_prior is True
+
+    def test_no_tonnage_no_rate_limit(self):
+        """Without tonnage, Q_cool should converge freely."""
+        est = ThermalEstimator.cold_start(indoor_temp=72.0)
+        assert est._has_tonnage_prior is False
+        # Process noise should be default 1.0
+        assert est.Q[IDX_Q_COOL_LOCAL, IDX_Q_COOL_LOCAL] == 1.0
+
+    def test_tonnage_reduces_process_noise(self):
+        """With tonnage, process noise for Q_cool/Q_heat is reduced."""
+        est = ThermalEstimator.cold_start(indoor_temp=72.0, tonnage=3.0)
+        assert est.Q[IDX_Q_COOL_LOCAL, IDX_Q_COOL_LOCAL] == 0.01
+        assert est.Q[IDX_Q_HEAT_LOCAL, IDX_Q_HEAT_LOCAL] == 0.01
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

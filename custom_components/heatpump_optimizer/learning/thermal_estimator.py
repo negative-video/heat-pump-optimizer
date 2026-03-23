@@ -113,6 +113,11 @@ _MASS_FULL_OBS_DELTA = 2.0  # °F — above this, full Kalman gain for C_mass_in
 # legitimate convergence, slow enough to prevent runaway.
 _C_MASS_MAX_CHANGE_FRAC = 0.05
 
+# Maximum fractional change in Q_cool/Q_heat per cycle when the user
+# provided a tonnage rating.  2 % per step ≈ 24 %/hr — still converges
+# over days, but prevents the 75 % collapse seen in early learning.
+_Q_HVAC_MAX_CHANGE_FRAC = 0.02
+
 # Physical bounds for parameter clamping
 BOUNDS = {
     IDX_R_INV: (0.01, 1.0),       # R: 1.0 to 100 °F·hr/BTU
@@ -193,6 +198,13 @@ class ThermalEstimator:
     # Previous C_mass_inv for per-cycle rate limiting (not persisted)
     _prev_c_mass_inv: float | None = None
 
+    # Tonnage-prior tracking: when the user provides rated tonnage, we
+    # rate-limit Q_cool/Q_heat drift so the filter respects the prior
+    # during early learning.  _has_tonnage_prior is persisted.
+    _has_tonnage_prior: bool = False
+    _prev_q_cool: float | None = None
+    _prev_q_heat: float | None = None
+
     def __post_init__(self):
         if not self._initialized:
             self._setup_default_noise()
@@ -243,8 +255,8 @@ class ThermalEstimator:
         if tonnage is not None:
             q_cool = tonnage * 12000.0        # rated BTU/hr
             q_heat = tonnage * 12000.0 * 1.1  # ~110% of cooling rating at 47°F outdoor
-            q_cool_var = (0.20 * q_cool) ** 2  # ±20% SD
-            q_heat_var = (0.20 * q_heat) ** 2
+            q_cool_var = (0.10 * q_cool) ** 2  # ±10% SD — trust user-provided tonnage
+            q_heat_var = (0.10 * q_heat) ** 2
         else:
             q_cool = 20000.0   # ~1.7 ton generic default
             q_heat = 18000.0
@@ -286,8 +298,18 @@ class ThermalEstimator:
         ])
         est._P_initial = est.P.copy()
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
+        est._prev_q_cool = float(est.x[IDX_Q_COOL])
+        est._prev_q_heat = float(est.x[IDX_Q_HEAT])
         est._initialized = True
         est._setup_default_noise()
+
+        # When tonnage is known, reduce process noise for capacity states
+        # so the filter respects the user-provided rating during early learning.
+        if tonnage is not None:
+            est._has_tonnage_prior = True
+            est.Q[IDX_Q_COOL, IDX_Q_COOL] = 0.01
+            est.Q[IDX_Q_HEAT, IDX_Q_HEAT] = 0.01
+
         return est
 
     @classmethod
@@ -382,6 +404,8 @@ class ThermalEstimator:
         ])
         est._P_initial = est.P.copy()
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
+        est._prev_q_cool = float(est.x[IDX_Q_COOL])
+        est._prev_q_heat = float(est.x[IDX_Q_HEAT])
         est._initialized = True
         est._setup_default_noise()
         return est
@@ -1170,6 +1194,21 @@ class ThermalEstimator:
             )
         self._prev_c_mass_inv = float(self.x[IDX_C_MASS_INV])
 
+        # Rate-limit Q_cool/Q_heat when user provided tonnage rating.
+        if self._has_tonnage_prior:
+            for idx, prev_attr in (
+                (IDX_Q_COOL, "_prev_q_cool"),
+                (IDX_Q_HEAT, "_prev_q_heat"),
+            ):
+                prev = getattr(self, prev_attr)
+                if prev is not None and prev > 0:
+                    max_delta = _Q_HVAC_MAX_CHANGE_FRAC * prev
+                    self.x[idx] = np.clip(
+                        self.x[idx], prev - max_delta, prev + max_delta,
+                    )
+        self._prev_q_cool = float(self.x[IDX_Q_COOL])
+        self._prev_q_heat = float(self.x[IDX_Q_HEAT])
+
         # Standard bounds clamping
         for idx, (lo, hi) in BOUNDS.items():
             self.x[idx] = np.clip(self.x[idx], lo, hi)
@@ -1195,6 +1234,7 @@ class ThermalEstimator:
             "initial_covariance": self._P_initial.tolist(),
             "envelope_area": self._envelope_area,
             "confidence_hwm": self._confidence_hwm,
+            "has_tonnage_prior": self._has_tonnage_prior,
         }
 
     @classmethod
@@ -1244,5 +1284,8 @@ class ThermalEstimator:
             est.Q = _expand_matrix(est.Q, 1e-4)
 
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
+        est._prev_q_cool = float(est.x[IDX_Q_COOL])
+        est._prev_q_heat = float(est.x[IDX_Q_HEAT])
+        est._has_tonnage_prior = data.get("has_tonnage_prior", False)
         est._initialized = True
         return est
