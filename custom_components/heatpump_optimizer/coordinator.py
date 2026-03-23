@@ -2914,6 +2914,22 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         today_savings = self.savings_tracker.today_report()
         cumulative = self.savings_tracker.cumulative_totals()
 
+        # Effective HVAC capacity at current outdoor temp
+        _outdoor_info = self.sensor_hub.get_outdoor_temp_info(
+            self.strategic.forecast_snapshot
+        )
+        _outdoor_val = _outdoor_info.get("value") if _outdoor_info else None
+        _eff_cool = (
+            self.estimator.cooling_capacity(_outdoor_val)
+            if _outdoor_val is not None and self.estimator._n_obs > 0
+            else None
+        )
+        _eff_heat = (
+            self.estimator.heating_capacity(_outdoor_val)
+            if _outdoor_val is not None and self.estimator._n_obs > 0
+            else None
+        )
+
         return {
             # Core state
             "phase": self._phase,
@@ -2999,6 +3015,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "kalman_thermal_mass": self.estimator.thermal_mass,
             "kalman_cooling_capacity": float(self.estimator.x[6]),
             "kalman_heating_capacity": float(self.estimator.x[7]),
+            "effective_cooling_capacity": _eff_cool,
+            "effective_heating_capacity": _eff_heat,
             "kalman_mass_temp": self.estimator.T_mass,
             "kalman_observations": self.estimator._n_obs,
             "using_adaptive_model": (
@@ -3039,9 +3057,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "forecast_detail": self._build_forecast_detail(schedule),
 
             # SensorHub diagnostics
-            "outdoor_temp_info": self.sensor_hub.get_outdoor_temp_info(
-                self.strategic.forecast_snapshot
-            ),
+            "outdoor_temp_info": _outdoor_info,
             "indoor_temp_info": self.sensor_hub.get_indoor_temp_info(
                 thermo_state.indoor_temp if thermo_state else None
             ),

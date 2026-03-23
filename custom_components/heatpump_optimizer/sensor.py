@@ -41,6 +41,8 @@ async def async_setup_entry(
         ThermalMassSensor(coordinator, entry),
         CoolingCapacitySensor(coordinator, entry),
         HeatingCapacitySensor(coordinator, entry),
+        EffectiveCoolingCapacitySensor(coordinator, entry),
+        EffectiveHeatingCapacitySensor(coordinator, entry),
         ThermalMassTempSensor(coordinator, entry),
         # Diagnostic sensors
         ScheduleSensor(coordinator, entry),
@@ -412,6 +414,50 @@ class HeatingCapacitySensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("kalman_heating_capacity")
+
+
+class EffectiveCoolingCapacitySensor(OptimizerBaseSensor):
+    """Cooling capacity adjusted for current outdoor temperature."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry,
+            "effective_cooling_capacity", "Effective Cooling Capacity",
+        )
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:snowflake-thermometer"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("effective_cooling_capacity")
+
+
+class EffectiveHeatingCapacitySensor(OptimizerBaseSensor):
+    """Heating capacity adjusted for current outdoor temperature."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry,
+            "effective_heating_capacity", "Effective Heating Capacity",
+        )
+        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 0
+        self._attr_icon = "mdi:fire-alert"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("effective_heating_capacity")
 
 
 class ThermalMassTempSensor(OptimizerBaseSensor):

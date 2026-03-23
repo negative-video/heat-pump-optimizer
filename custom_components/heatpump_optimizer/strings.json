@@ -564,6 +564,8 @@
       "thermal_mass": { "name": "Building Heat Storage", "description": "How much heat your home's walls, floors, and furnishings can absorb. Higher values mean temperatures change slowly, which is good for coasting." },
       "cooling_capacity": { "name": "Cooling Capacity", "description": "The maximum cooling output your HVAC system can deliver, estimated from observed performance." },
       "heating_capacity": { "name": "Heating Capacity", "description": "The maximum heating output your HVAC system can deliver, estimated from observed performance." },
+      "effective_cooling_capacity": { "name": "Effective Cooling Capacity", "description": "Cooling output adjusted for current outdoor temperature. Shows what your system would deliver if it turned on right now." },
+      "effective_heating_capacity": { "name": "Effective Heating Capacity", "description": "Heating output adjusted for current outdoor temperature. Shows what your system would deliver if it turned on right now." },
       "thermal_mass_temperature": { "name": "Building Mass Temperature", "description": "The estimated temperature of your home's walls and floors. This hidden heat reservoir affects how quickly indoor air temperature changes." },
       "schedule": { "name": "Optimization Schedule", "description": "The optimizer's current plan showing when it will pre-heat, pre-cool, or coast over the next 24 hours." },
       "outdoor_temp_source": { "name": "Outdoor Temperature", "description": "The outdoor temperature the optimizer is using, sourced from your weather entity or outdoor sensors." },

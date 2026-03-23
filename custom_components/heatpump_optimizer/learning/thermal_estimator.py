@@ -100,12 +100,25 @@ _MAX_INFILTRATION_MULTIPLIER = 4.0
 # a modest contribution that compounds with wind infiltration.
 _STACK_EFFECT_COEFF = 0.02
 
+# Thermal-mass observability thresholds.  When |T_mass − T_air| is small the
+# Jacobian entry for C_mass_inv ≈ 0, so the observation carries almost no
+# information about thermal mass.  Gate learning below the hard threshold and
+# taper the Kalman gain between the two thresholds.
+_MASS_OBS_THRESHOLD = 0.5   # °F — hard gate: freeze C_mass_inv learning
+_MASS_FULL_OBS_DELTA = 2.0  # °F — above this, full Kalman gain for C_mass_inv
+
+# Maximum fractional change in C_mass_inv per 5-minute EKF cycle.
+# Physical thermal mass doesn't change between cycles; large jumps indicate
+# the filter is fitting noise.  5 % per step ≈ 60 %/hr — fast enough for
+# legitimate convergence, slow enough to prevent runaway.
+_C_MASS_MAX_CHANGE_FRAC = 0.05
+
 # Physical bounds for parameter clamping
 BOUNDS = {
-    IDX_R_INV: (0.01, 2.0),       # R: 0.5 to 100 °F·hr/BTU
+    IDX_R_INV: (0.01, 1.0),       # R: 1.0 to 100 °F·hr/BTU
     IDX_R_INT_INV: (0.5, 500.0),  # R_int: 0.002 to 2 — allows mass τ from ~20 hr to ~20,000 hr
     IDX_C_INV: (1e-5, 0.01),      # C_air: 100 to 100,000 BTU/°F
-    IDX_C_MASS_INV: (1e-6, 0.001),  # C_mass: 1,000 to 1,000,000
+    IDX_C_MASS_INV: (3.3e-5, 0.001),  # C_mass: 1,000 to 30,000 BTU/°F
     IDX_Q_COOL: (5000, 80000),    # 5k to 80k BTU/hr
     IDX_Q_HEAT: (5000, 80000),
     IDX_SOLAR_GAIN: (500, 15000), # 500 to 15k BTU/hr peak solar
@@ -176,6 +189,9 @@ class ThermalEstimator:
 
     # Last computed thermal load components (BTU/hr), populated by _predict_state
     _last_thermal_loads: dict = field(default_factory=dict)
+
+    # Previous C_mass_inv for per-cycle rate limiting (not persisted)
+    _prev_c_mass_inv: float | None = None
 
     def __post_init__(self):
         if not self._initialized:
@@ -269,6 +285,7 @@ class ThermalEstimator:
             1e6,        # solar_gain_btu — uncertain without data
         ])
         est._P_initial = est.P.copy()
+        est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._initialized = True
         est._setup_default_noise()
         return est
@@ -364,6 +381,7 @@ class ThermalEstimator:
             1e6,       # solar_gain_btu — uncertain (not in Beestat)
         ])
         est._P_initial = est.P.copy()
+        est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._initialized = True
         est._setup_default_noise()
         return est
@@ -459,6 +477,14 @@ class ThermalEstimator:
         if not (hvac_running and hvac_mode == "heat"):
             Q_effective[IDX_Q_HEAT, IDX_Q_HEAT] = 0.0
 
+        # Gate thermal-mass process noise when |T_mass − T_air| is small.
+        # The Jacobian entry for C_mass_inv ≈ −R_int_inv·(T_mass−T_air)·dt
+        # vanishes near equilibrium, so the observation carries no information
+        # about thermal mass and unchecked covariance growth causes runaway.
+        mass_air_delta = abs(x_pred[IDX_T_MASS] - x_pred[IDX_T_AIR])
+        if mass_air_delta < _MASS_OBS_THRESHOLD:
+            Q_effective[IDX_C_MASS_INV, IDX_C_MASS_INV] = 0.0
+
         P_pred = F @ self.P @ F.T + Q_effective
 
         # Zero cross-correlations for unobserved HVAC capacity states
@@ -471,6 +497,15 @@ class ThermalEstimator:
             P_pred[IDX_Q_HEAT, :] = 0.0
             P_pred[:, IDX_Q_HEAT] = 0.0
             P_pred[IDX_Q_HEAT, IDX_Q_HEAT] = self.P[IDX_Q_HEAT, IDX_Q_HEAT]
+
+        # Same pattern for C_mass_inv: zero cross-correlations when
+        # thermal-mass observability is poor.
+        if mass_air_delta < _MASS_OBS_THRESHOLD:
+            P_pred[IDX_C_MASS_INV, :] = 0.0
+            P_pred[:, IDX_C_MASS_INV] = 0.0
+            P_pred[IDX_C_MASS_INV, IDX_C_MASS_INV] = self.P[
+                IDX_C_MASS_INV, IDX_C_MASS_INV
+            ]
 
         # ── UPDATE ───────────────────────────────────────────────
         # Observation model: z = H @ x = T_air
@@ -501,6 +536,12 @@ class ThermalEstimator:
 
         # Kalman gain
         K = P_pred @ H.T / S_scalar  # (N,1)
+
+        # Dampen C_mass_inv Kalman gain by observability.  Even above the
+        # hard gating threshold, scale the gain so that marginal
+        # |T_mass − T_air| deltas don't drive large parameter updates.
+        obs_factor = min(1.0, mass_air_delta / _MASS_FULL_OBS_DELTA)
+        K[IDX_C_MASS_INV, :] *= obs_factor
 
         # Quantization pause: when thermostat reports same integer as last
         # time, freeze parameter learning. The zero innovation carries no
@@ -1119,7 +1160,17 @@ class ThermalEstimator:
     # ── Helpers ──────────────────────────────────────────────────────
 
     def _clamp_parameters(self):
-        """Enforce physical bounds on estimated parameters."""
+        """Enforce physical bounds and rate limits on estimated parameters."""
+        # Rate-limit C_mass_inv: cap change to ±_C_MASS_MAX_CHANGE_FRAC per cycle.
+        if self._prev_c_mass_inv is not None and self._prev_c_mass_inv > 0:
+            prev = self._prev_c_mass_inv
+            max_delta = _C_MASS_MAX_CHANGE_FRAC * prev
+            self.x[IDX_C_MASS_INV] = np.clip(
+                self.x[IDX_C_MASS_INV], prev - max_delta, prev + max_delta,
+            )
+        self._prev_c_mass_inv = float(self.x[IDX_C_MASS_INV])
+
+        # Standard bounds clamping
         for idx, (lo, hi) in BOUNDS.items():
             self.x[idx] = np.clip(self.x[idx], lo, hi)
 
@@ -1192,5 +1243,6 @@ class ThermalEstimator:
             # Expand Q (process noise) — use default noise for solar gain
             est.Q = _expand_matrix(est.Q, 1e-4)
 
+        est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._initialized = True
         return est
