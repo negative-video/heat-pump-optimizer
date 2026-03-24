@@ -100,12 +100,27 @@ _MAX_INFILTRATION_MULTIPLIER = 4.0
 # a modest contribution that compounds with wind infiltration.
 _STACK_EFFECT_COEFF = 0.02
 
-# Thermal-mass observability thresholds.  When |T_mass − T_air| is small the
-# Jacobian entry for C_mass_inv ≈ 0, so the observation carries almost no
-# information about thermal mass.  Gate learning below the hard threshold and
-# taper the Kalman gain between the two thresholds.
-_MASS_OBS_THRESHOLD = 0.5   # °F — hard gate: freeze C_mass_inv learning
-_MASS_FULL_OBS_DELTA = 2.0  # °F — above this, full Kalman gain for C_mass_inv
+# Thermal-mass observability thresholds.  C_mass_inv is only observable when
+# |T_mass − T_air| is in a moderate range: too small means equilibrium (no
+# information), too large means the gap is likely a filter artifact (positive
+# feedback: high C_mass → slow T_mass → larger gap → more learning → higher
+# C_mass).  The bell-shaped gating peaks at _MASS_PEAK_OBS_DELTA and falls
+# to zero at both ends.
+_MASS_OBS_THRESHOLD = 0.5   # °F — below: unobservable (equilibrium), freeze
+_MASS_PEAK_OBS_DELTA = 3.0  # °F — optimal observability, full Kalman gain
+_MASS_MAX_OBS_DELTA = 8.0   # °F — above: likely diverged, freeze learning
+
+# Physical constraint: thermal mass in a conditioned residence cannot
+# realistically differ from air temperature by more than this.  Even heavy
+# masonry with direct solar exposure rarely exceeds 5–8°F delta.  Values
+# beyond this indicate filter divergence, not physical reality.
+_MAX_MASS_AIR_DELTA_F = 8.0
+
+# Maximum thermal-mass time constant (hours).  τ = C_mass / R_int_inv.
+# Residential buildings: 4–48 hrs (light frame to heavy masonry).  Values
+# beyond 72 hrs mean the filter is storing energy in a mode too slow to
+# ever be validated against observed data.
+_MAX_TAU_HOURS = 72.0
 
 # Maximum fractional change in C_mass_inv per 5-minute EKF cycle.
 # Physical thermal mass doesn't change between cycles; large jumps indicate
@@ -607,10 +622,24 @@ class ThermalEstimator:
         # Kalman gain
         K = P_pred @ H.T / S_scalar  # (N,1)
 
-        # Dampen C_mass_inv Kalman gain by observability.  Even above the
-        # hard gating threshold, scale the gain so that marginal
-        # |T_mass − T_air| deltas don't drive large parameter updates.
-        obs_factor = min(1.0, mass_air_delta / _MASS_FULL_OBS_DELTA)
+        # Bell-shaped C_mass_inv observability gating.  The Jacobian entry
+        # for C_mass_inv scales with |T_mass − T_air|, so the parameter is
+        # unobservable near equilibrium (small delta).  But large deltas are
+        # equally suspect — they indicate the filter has diverged, creating
+        # a positive feedback loop (high C_mass → slow T_mass → larger gap
+        # → more learning → higher C_mass).  Peak learning at moderate delta.
+        if mass_air_delta < _MASS_OBS_THRESHOLD:
+            obs_factor = 0.0
+        elif mass_air_delta < _MASS_PEAK_OBS_DELTA:
+            obs_factor = (mass_air_delta - _MASS_OBS_THRESHOLD) / (
+                _MASS_PEAK_OBS_DELTA - _MASS_OBS_THRESHOLD
+            )
+        elif mass_air_delta < _MASS_MAX_OBS_DELTA:
+            obs_factor = 1.0 - (mass_air_delta - _MASS_PEAK_OBS_DELTA) / (
+                _MASS_MAX_OBS_DELTA - _MASS_PEAK_OBS_DELTA
+            )
+        else:
+            obs_factor = 0.0  # diverged — freeze C_mass learning entirely
         K[IDX_C_MASS_INV, :] *= obs_factor
 
         # Quantization pause: when thermostat reports same integer as last
@@ -1375,6 +1404,28 @@ class ThermalEstimator:
                     )
         self._prev_q_cool = float(self.x[IDX_Q_COOL])
         self._prev_q_heat = float(self.x[IDX_Q_HEAT])
+
+        # Constrain T_mass to physical proximity of T_air.
+        # Residential thermal mass (walls, slab, furniture) equilibrates
+        # with air within a few degrees.  Larger gaps indicate filter
+        # divergence, not physical reality — breaks the positive feedback
+        # loop that drives thermal mass runaway.
+        mass_air_delta = self.x[IDX_T_MASS] - self.x[IDX_T_AIR]
+        if abs(mass_air_delta) > _MAX_MASS_AIR_DELTA_F:
+            self.x[IDX_T_MASS] = (
+                self.x[IDX_T_AIR] + np.sign(mass_air_delta) * _MAX_MASS_AIR_DELTA_F
+            )
+
+        # Enforce maximum thermal mass time constant.
+        # τ = C_mass / R_int_inv = (1/C_mass_inv) / R_int_inv
+        # Values beyond _MAX_TAU_HOURS mean the filter is storing energy
+        # in a mode too slow to validate against observed data.
+        c_mass_inv = max(float(self.x[IDX_C_MASS_INV]), 1e-10)
+        r_int_inv = max(float(self.x[IDX_R_INT_INV]), 0.5)
+        tau = (1.0 / c_mass_inv) / r_int_inv
+        if tau > _MAX_TAU_HOURS:
+            max_c_mass = _MAX_TAU_HOURS * r_int_inv
+            self.x[IDX_C_MASS_INV] = 1.0 / max_c_mass
 
         # Standard bounds clamping
         for idx, (lo, hi) in BOUNDS.items():

@@ -9,4 +9,7 @@ build/
 .venv/
 .env
 *.log
+*.db
+tools/entities.json
+tools/export_*.csv
 docs/internal/
