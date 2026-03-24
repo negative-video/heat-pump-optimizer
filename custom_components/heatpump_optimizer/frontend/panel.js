@@ -1687,6 +1687,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     this._retroFetching = false;
     this._renderScheduled = false;
     this._rafId = null;
+    this._lastFingerprint = "";
   }
 
   disconnectedCallback() {
@@ -1698,6 +1699,16 @@ class HeatPumpOptimizerPanel extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._maybeRefreshHistory();
+
+    // Only re-render when optimizer-relevant entity states actually change.
+    // HA pushes hass updates for ALL entities (dozens/sec), so rendering on
+    // every update causes DOM thrashing (blinking, lost selections, unclickable
+    // elements).  We fingerprint only the states we care about and skip the
+    // render if nothing changed.
+    const fp = this._buildFingerprint(hass.states);
+    if (fp === this._lastFingerprint) return;
+    this._lastFingerprint = fp;
+
     if (!this._renderScheduled) {
       this._renderScheduled = true;
       this._rafId = requestAnimationFrame(() => {
@@ -1706,6 +1717,18 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         this._render();
       });
     }
+  }
+
+  /** Build a lightweight fingerprint of optimizer + climate entity states. */
+  _buildFingerprint(states) {
+    let fp = "";
+    for (const id of Object.keys(states)) {
+      if (id.includes(ENTITY_PREFIX) || id.startsWith("climate.")) {
+        const s = states[id];
+        fp += id + ":" + s.state + ":" + (s.last_changed || "") + ";";
+      }
+    }
+    return fp;
   }
 
   async _maybeRefreshHistory() {
