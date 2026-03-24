@@ -149,6 +149,7 @@ from .engine.comfort import calculate_apparent_temperature
 from .engine.optimizer import ScheduleOptimizer
 from .engine.precondition_planner import PreconditionPlanner
 from .engine.performance_model import PerformanceModel
+from .engine.simple_model import SimplePerformanceModel
 from .engine.thermal_simulator import ThermalSimulator
 from .engine.adaptive_performance_model import AdaptivePerformanceModel
 from .engine.counterfactual_simulator import CounterfactualSimulator
@@ -199,6 +200,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         profile_json: str | None = None,
         sleep_config: dict | None = None,
         monitor_only: bool = False,
+        setup_complexity: str = "full",
     ):
         super().__init__(
             hass,
@@ -208,6 +210,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         )
 
         # Configuration
+        self._setup_complexity = setup_complexity
         self._monitor_only = monitor_only
         self.climate_entity_id = climate_entity_id
         self.weather_entity_id = weather_entity_id
@@ -365,104 +368,117 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Engine initialization — varies by mode
         self._initialization_mode = initialization_mode
         self._profile_path = profile_path
-        self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
-        self._use_greybox = opts.get(CONF_USE_GREYBOX_MODEL, False)
 
-        # Read current indoor temp for EKF initialization (may not be available yet)
-        _init_state = ThermostatAdapter(hass, climate_entity_id).read_state()
-        _init_indoor = (
-            _init_state.indoor_temp
-            if _init_state.available and _init_state.indoor_temp is not None
-            else 72.0
-        )
+        from .const import SETUP_LITE
+        self._is_lite = (setup_complexity == SETUP_LITE)
 
-        if initialization_mode == "learning":
-            # Cold start: synthetic defaults, EKF learns from scratch.
-            # Tonnage and sqft provide better priors when available, reducing
-            # the convergence window from weeks to days.
-            self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start(
-                indoor_temp=_init_indoor,
-                tonnage=self._hvac_tonnage,
-                sqft=self._home_sqft,
-            )
-            _LOGGER.info(
-                "Initialized in learning mode — model will calibrate over %s "
-                "(tonnage=%s, sqft=%s)",
-                "2-3 days" if self._hvac_tonnage else "2-3 weeks",
-                f"{self._hvac_tonnage:.1f} ton" if self._hvac_tonnage else "unknown",
-                f"{self._home_sqft:.0f} ft²" if self._home_sqft else "unknown",
-            )
-        elif initialization_mode == "import" and model_import_data:
-            # Restore from exported model
-            import json as _json
-            try:
-                parsed = _json.loads(model_import_data) if isinstance(model_import_data, str) else model_import_data
-                state_data = parsed.get("state", parsed)
-                self.estimator = ThermalEstimator.from_dict(state_data)
-                self.model = PerformanceModel.from_estimator(self.estimator)
-                _LOGGER.info(
-                    "Initialized from imported model (%d observations, confidence=%.0f%%)",
-                    self.estimator._n_obs, self.estimator.confidence * 100,
-                )
-            except (KeyError, ValueError, TypeError) as err:
-                _LOGGER.error("Failed to import model (%s) — falling back to defaults", type(err).__name__, exc_info=True)
-                self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start(
-                    indoor_temp=_init_indoor,
-                    tonnage=self._hvac_tonnage,
-                    sqft=self._home_sqft,
-                )
-        elif profile_path:
-            # Beestat mode (default, backward compatible)
-            try:
-                if profile_json:
-                    self.model = PerformanceModel.from_file_data(profile_json)
-                else:
-                    self.model = PerformanceModel.from_file(profile_path)
-                self.estimator = ThermalEstimator.from_beestat(
-                    self.model._raw, indoor_temp=_init_indoor,
-                    tonnage=self._hvac_tonnage,
-                )
-            except (FileNotFoundError, OSError, KeyError, ValueError) as err:
-                _LOGGER.error(
-                    "Failed to load Beestat profile '%s' (%s) — falling back to learning mode",
-                    profile_path, err,
-                )
-                self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start(
-                    indoor_temp=_init_indoor,
-                    tonnage=self._hvac_tonnage,
-                    sqft=self._home_sqft,
-                )
+        if self._is_lite:
+            # Lite mode: simple weather-based model, no learning pipeline
+            self._use_adaptive = False
+            self._use_greybox = False
+            self.model = SimplePerformanceModel()
+            self.estimator = None
+            self.adaptive_model = None
+            self.greybox_optimizer = None
+            self.aux_heat_learner = None
+            _LOGGER.info("Initialized in lite mode — weather-based scheduling, no thermal learning")
         else:
-            # Beestat mode selected but no profile path — fall back to learning
-            _LOGGER.warning(
-                "Beestat mode selected but no profile path configured — using learning mode"
+            self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
+            self._use_greybox = opts.get(CONF_USE_GREYBOX_MODEL, False)
+
+            # Read current indoor temp for EKF initialization (may not be available yet)
+            _init_state = ThermostatAdapter(hass, climate_entity_id).read_state()
+            _init_indoor = (
+                _init_state.indoor_temp
+                if _init_state.available and _init_state.indoor_temp is not None
+                else 72.0
             )
-            self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start(
-                indoor_temp=_init_indoor,
-                tonnage=self._hvac_tonnage,
-                sqft=self._home_sqft,
+
+            if initialization_mode == "learning":
+                # Cold start: synthetic defaults, EKF learns from scratch.
+                self.model = PerformanceModel.from_defaults()
+                self.estimator = ThermalEstimator.cold_start(
+                    indoor_temp=_init_indoor,
+                    tonnage=self._hvac_tonnage,
+                    sqft=self._home_sqft,
+                )
+                _LOGGER.info(
+                    "Initialized in learning mode — model will calibrate over %s "
+                    "(tonnage=%s, sqft=%s)",
+                    "2-3 days" if self._hvac_tonnage else "2-3 weeks",
+                    f"{self._hvac_tonnage:.1f} ton" if self._hvac_tonnage else "unknown",
+                    f"{self._home_sqft:.0f} ft²" if self._home_sqft else "unknown",
+                )
+            elif initialization_mode == "import" and model_import_data:
+                # Restore from exported model
+                import json as _json
+                try:
+                    parsed = _json.loads(model_import_data) if isinstance(model_import_data, str) else model_import_data
+                    state_data = parsed.get("state", parsed)
+                    self.estimator = ThermalEstimator.from_dict(state_data)
+                    self.model = PerformanceModel.from_estimator(self.estimator)
+                    _LOGGER.info(
+                        "Initialized from imported model (%d observations, confidence=%.0f%%)",
+                        self.estimator._n_obs, self.estimator.confidence * 100,
+                    )
+                except (KeyError, ValueError, TypeError) as err:
+                    _LOGGER.error("Failed to import model (%s) — falling back to defaults", type(err).__name__, exc_info=True)
+                    self.model = PerformanceModel.from_defaults()
+                    self.estimator = ThermalEstimator.cold_start(
+                        indoor_temp=_init_indoor,
+                        tonnage=self._hvac_tonnage,
+                        sqft=self._home_sqft,
+                    )
+            elif profile_path:
+                # Beestat mode (default, backward compatible)
+                try:
+                    if profile_json:
+                        self.model = PerformanceModel.from_file_data(profile_json)
+                    else:
+                        self.model = PerformanceModel.from_file(profile_path)
+                    self.estimator = ThermalEstimator.from_beestat(
+                        self.model._raw, indoor_temp=_init_indoor,
+                        tonnage=self._hvac_tonnage,
+                    )
+                except (FileNotFoundError, OSError, KeyError, ValueError) as err:
+                    _LOGGER.error(
+                        "Failed to load Beestat profile '%s' (%s) — falling back to learning mode",
+                        profile_path, err,
+                    )
+                    self.model = PerformanceModel.from_defaults()
+                    self.estimator = ThermalEstimator.cold_start(
+                        indoor_temp=_init_indoor,
+                        tonnage=self._hvac_tonnage,
+                        sqft=self._home_sqft,
+                    )
+            else:
+                # Beestat mode selected but no profile path — fall back to learning
+                _LOGGER.warning(
+                    "Beestat mode selected but no profile path configured — using learning mode"
+                )
+                self.model = PerformanceModel.from_defaults()
+                self.estimator = ThermalEstimator.cold_start(
+                    indoor_temp=_init_indoor,
+                    tonnage=self._hvac_tonnage,
+                    sqft=self._home_sqft,
+                )
+
+            # Adaptive model (Kalman filter)
+            self.adaptive_model = AdaptivePerformanceModel(self.estimator)
+            # Propagate thermostat differential from model
+            self.adaptive_model.cool_differential = self.model.cool_differential
+            self.adaptive_model.heat_differential = self.model.heat_differential
+
+            # Grey-box optimizer (LP + Kalman)
+            self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+
+            # Aux heat activation learner
+            self.aux_heat_learner = AuxHeatLearner(
+                default_hp_watts=self._power_default_watts
             )
 
         self.simulator = ThermalSimulator(self.model)
         self.optimizer = ScheduleOptimizer(self.model, self.simulator)
-
-        # Adaptive model (Kalman filter)
-        self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-        # Propagate thermostat differential from model
-        self.adaptive_model.cool_differential = self.model.cool_differential
-        self.adaptive_model.heat_differential = self.model.heat_differential
-
-        # Grey-box optimizer (LP + Kalman)
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
-
-        # Aux heat activation learner
-        self.aux_heat_learner = AuxHeatLearner(
-            default_hp_watts=self._power_default_watts
-        )
         self._cached_aux_heat_active: bool = False
 
         # Adapters (HA ↔ engine)
@@ -1048,29 +1064,30 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 pass
 
         # Aux heat activation learning and HP baseline watts tracking
-        try:
-            if outdoor_temp is not None and thermo_state.indoor_temp is not None:
-                _setpoint_delta = abs(
-                    thermo_state.indoor_temp
-                    - (thermo_state.effective_setpoint or thermo_state.indoor_temp)
-                )
-                _hum_reading = self.sensor_hub.read_outdoor_humidity(
-                    forecast_snapshot=self.strategic.forecast_snapshot
-                )
-                _outdoor_humidity = (_hum_reading.value if _hum_reading else None) or 50.0
-                self.aux_heat_learner.record_interval(
-                    aux_heat_active=aux_heat_active,
-                    outdoor_temp_f=outdoor_temp,
-                    effective_outdoor_temp_f=_eff_outdoor,
-                    outdoor_humidity=_outdoor_humidity,
-                    setpoint_delta_f=_setpoint_delta,
-                    dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
-                    hvac_running=hvac_running,
-                    hvac_mode=thermo_state.hvac_mode or "off",
-                    power_watts=power_watts,
-                )
-        except Exception:
-            _LOGGER.debug("Aux heat learner update failed", exc_info=True)
+        if self.aux_heat_learner is not None:
+            try:
+                if outdoor_temp is not None and thermo_state.indoor_temp is not None:
+                    _setpoint_delta = abs(
+                        thermo_state.indoor_temp
+                        - (thermo_state.effective_setpoint or thermo_state.indoor_temp)
+                    )
+                    _hum_reading = self.sensor_hub.read_outdoor_humidity(
+                        forecast_snapshot=self.strategic.forecast_snapshot
+                    )
+                    _outdoor_humidity = (_hum_reading.value if _hum_reading else None) or 50.0
+                    self.aux_heat_learner.record_interval(
+                        aux_heat_active=aux_heat_active,
+                        outdoor_temp_f=outdoor_temp,
+                        effective_outdoor_temp_f=_eff_outdoor,
+                        outdoor_humidity=_outdoor_humidity,
+                        setpoint_delta_f=_setpoint_delta,
+                        dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                        hvac_running=hvac_running,
+                        hvac_mode=thermo_state.hvac_mode or "off",
+                        power_watts=power_watts,
+                    )
+            except Exception:
+                _LOGGER.debug("Aux heat learner update failed", exc_info=True)
 
         # Compute resistive BTU for EKF (separates HP from strip contribution).
         # When a power sensor is available, subtract the learned HP baseline from
@@ -1079,7 +1096,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # the EKF receives correct heat input rather than absorbing strip heat
         # into the compressor capacity estimate.
         self._cached_aux_resistive_btu = 0.0
-        if aux_heat_active:
+        if aux_heat_active and self.aux_heat_learner is not None:
             if power_watts is not None:
                 hp_watts = self.aux_heat_learner.learned_hp_watts
                 if power_watts > hp_watts:
@@ -1108,7 +1125,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 grid_import_watts=grid_import_reading.value if grid_import_reading else None,
                 actual_cop=actual_cop,
                 aux_heat_active=aux_heat_active,
-                hp_baseline_watts=self.aux_heat_learner.learned_hp_watts,
+                hp_baseline_watts=(
+                    self.aux_heat_learner.learned_hp_watts
+                    if self.aux_heat_learner is not None else None
+                ),
             )
         except Exception:
             _LOGGER.warning("Savings tracking failed", exc_info=True)
@@ -1130,56 +1150,57 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         except Exception:
             _LOGGER.warning("Baseline capture failed", exc_info=True)
 
-        # ── Counterfactual simulation step ─────────────────────────
+        # ── Counterfactual simulation step (full mode only) ────────
 
-        try:
-            if self.baseline_capture.template is not None and outdoor_temp is not None:
-                baseline_setpoint = self.baseline_capture.get_baseline_setpoint(now)
-                stored_mode = self.baseline_capture.get_baseline_mode(now)
-                # Re-derive mode from current weather to avoid cross-season
-                # mismatch (e.g. summer-captured "cool" used in winter).
-                if stored_mode == "off":
-                    baseline_mode = "off"
-                elif stored_mode is not None:
-                    baseline_mode = self.strategic.detect_mode(
-                        self.strategic.forecast_snapshot or []
-                    )
-                    if baseline_mode == "off":
-                        # Near balance point — stored mode is a better guess
-                        baseline_mode = stored_mode
-                else:
-                    baseline_mode = None
-                if baseline_setpoint is not None and baseline_mode is not None:
-                    cloud_cover = None
-                    sun_elevation = None
-                    if new_forecast:
-                        cloud_cover = new_forecast[0].cloud_cover
-                        sun_elevation = new_forecast[0].sun_elevation
+        if not self._is_lite:
+            try:
+                if self.baseline_capture.template is not None and outdoor_temp is not None:
+                    baseline_setpoint = self.baseline_capture.get_baseline_setpoint(now)
+                    stored_mode = self.baseline_capture.get_baseline_mode(now)
+                    # Re-derive mode from current weather to avoid cross-season
+                    # mismatch (e.g. summer-captured "cool" used in winter).
+                    if stored_mode == "off":
+                        baseline_mode = "off"
+                    elif stored_mode is not None:
+                        baseline_mode = self.strategic.detect_mode(
+                            self.strategic.forecast_snapshot or []
+                        )
+                        if baseline_mode == "off":
+                            # Near balance point — stored mode is a better guess
+                            baseline_mode = stored_mode
+                    else:
+                        baseline_mode = None
+                    if baseline_setpoint is not None and baseline_mode is not None:
+                        cloud_cover = None
+                        sun_elevation = None
+                        if new_forecast:
+                            cloud_cover = new_forecast[0].cloud_cover
+                            sun_elevation = new_forecast[0].sun_elevation
 
-                    is_precip = new_forecast[0].precipitation if new_forecast else False
+                        is_precip = new_forecast[0].precipitation if new_forecast else False
 
-                    self.counterfactual.step(
-                        now=now,
-                        outdoor_temp=outdoor_temp,
-                        baseline_setpoint=baseline_setpoint,
-                        baseline_mode=baseline_mode,
-                        estimator=self.estimator,
-                        dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
-                        cloud_cover=cloud_cover,
-                        sun_elevation=sun_elevation,
-                        carbon_intensity=co2_intensity,
-                        electricity_rate=elec_rate,
-                        real_indoor_temp=thermo_state.indoor_temp,
-                        people_home_count=self.occupancy.get_people_home_count(),
-                        precipitation=is_precip,
-                        indoor_humidity=self._current_indoor_humidity,
-                        aux_threshold_f=(
-                            self.aux_heat_learner.threshold_f
-                            if self.aux_heat_learner.is_learned else None
-                        ),
-                    )
-        except Exception:
-            _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
+                        self.counterfactual.step(
+                            now=now,
+                            outdoor_temp=outdoor_temp,
+                            baseline_setpoint=baseline_setpoint,
+                            baseline_mode=baseline_mode,
+                            estimator=self.estimator,
+                            dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                            cloud_cover=cloud_cover,
+                            sun_elevation=sun_elevation,
+                            carbon_intensity=co2_intensity,
+                            electricity_rate=elec_rate,
+                            real_indoor_temp=thermo_state.indoor_temp,
+                            people_home_count=self.occupancy.get_people_home_count(),
+                            precipitation=is_precip,
+                            indoor_humidity=self._current_indoor_humidity,
+                            aux_threshold_f=(
+                                self.aux_heat_learner.threshold_f
+                                if self.aux_heat_learner.is_learned else None
+                            ),
+                        )
+            except Exception:
+                _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
 
         # ── Performance profiler feed ─────────────────────────────
         # The profiler handles hvac_mode="off" internally (sets _previous_*
@@ -1191,8 +1212,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 thermo_state.indoor_temp is not None
                 and outdoor_temp is not None
             ):
-                c_inv = self.estimator.C_inv
-                c_air = 1.0 / c_inv if c_inv > 0 else None
+                c_inv = self.estimator.C_inv if self.estimator is not None else None
+                c_air = 1.0 / c_inv if c_inv and c_inv > 0 else None
                 self._last_profiler_status = self.profiler.record_observation(
                     indoor_temp=thermo_state.indoor_temp,
                     outdoor_temp=outdoor_temp,
@@ -1364,7 +1385,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         use_greybox_now = self._should_use_greybox()
 
         # Update balance point if using adaptive or grey-box model
-        if active_model is self.adaptive_model or use_greybox_now:
+        if self.adaptive_model is not None and (active_model is self.adaptive_model or use_greybox_now):
             bp = self.adaptive_model.resist_balance_point
             if bp is not None:
                 self.strategic.resist_balance_point = bp
@@ -1386,7 +1407,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         try:
             _aux_threshold = (
                 self.aux_heat_learner.threshold_f
-                if self.aux_heat_learner.is_learned else None
+                if self.aux_heat_learner is not None and self.aux_heat_learner.is_learned
+                else None
             )
             _aux_active = getattr(self, "_cached_aux_heat_active", False)
             schedule = await self.hass.async_add_executor_job(
@@ -1688,10 +1710,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
     async def async_reset_model(self) -> None:
         """Reset the learned thermal model and profiler to a fresh state (service call).
 
+        No-op in lite mode (nothing to reset).
         Clears the EKF state, performance profiler, model tracker, solar adjuster,
         baseline capture, and counterfactual simulator. Re-runs history bootstrap
         afterward so the fresh model starts learning immediately.
         """
+        if self._is_lite:
+            _LOGGER.info("Reset not applicable in lite mode")
+            return
         try:
             _LOGGER.warning(
                 "Resetting learned model — clearing %d EKF observations, "
@@ -1921,6 +1947,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     def export_model(self) -> dict:
         """Export learned Kalman filter parameters in human-readable format."""
+        if self.estimator is None:
+            return {"error": "No thermal model — lite mode uses weather-based scheduling"}
         return {
             "confidence": round(self.estimator.confidence * 100, 1),
             "observations": self.estimator._n_obs,
@@ -1936,6 +1964,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     def import_model(self, model_data: dict) -> None:
         """Import Kalman filter state from exported data."""
+        if self._is_lite:
+            _LOGGER.warning("Import not supported in lite mode")
+            return
         state_data = model_data.get("state")
         if not state_data:
             _LOGGER.error("Import failed: no 'state' key in model data")
@@ -2294,11 +2325,15 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     def _is_learning_active(self) -> bool:
         """Check if the model is still calibrating (below confidence threshold)."""
+        if self.estimator is None:
+            return False  # Lite mode: no learning
         return self.estimator.confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD
 
     @property
     def _baseline_ready_for_control(self) -> bool:
         """Optimizer may only write setpoints after baseline is captured and model is confident."""
+        if self.estimator is None:
+            return True  # Lite mode: always ready
         return (
             self.baseline_capture.is_ready
             and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
@@ -2307,7 +2342,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
     def _update_accuracy_tier(self) -> None:
         """Update the savings accuracy tier based on baseline and model confidence."""
         baseline_conf = self.baseline_capture.confidence
-        model_conf = self.estimator.confidence
+        model_conf = self.estimator.confidence if self.estimator is not None else 1.0
         is_beestat = self._initialization_mode == INIT_MODE_BEESTAT
 
         if baseline_conf >= 0.7 and model_conf >= 0.5:
@@ -2518,11 +2553,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "solar_adjuster": self.solar_adjuster.to_dict(),
             "override_tracker": self.override_tracker.to_dict(),
             "savings_tracker": self.savings_tracker.to_dict(),
-            "thermal_estimator": self.estimator.to_dict(),
+            "thermal_estimator": self.estimator.to_dict() if self.estimator is not None else {},
             "baseline_capture": self.baseline_capture.to_dict(),
             "counterfactual": self.counterfactual.to_dict(),
             "performance_profiler": self.profiler.to_dict(),
-            "aux_heat_learner": self.aux_heat_learner.to_dict(),
+            "aux_heat_learner": self.aux_heat_learner.to_dict() if self.aux_heat_learner is not None else {},
             "_history_bootstrap_completed": self._history_bootstrap_completed,
             "_bootstrap_retry_count": self._bootstrap_retry_count,
         }
@@ -2594,7 +2629,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             except Exception:
                 _LOGGER.warning("Failed to restore savings tracker — using fresh state",
                                 exc_info=True)
-        if "thermal_estimator" in stored:
+        if "thermal_estimator" in stored and not self._is_lite:
             try:
                 self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
                 self.adaptive_model = AdaptivePerformanceModel(self.estimator)
@@ -2643,7 +2678,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             except Exception:
                 _LOGGER.warning("Failed to restore performance profiler — using fresh state",
                                 exc_info=True)
-        if "aux_heat_learner" in stored:
+        if "aux_heat_learner" in stored and not self._is_lite:
             try:
                 self.aux_heat_learner = AuxHeatLearner.from_dict(
                     stored["aux_heat_learner"],
@@ -2958,12 +2993,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         _outdoor_val = _outdoor_info.get("value") if _outdoor_info else None
         _eff_cool = (
             self.estimator.cooling_capacity(_outdoor_val)
-            if _outdoor_val is not None and self.estimator._n_obs > 0
+            if self.estimator is not None and _outdoor_val is not None and self.estimator._n_obs > 0
             else None
         )
         _eff_heat = (
             self.estimator.heating_capacity(_outdoor_val)
-            if _outdoor_val is not None and self.estimator._n_obs > 0
+            if self.estimator is not None and _outdoor_val is not None and self.estimator._n_obs > 0
             else None
         )
 
@@ -2972,6 +3007,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "phase": self._phase,
             "active": self._active and not self._paused,
             "monitor_only": self._monitor_only,
+            "is_lite": self._is_lite,
             "override_detected": self.watchdog.is_override_active,
             "baseline_only_mode": not self._baseline_ready_for_control,
             "baseline_ready": self.baseline_capture.is_ready,
@@ -3032,7 +3068,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ),
             "predicted_indoor_temp": (
                 round(self.estimator.T_air, 2)
-                if self.estimator._n_obs > 0
+                if self.estimator is not None and self.estimator._n_obs > 0
                 else None
             ),
             "model_accuracy_mae": tactical_mae,
@@ -3047,22 +3083,24 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "solar_coefficient": self.solar_adjuster.solar_coefficient,
 
             # Kalman filter / adaptive model
-            "kalman_confidence": self.estimator.confidence,
-            "kalman_r_value": self.estimator.R_value,
-            "kalman_thermal_mass": self.estimator.thermal_mass,
-            "kalman_cooling_capacity": float(self.estimator.x[6]),
-            "kalman_heating_capacity": float(self.estimator.x[7]),
+            "kalman_confidence": self.estimator.confidence if self.estimator is not None else None,
+            "kalman_r_value": self.estimator.R_value if self.estimator is not None else None,
+            "kalman_thermal_mass": self.estimator.thermal_mass if self.estimator is not None else None,
+            "kalman_cooling_capacity": float(self.estimator.x[6]) if self.estimator is not None else None,
+            "kalman_heating_capacity": float(self.estimator.x[7]) if self.estimator is not None else None,
             "effective_cooling_capacity": _eff_cool,
             "effective_heating_capacity": _eff_heat,
-            "kalman_mass_temp": self.estimator.T_mass,
-            "kalman_observations": self.estimator._n_obs,
+            "kalman_mass_temp": self.estimator.T_mass if self.estimator is not None else None,
+            "kalman_observations": self.estimator._n_obs if self.estimator is not None else 0,
             "using_adaptive_model": (
                 self._use_adaptive
                 and not self._use_greybox
+                and self.estimator is not None
                 and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
             ),
             "using_greybox_model": (
                 self._use_greybox
+                and self.estimator is not None
                 and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
             ),
             "learning_active": self._is_learning_active(),
@@ -3072,7 +3110,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "bootstrap_retry_count": self._bootstrap_retry_count,
 
             # Thermal load breakdown (BTU/hr components from EKF)
-            "thermal_load_components": self.estimator.thermal_load_components,
+            "thermal_load_components": (
+                self.estimator.thermal_load_components
+                if self.estimator is not None else {}
+            ),
             "house_thermal_load_btu": self._compute_net_passive_load(),
 
             # Overrides
@@ -3270,13 +3311,21 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Aux heat learner
             "aux_heat_threshold_f": (
                 self.aux_heat_learner.threshold_f
-                if self.aux_heat_learner.is_learned else None
+                if self.aux_heat_learner is not None and self.aux_heat_learner.is_learned
+                else None
             ),
-            "aux_heat_threshold_learned": self.aux_heat_learner.is_learned,
-            "aux_heat_event_count": self.aux_heat_learner.event_count,
+            "aux_heat_threshold_learned": (
+                self.aux_heat_learner.is_learned
+                if self.aux_heat_learner is not None else False
+            ),
+            "aux_heat_event_count": (
+                self.aux_heat_learner.event_count
+                if self.aux_heat_learner is not None else 0
+            ),
             "aux_heat_learned_hp_watts": (
                 round(self.aux_heat_learner.learned_hp_watts)
-                if self.aux_heat_learner.hp_watts_learned else None
+                if self.aux_heat_learner is not None and self.aux_heat_learner.hp_watts_learned
+                else None
             ),
             "aux_heat_kwh_today": today_savings.total_aux_heat_kwh,
             "avoided_aux_heat_kwh_today": today_savings.total_avoided_aux_kwh,

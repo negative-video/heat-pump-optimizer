@@ -27,77 +27,79 @@ async def async_setup_entry(
     """Set up sensor entities from a config entry."""
     coordinator: HeatPumpOptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    # Core sensors — always created (both lite and full modes)
     entities = [
         OptimizerPhaseSensor(coordinator, entry),
         TargetSetpointSensor(coordinator, entry),
         NextActionSensor(coordinator, entry),
-        PredictedTempSensor(coordinator, entry),
-        PredictionErrorSensor(coordinator, entry),
-        ModelAccuracySensor(coordinator, entry),
         SavingsPercentSensor(coordinator, entry),
-        # Kalman filter / adaptive model sensors
-        ModelConfidenceSensor(coordinator, entry),
-        EnvelopeRValueSensor(coordinator, entry),
-        ThermalMassSensor(coordinator, entry),
-        CoolingCapacitySensor(coordinator, entry),
-        HeatingCapacitySensor(coordinator, entry),
-        EffectiveCoolingCapacitySensor(coordinator, entry),
-        EffectiveHeatingCapacitySensor(coordinator, entry),
-        ThermalMassTempSensor(coordinator, entry),
-        # Diagnostic sensors
         ScheduleSensor(coordinator, entry),
-        # SensorHub diagnostic sensors
         OutdoorTempSourceSensor(coordinator, entry),
         IndoorTempSourceSensor(coordinator, entry),
         NetHvacPowerSensor(coordinator, entry),
-        # Savings tracking sensors
+        OccupancyForecastSensor(coordinator, entry),
+        ApparentTemperatureSensor(coordinator, entry),
+        # Savings tracking sensors (both modes)
         SavingsKwhTodaySensor(coordinator, entry),
         SavingsKwhCumulativeSensor(coordinator, entry),
         SavingsCostTodaySensor(coordinator, entry),
         SavingsCostCumulativeSensor(coordinator, entry),
         SavingsCO2TodaySensor(coordinator, entry),
         SavingsCO2CumulativeSensor(coordinator, entry),
-        BaselineKwhTodaySensor(coordinator, entry),
-        WorstCaseKwhTodaySensor(coordinator, entry),
-        # Calendar occupancy / pre-conditioning sensors
-        OccupancyForecastSensor(coordinator, entry),
-        PreconditioningStatusSensor(coordinator, entry),
-        # Comfort / humidity sensors
-        ApparentTemperatureSensor(coordinator, entry),
-        # Room-aware sensing (only meaningful when configured)
-        OccupiedRoomsSensor(coordinator, entry),
-        WeightedIndoorTempSensor(coordinator, entry),
-        # Counterfactual digital twin savings sensors
-        RuntimeSavingsTodaySensor(coordinator, entry),
-        CopSavingsTodaySensor(coordinator, entry),
-        RateSavingsTodaySensor(coordinator, entry),
-        CarbonShiftSavingsTodaySensor(coordinator, entry),
-        BaselineAvgCopSensor(coordinator, entry),
-        OptimizedAvgCopSensor(coordinator, entry),
-        CopImprovementPctSensor(coordinator, entry),
-        ComfortHoursGainedSensor(coordinator, entry),
-        BaselineComfortViolationsSensor(coordinator, entry),
-        BaselineAvgIndoorTempSensor(coordinator, entry),
-        BaselineConfidenceSensor(coordinator, entry),
         SavingsAccuracyTierSensor(coordinator, entry),
-        ProfilerStatusSensor(coordinator, entry),
         LearningProgressSensor(coordinator, entry),
-        # Auxiliary appliance sensors
-        ApplianceThermalLoadSensor(coordinator, entry),
-        ActiveAppliancesSensor(coordinator, entry),
-        # Aux/emergency heat sensors
-        AuxHeatThresholdSensor(coordinator, entry),
-        AuxHeatKwhTodaySensor(coordinator, entry),
-        AvoidedAuxHeatKwhSensor(coordinator, entry),
-        # Thermostat blend mitigation diagnostics
-        CrossSensorSpreadSensor(coordinator, entry),
-        # House thermal load breakdown
-        HouseThermalLoadSensor(coordinator, entry),
-        WeatherHeatTransferSensor(coordinator, entry),
-        SolarHeatGainSensor(coordinator, entry),
-        OccupancyHeatGainSensor(coordinator, entry),
-        BoundaryZoneHeatTransferSensor(coordinator, entry),
     ]
+
+    # Full mode only — EKF, counterfactual, learning, and advanced diagnostics
+    if not coordinator._is_lite:
+        entities.extend([
+            PredictedTempSensor(coordinator, entry),
+            PredictionErrorSensor(coordinator, entry),
+            ModelAccuracySensor(coordinator, entry),
+            # Kalman filter / adaptive model sensors
+            ModelConfidenceSensor(coordinator, entry),
+            EnvelopeRValueSensor(coordinator, entry),
+            ThermalMassSensor(coordinator, entry),
+            CoolingCapacitySensor(coordinator, entry),
+            HeatingCapacitySensor(coordinator, entry),
+            EffectiveCoolingCapacitySensor(coordinator, entry),
+            EffectiveHeatingCapacitySensor(coordinator, entry),
+            ThermalMassTempSensor(coordinator, entry),
+            BaselineKwhTodaySensor(coordinator, entry),
+            WorstCaseKwhTodaySensor(coordinator, entry),
+            PreconditioningStatusSensor(coordinator, entry),
+            # Room-aware sensing
+            OccupiedRoomsSensor(coordinator, entry),
+            WeightedIndoorTempSensor(coordinator, entry),
+            # Counterfactual digital twin savings sensors
+            RuntimeSavingsTodaySensor(coordinator, entry),
+            CopSavingsTodaySensor(coordinator, entry),
+            RateSavingsTodaySensor(coordinator, entry),
+            CarbonShiftSavingsTodaySensor(coordinator, entry),
+            BaselineAvgCopSensor(coordinator, entry),
+            OptimizedAvgCopSensor(coordinator, entry),
+            CopImprovementPctSensor(coordinator, entry),
+            ComfortHoursGainedSensor(coordinator, entry),
+            BaselineComfortViolationsSensor(coordinator, entry),
+            BaselineAvgIndoorTempSensor(coordinator, entry),
+            BaselineConfidenceSensor(coordinator, entry),
+            ProfilerStatusSensor(coordinator, entry),
+            # Auxiliary appliance sensors
+            ApplianceThermalLoadSensor(coordinator, entry),
+            ActiveAppliancesSensor(coordinator, entry),
+            # Aux/emergency heat sensors
+            AuxHeatThresholdSensor(coordinator, entry),
+            AuxHeatKwhTodaySensor(coordinator, entry),
+            AvoidedAuxHeatKwhSensor(coordinator, entry),
+            # Thermostat blend mitigation diagnostics
+            CrossSensorSpreadSensor(coordinator, entry),
+            # House thermal load breakdown
+            HouseThermalLoadSensor(coordinator, entry),
+            WeatherHeatTransferSensor(coordinator, entry),
+            SolarHeatGainSensor(coordinator, entry),
+            OccupancyHeatGainSensor(coordinator, entry),
+            BoundaryZoneHeatTransferSensor(coordinator, entry),
+        ])
     async_add_entities(entities)
 
 

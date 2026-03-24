@@ -20,6 +20,7 @@ from homeassistant.helpers.start import async_at_started
 from .const import (
     CONF_AWAY_COMFORT_DELTA,
     CONF_CLIMATE_ENTITY,
+    CONF_SETUP_COMPLEXITY,
     CONF_COMFORT_COOL_MAX,
     CONF_COMFORT_COOL_MIN,
     CONF_COMFORT_HEAT_MAX,
@@ -110,6 +111,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Keep singular for backward compat with coordinator interface
     if not weather_entity and weather_entities:
         weather_entity = weather_entities[0]
+
+    # Setup complexity (default to "full" for backward compat with existing entries)
+    setup_complexity = entry.data.get(CONF_SETUP_COMPLEXITY, "full")
 
     # Initialization mode (default to beestat for backward compat with existing entries)
     init_mode = entry.data.get(CONF_INITIALIZATION_MODE, INIT_MODE_BEESTAT)
@@ -211,6 +215,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         behavior=behavior,
         sleep_config=sleep_config,
         monitor_only=monitor_only,
+        setup_complexity=setup_complexity,
     )
 
     # Initialize (loads persisted state, starts watchdog, runs first optimization)

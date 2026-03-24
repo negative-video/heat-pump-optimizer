@@ -75,6 +75,9 @@ from .const import (
     CONF_INDOOR_TEMP_ENTITIES,
     CONF_INDOOR_WEIGHTING_MODE,
     CONF_INITIALIZATION_MODE,
+    CONF_SETUP_COMPLEXITY,
+    SETUP_LITE,
+    SETUP_FULL,
     CONF_MAX_SETPOINT_CHANGE_PER_HOUR,
     CONF_MODEL_IMPORT_DATA,
     CONF_MONITOR_ONLY,
@@ -354,7 +357,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             if weather_entities:
                 user_input[CONF_WEATHER_ENTITY] = weather_entities[0]
             self._config_data.update(user_input)
-            return await self.async_step_hvac_specs()
+            return await self.async_step_setup_complexity()
 
         # Auto-discover entities for smart defaults
         discovery = EntityDiscovery(self.hass)
@@ -403,6 +406,43 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(schema),
+        )
+
+    # ── Step 1b: Setup Complexity ──────────────────────────────────────
+
+    async def async_step_setup_complexity(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose between minimal (weather-based) and full (EKF) setup."""
+        if user_input is not None:
+            complexity = user_input.get(CONF_SETUP_COMPLEXITY, SETUP_FULL)
+            self._config_data[CONF_SETUP_COMPLEXITY] = complexity
+            if complexity == SETUP_LITE:
+                # Skip HVAC specs, sensors, thermal profile — go to comfort
+                return await self.async_step_comfort()
+            return await self.async_step_hvac_specs()
+
+        return self.async_show_form(
+            step_id="setup_complexity",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_SETUP_COMPLEXITY, default=SETUP_LITE
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(
+                                value=SETUP_LITE,
+                                label="Minimal setup",
+                            ),
+                            selector.SelectOptionDict(
+                                value=SETUP_FULL,
+                                label="Full setup",
+                            ),
+                        ],
+                        mode=selector.SelectSelectorMode.LIST,
+                    ),
+                ),
+            }),
         )
 
     # ── Step 2: HVAC System Specs ────────────────────────────────────

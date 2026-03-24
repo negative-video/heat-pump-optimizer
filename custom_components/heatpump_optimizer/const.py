@@ -24,6 +24,11 @@ INIT_MODE_LEARNING = "learning"
 INIT_MODE_BEESTAT = "beestat"
 INIT_MODE_IMPORT = "import"
 
+# Setup complexity modes
+CONF_SETUP_COMPLEXITY = "setup_complexity"
+SETUP_LITE = "lite"
+SETUP_FULL = "full"
+
 # Savings tracking config keys (optional — configured via options flow)
 CONF_CO2_ENTITY = "co2_entity"
 CONF_ELECTRICITY_RATE_ENTITY = "electricity_rate_entity"

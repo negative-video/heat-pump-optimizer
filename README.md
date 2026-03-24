@@ -8,21 +8,32 @@ A Home Assistant integration that learns the thermal behavior of your home and u
 
 Works with any thermostat Home Assistant can control (Ecobee, Nest, Z-Wave, generic climate entities), including dual-setpoint thermostats that accept separate heat and cool targets.
 
-## Background
-
-A heat pump's efficiency depends on the outdoor temperature. On a mild morning it might deliver 3–4 units of heating or cooling per unit of electricity. By the hottest part of the afternoon, that ratio can drop below 2:1.
-
-Most thermostats don't account for this — they react to the current temperature and run whenever the house drifts outside the setpoint, even during the least efficient hours. This integration looks at the forecast, identifies when the system will run most efficiently, and front-loads work into those hours.
-
 ## How It Works
 
-The integration builds a physics-based thermal model of your home (insulation, thermal mass, HVAC capacity) that it learns automatically from thermostat readings via a Kalman filter. Three control layers run on top of it:
+### Why Timing Matters
+
+A heat pump doesn't generate heat — it moves it. In cooling mode, the outdoor unit dumps indoor heat into the outside air. In heating mode, it pulls heat from outdoor air and brings it inside. Either way, it's working against the temperature difference between indoors and outdoors.
+
+The bigger that gap, the harder the compressor works to move the same amount of heat. On a 95°F afternoon, your system might run for 50 minutes to cool your house by one degree. At 7 AM when it's 72°F outside, the same result takes 15 minutes — using a third of the electricity and producing a third of the CO₂.
+
+This integration doesn't reduce your comfort to save energy. Your house stays within the temperature range you set. Instead, it shifts *when* the work happens — pre-cooling your home during the cool morning hours when the system is efficient, then coasting through the hot afternoon on the thermal buffer your home's walls and furnishings provide. Same comfort, less electricity, because the same BTUs were moved when it was easier to move them.
+
+### Minimal Mode
+
+The optimizer scores each hour of the next 24 hours using the weather forecast: cooler hours rank higher for cooling (the system works less per BTU moved), warmer hours rank higher for heating. If you've configured electricity rates, cheaper hours get a boost too.
+
+Hours are grouped into tiers — pre-condition, maintain, and coast. During pre-condition hours, the setpoint moves to the aggressive end of your comfort range (cooler for cooling, warmer for heating). During coast hours, it relaxes to the other end. Your thermostat handles the actual cycling — the optimizer just tells it where to aim.
+
+### Full Mode
+
+Full mode adds a physics-based thermal model that learns your home's insulation, thermal mass, and HVAC capacity automatically from thermostat readings via an Extended Kalman Filter. Three control layers run on top of it:
 
 1. **Strategic planner** — Re-optimizes setpoint schedule every 1–4 hours based on weather forecasts, electricity rates, and grid carbon intensity.
 2. **Tactical controller** — Checks reality against the model every 5 minutes and nudges the setpoint if the house is drifting.
 3. **Watchdog** — Detects manual thermostat changes, mode switches, and sensor failures.
 
-### Model Stability
+<details>
+<summary><strong>Model Stability (EKF safeguards)</strong></summary>
 
 The Extended Kalman Filter jointly estimates several coupled building parameters (insulation R-value, thermal mass, HVAC capacity, solar gain) from a single observation — your thermostat's temperature reading. Several safeguards prevent these estimates from diverging during low-information conditions:
 
@@ -32,20 +43,29 @@ The Extended Kalman Filter jointly estimates several coupled building parameters
 
 **HVAC observability gating** — Cooling capacity only learns when cooling is running; heating capacity only learns when heating is running. Cross-correlations are zeroed for unobserved modes to prevent covariance leakage from dragging idle-mode estimates toward bounds.
 
+</details>
+
 ## Features
 
-- **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data. Or import a [Beestat](https://beestat.io/) profile to start with measured data.
+- **Two setup modes** — Start with weather-based scheduling in under 30 seconds, or go deep with a full thermal model that learns your home's characteristics over time.
 - **Forecast-driven scheduling** — Hourly weather forecasts, with optional electricity rate and carbon intensity awareness.
-- **Savings tracking** — A counterfactual simulation of what your thermostat would have done without optimization, decomposed into runtime, COP, rate, and carbon components.
+- **Savings tracking** — Efficiency gain metrics and estimated kWh/CO₂/cost savings in minimal mode. Full counterfactual simulation with decomposed savings (runtime, COP, rate, carbon) in full mode.
 - **Occupancy-aware** — Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
+- **Demand response** — Temporarily widen comfort bounds via service call or automation.
+- **Tier-aware dashboard** — Custom sidebar panel adapts its layout to your current mode and learning stage.
+
+<details>
+<summary><strong>Full mode additional features</strong></summary>
+
+- **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data. Or import a [Beestat](https://beestat.io/) profile to start with measured data.
 - **Room-aware sensing** — Weights indoor temperature by room occupancy instead of averaging all sensors equally.
-- **House thermal load breakdown** — Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
+- **House thermal load breakdown** — Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects.
 - **Auxiliary appliances** — Model thermal impacts of other equipment (heat pump water heaters, dryers, ovens) so the Kalman filter doesn't confuse their effects with building parameter changes.
 - **Aux/emergency heat awareness** — Automatically learns your heat pump's baseline power draw and derives the resistive strip's BTU contribution so the EKF treats it as a known input rather than a surprise heating event.
 - **Sleep schedule** — Configure tighter nighttime comfort bounds with separate heating and cooling targets, active during a customizable sleep window.
-- **Demand response** — Temporarily widen comfort bounds via service call or automation.
-- **Tier-aware dashboard** — Custom sidebar panel adapts its layout to your current learning stage: live observation cards and a retrospective chart during learning mode; savings, forecast, and thermal profile views once calibrated.
 - **Diagnostic sensors** — 50+ entities exposing model state, thermal load breakdown, predictions, savings breakdowns, and confidence levels.
+
+</details>
 
 ## Getting Started
 
@@ -68,19 +88,43 @@ Or manually:
 4. Restart Home Assistant
 5. Go to **Settings → Devices & Services → Add Integration** → search **Heat Pump Optimizer**
 
-### Initial Setup
+### Quick Setup (Minimal)
 
-The config flow has three steps:
+The fastest path to savings. You need two things: a thermostat Home Assistant can control, and a weather integration with hourly forecasts.
+
+1. Select **Minimal setup** when prompted for setup mode
+2. Set your comfort ranges (e.g., 72–78°F cooling, 62–70°F heating)
+3. Done — the optimizer starts scheduling immediately
+
+| What you'll set | Example |
+|-----------------|---------|
+| Thermostat entity | `climate.main_floor` |
+| Weather entity | `weather.home` |
+| Comfort range | 72–78°F cooling, 62–70°F heating |
+
+The optimizer pre-conditions your home during efficient hours and coasts through inefficient ones, staying within your comfort range. No sensors to configure, no model to train.
+
+### Full Setup
+
+For deeper optimization, select **Full setup** when prompted. This adds:
 
 | Step | What you'll configure |
 |------|----------------------|
-| **Equipment** | Thermostat + one or more weather entities (first is primary, rest are fallbacks) |
+| **HVAC Specs** | Optional tonnage, square footage, aux heat type — improves cold-start accuracy |
+| **Air Sensors** | Optional indoor/outdoor temperature and humidity sensors |
+| **Presence** | Optional person entities for home/away detection |
 | **Thermal Model** | Learn from scratch, import a Beestat profile, or restore a previously exported model |
 | **Temperature Boundaries** | Comfort range (where the optimizer works) and safety limits (never exceeded) |
 
 After setup, open **Configure** on the integration card for advanced options: sensors, energy tracking, optimizer tuning, occupancy, calendars, room-aware sensing, and auxiliary appliances.
 
+You can upgrade from minimal to full at any time through the integration's options flow.
+
 ### What to Expect
+
+**Minimal mode** — Savings sensors start accumulating from the first day. You'll see efficiency gain percentage, estimated kWh saved, and CO₂ avoided grow as the optimizer shifts runtime to better hours.
+
+**Full mode:**
 
 | Timeline | What's happening | Dashboard shows |
 |----------|-----------------|-----------------|

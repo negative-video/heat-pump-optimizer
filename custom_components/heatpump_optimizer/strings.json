@@ -13,6 +13,16 @@
           "monitor_only": "Run the full optimization pipeline without writing setpoints. Safe to point at a thermostat already controlled by another instance."
         }
       },
+      "setup_complexity": {
+        "title": "Setup Mode",
+        "description": "Choose how much to configure. You can upgrade from minimal to full at any time in the integration options.",
+        "data": {
+          "setup_complexity": "Setup mode"
+        },
+        "data_description": {
+          "setup_complexity": "Minimal uses weather forecasts to shift HVAC runtime to efficient hours. No sensors to add, no model to train \u2014 it starts optimizing immediately. Full adds a physics-based thermal model that learns your home over weeks for more precise scheduling."
+        }
+      },
       "thermal_profile": {
         "title": "Thermal Model",
         "description": "Choose how to initialize the optimizer's thermal model of your home. Learning mode works for everyone; a Beestat profile speeds things up.",
