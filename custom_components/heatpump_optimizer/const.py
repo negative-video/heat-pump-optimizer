@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.25"
+VERSION = "0.1.26"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -125,6 +125,7 @@ CONF_OUTDOOR_TEMP_ENTITIES = "outdoor_temp_entities"
 CONF_OUTDOOR_HUMIDITY_ENTITIES = "outdoor_humidity_entities"
 CONF_WIND_SPEED_ENTITY = "wind_speed_entity"
 CONF_SOLAR_IRRADIANCE_ENTITY = "solar_irradiance_entity"
+CONF_UV_INDEX_ENTITY = "uv_index_entity"
 CONF_BAROMETRIC_PRESSURE_ENTITY = "barometric_pressure_entity"
 CONF_SUN_ENTITY = "sun_entity"
 
@@ -150,6 +151,13 @@ CONF_OCCUPANCY_DEBOUNCE_MINUTES = "occupancy_debounce_minutes"
 CONF_SOLAR_PRODUCTION_ENTITY = "solar_production_entity"
 CONF_GRID_IMPORT_ENTITY = "grid_import_entity"
 CONF_SOLAR_EXPORT_RATE_ENTITY = "solar_export_rate_entity"
+
+# Solar panel specifications (all optional — for deriving irradiance from production)
+CONF_SOLAR_PANEL_AREA = "solar_panel_area"  # total panel area (stored in m²)
+CONF_SOLAR_PANEL_COUNT = "solar_panel_count"  # number of panels
+CONF_SOLAR_PANEL_AREA_EACH = "solar_panel_area_each"  # per-panel area (stored in m²)
+CONF_SOLAR_PANEL_EFFICIENCY = "solar_panel_efficiency"  # 0.05–0.35
+DEFAULT_SOLAR_PANEL_EFFICIENCY = 0.20
 
 # Sensor slot defaults
 DEFAULT_SUN_ENTITY = "sun.sun"

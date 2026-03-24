@@ -118,6 +118,7 @@
           "sleep_schedule": "Sleep schedule",
           "presence": "Presence & away",
           "energy": "Energy & cost tracking",
+          "solar_panels": "Solar panels",
           "equipment": "Thermostat & weather source",
           "advanced": "Advanced settings"
         }
@@ -163,6 +164,7 @@
           "outdoor_humidity_entities": "Outdoor humidity sensors",
           "wind_speed_entity": "Wind speed sensor",
           "solar_irradiance_entity": "Solar irradiance sensor (W/m²)",
+          "uv_index_entity": "UV index sensor",
           "barometric_pressure_entity": "Barometric pressure sensor",
           "sun_entity": "Sun entity",
           "door_window_entities": "Door/window contact sensors",
@@ -182,9 +184,6 @@
           "electricity_flat_rate": "Flat electricity rate ($/kWh)",
           "carbon_weight": "Carbon optimization weight",
           "cost_weight": "Cost optimization weight",
-          "solar_production_entity": "Solar production sensor (watts)",
-          "grid_import_entity": "Grid import sensor (watts)",
-          "solar_export_rate_entity": "Solar export rate sensor",
           "tou_schedule": "Time-of-use rate schedule (JSON)",
           "demand_response_entity": "Demand response trigger entity"
         },
@@ -196,11 +195,30 @@
           "electricity_flat_rate": "Flat electricity rate in $/kWh. Only used when no rate entity is configured. Set to 0 to disable.",
           "carbon_weight": "How much to weigh carbon intensity in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
           "cost_weight": "How much to weigh electricity cost in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
+          "tou_schedule": "Time-of-use electricity rates let the optimizer shift HVAC runtime to cheaper hours.\n\nPaste a JSON array like this example (weekday afternoon peak at $0.35/kWh, everything else at $0.12/kWh):\n['{'\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35'}', '{'\"days\": [0,1,2,3,4,5,6], \"start_hour\": 0, \"end_hour\": 24, \"rate\": 0.12'}']\n\nDays: 0=Monday through 6=Sunday. The optimizer checks rates from first to last and uses the first match, so put specific periods before general ones. Leave empty to use the rate entity or flat rate instead.",
+          "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode — widening the comfort range to reduce HVAC load during grid stress events."
+        }
+      },
+      "solar_panels": {
+        "title": "Solar Panels",
+        "description": "Configure solar panel production sensors and panel specifications. Panel area and efficiency allow the optimizer to derive solar irradiance from production data.",
+        "data": {
+          "solar_production_entity": "Solar production sensor (watts)",
+          "grid_import_entity": "Grid import sensor (watts)",
+          "solar_export_rate_entity": "Solar export rate sensor",
+          "solar_panel_area": "Total panel surface area",
+          "solar_panel_count": "Number of panels",
+          "solar_panel_area_each": "Area per panel",
+          "solar_panel_efficiency": "Panel efficiency coefficient"
+        },
+        "data_description": {
           "solar_production_entity": "A sensor reporting current solar panel output in watts.",
           "grid_import_entity": "A sensor reporting current grid import in watts.",
           "solar_export_rate_entity": "A sensor reporting the current solar export rate in $/kWh.",
-          "tou_schedule": "Time-of-use electricity rates let the optimizer shift HVAC runtime to cheaper hours.\n\nPaste a JSON array like this example (weekday afternoon peak at $0.35/kWh, everything else at $0.12/kWh):\n['{'\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35'}', '{'\"days\": [0,1,2,3,4,5,6], \"start_hour\": 0, \"end_hour\": 24, \"rate\": 0.12'}']\n\nDays: 0=Monday through 6=Sunday. The optimizer checks rates from first to last and uses the first match, so put specific periods before general ones. Leave empty to use the rate entity or flat rate instead.",
-          "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode — widening the comfort range to reduce HVAC load during grid stress events."
+          "solar_panel_area": "Total surface area of all panels. Auto-calculated if per-panel area and count are provided.",
+          "solar_panel_count": "Number of solar panels installed.",
+          "solar_panel_area_each": "Surface area of a single panel.",
+          "solar_panel_efficiency": "Panel conversion efficiency (0.05\u20130.35). Modern residential panels are typically 0.18\u20130.22."
         }
       },
       "behavior": {

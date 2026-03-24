@@ -317,11 +317,18 @@ class ThermalEstimator:
         cls,
         profile_data: dict,
         indoor_temp: float = 72.0,
+        tonnage: float | None = None,
     ) -> ThermalEstimator:
         """Initialize from Beestat temperature profile (better priors).
 
-        Extracts approximate R, C, Q from the measured deltas.
-        The filter will converge faster (~3-5 days) with these priors.
+        Extracts approximate R, C, Q from the measured deltas.  When
+        ``tonnage`` is provided, it overrides the Beestat-derived Q_cool/
+        Q_heat with rated capacity and applies the same tight prior
+        protections as ``cold_start()`` (dampened process noise, rate
+        limiting, ±10% covariance).
+
+        The filter will converge faster (~3-5 days) with these priors,
+        or ~2-3 days when tonnage is also supplied.
         """
         est = cls()
 
@@ -333,6 +340,7 @@ class ThermalEstimator:
         # Extract resist (passive drift) trendline to estimate R and C
         resist = profile_data["temperature"]["resist"]
         resist_slope = resist["linear_trendline"]["slope"]  # °F/hr per °F outdoor
+        resist_deltas = resist.get("deltas", {})
         # slope ≈ 1/(R*C), so R*C ≈ 1/slope
         rc_product = 1.0 / max(abs(resist_slope), 0.001)
 
@@ -343,40 +351,57 @@ class ThermalEstimator:
 
         # Estimate C_air from square footage (~0.6 BTU/°F per ft²)
         c_air = 0.6 * sqft
-        # Derive per-area R-value: rc_product = R_total * C_air, R_total = R_per_area / area
-        # So R_per_area = rc_product * area / C_air = rc_product / (C_air / area)
-        # Simpler: R_per_area = rc_product * sqft / c_air (since R_total = R_per_area / sqft)
         r_envelope = rc_product / c_air * sqft
         r_envelope = max(2.0, min(20.0, r_envelope))
 
-        # Estimate cooling capacity from deltas
-        cool_deltas = profile_data["temperature"]["cool_1"]["deltas"]
-        if cool_deltas:
-            # At T_ref (75°F), the net cooling rate includes drift
-            # cooling_delta ≈ -(Q_cool/C) + drift
-            # Q_cool ≈ C * |cooling_delta - drift|
-            ref_temps = [int(t) for t in cool_deltas.keys() if 70 <= int(t) <= 80]
-            if ref_temps:
-                avg_cool_delta = sum(float(cool_deltas[str(t)]) for t in ref_temps) / len(ref_temps)
-            else:
-                avg_cool_delta = -2.0  # default
-            q_cool = c_air * abs(avg_cool_delta)
-            q_cool = max(10000, min(60000, q_cool))
-        else:
-            q_cool = 20000.0
+        # Effective thermal capacitance: the observed deltas reflect not just
+        # air but the total thermal mass being heated/cooled (walls, furniture,
+        # slab).  Using C_air alone underestimates Q by ~8x.
+        c_mass_default = 10000.0
+        c_effective = c_air + c_mass_default
 
-        # Estimate heating capacity similarly
-        heat_deltas = profile_data["temperature"]["heat_1"]["deltas"]
-        if heat_deltas:
-            ref_temps = [int(t) for t in heat_deltas.keys() if 30 <= int(t) <= 50]
-            if ref_temps:
-                avg_heat_delta = sum(float(heat_deltas[str(t)]) for t in ref_temps) / len(ref_temps)
-            else:
-                avg_heat_delta = 1.0
-            q_heat = c_air * abs(avg_heat_delta)
-            q_heat = max(10000, min(60000, q_heat))
+        # ── Capacity priors ──────────────────────────────────────────
+        if tonnage is not None:
+            # User-provided tonnage takes precedence over Beestat-derived Q
+            q_cool = tonnage * 12000.0
+            q_heat = tonnage * 12000.0 * 1.1
         else:
-            q_heat = 18000.0
+            # Estimate cooling capacity from net deltas (subtract resist drift)
+            cool_deltas = profile_data["temperature"]["cool_1"]["deltas"]
+            if cool_deltas:
+                ref_temps = [int(t) for t in cool_deltas.keys() if 70 <= int(t) <= 80]
+                if ref_temps:
+                    # Net delta = cooling delta - resist delta at same outdoor temp
+                    net_deltas = []
+                    for t in ref_temps:
+                        raw = float(cool_deltas[str(t)])
+                        drift = float(resist_deltas.get(str(t), 0.0))
+                        net_deltas.append(raw - drift)
+                    avg_net_cool = sum(net_deltas) / len(net_deltas)
+                else:
+                    avg_net_cool = -3.0
+                q_cool = c_effective * abs(avg_net_cool)
+                q_cool = max(10000, min(60000, q_cool))
+            else:
+                q_cool = 20000.0
+
+            # Estimate heating capacity similarly
+            heat_deltas = profile_data["temperature"]["heat_1"]["deltas"]
+            if heat_deltas:
+                ref_temps = [int(t) for t in heat_deltas.keys() if 30 <= int(t) <= 50]
+                if ref_temps:
+                    net_deltas = []
+                    for t in ref_temps:
+                        raw = float(heat_deltas[str(t)])
+                        drift = float(resist_deltas.get(str(t), 0.0))
+                        net_deltas.append(raw - drift)
+                    avg_net_heat = sum(net_deltas) / len(net_deltas)
+                else:
+                    avg_net_heat = 1.0
+                q_heat = c_effective * abs(avg_net_heat)
+                q_heat = max(10000, min(60000, q_heat))
+            else:
+                q_heat = 18000.0
 
         est.x = np.array([
             indoor_temp,
@@ -384,13 +409,20 @@ class ThermalEstimator:
             1.0 / r_envelope,    # R_inv
             50.0,                 # R_int_inv — physically plausible coupling (mass τ ≈ 200 hr)
             1.0 / c_air,         # C_inv
-            1.0 / 10000.0,       # C_mass_inv (default)
+            1.0 / c_mass_default, # C_mass_inv
             q_cool,
             q_heat,
             DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu (Beestat has no solar data)
         ])
 
-        # Lower uncertainty since we have informed priors
+        # Covariance: tight if tonnage known, moderate from Beestat
+        if tonnage is not None:
+            q_cool_var = (0.10 * q_cool) ** 2   # ±10% SD — trust user tonnage
+            q_heat_var = (0.10 * q_heat) ** 2
+        else:
+            q_cool_var = (0.30 * q_cool) ** 2   # ±30% — Beestat-derived
+            q_heat_var = (0.30 * q_heat) ** 2
+
         est.P = np.diag([
             0.1,       # T_air
             10.0,      # T_mass — still uncertain
@@ -398,8 +430,8 @@ class ThermalEstimator:
             50.0,      # R_int_inv — wide range (not in Beestat data)
             1e-5,      # C_inv — moderate confidence
             1e-7,      # C_mass_inv — low confidence
-            q_cool * 0.3 * q_cool * 0.3,  # Q_cool — ±30% uncertainty
-            q_heat * 0.3 * q_heat * 0.3,  # Q_heat — ±30% uncertainty
+            q_cool_var,  # Q_cool
+            q_heat_var,  # Q_heat
             1e6,       # solar_gain_btu — uncertain (not in Beestat)
         ])
         est._P_initial = est.P.copy()
@@ -408,6 +440,14 @@ class ThermalEstimator:
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])
         est._initialized = True
         est._setup_default_noise()
+
+        # When tonnage is known, reduce process noise for capacity states
+        # so the filter respects the user-provided rating during early learning.
+        if tonnage is not None:
+            est._has_tonnage_prior = True
+            est.Q[IDX_Q_COOL, IDX_Q_COOL] = 0.01
+            est.Q[IDX_Q_HEAT, IDX_Q_HEAT] = 0.01
+
         return est
 
     # ── EKF Update ──────────────────────────────────────────────────
@@ -433,6 +473,8 @@ class ThermalEstimator:
         appliance_btu: float = 0.0,
         aux_resistive_btu_hr: float = 0.0,
         measurement_noise_scale: float = 1.0,
+        uv_index: float | None = None,
+        solar_irradiance_w_m2: float | None = None,
     ) -> float:
         """Run one EKF predict-update cycle.
 
@@ -463,6 +505,8 @@ class ThermalEstimator:
                 thermostat satellite blending). When >1, parameter-learning rows of the
                 Kalman gain are also zeroed to prevent bad measurements from corrupting
                 building thermal estimates.
+            uv_index: UV index from weather integration (0-15), or None.
+            solar_irradiance_w_m2: Direct or panel-derived solar irradiance in W/m², or None.
 
         Returns:
             Innovation (prediction error before update) in °F.
@@ -479,6 +523,8 @@ class ThermalEstimator:
         self._current_precipitation = precipitation
         self._current_appliance_btu = appliance_btu
         self._current_aux_resistive_btu = aux_resistive_btu_hr
+        self._current_uv_index = uv_index
+        self._current_solar_irradiance = solar_irradiance_w_m2
 
         # ── PREDICT ──────────────────────────────────────────────
         x_pred = self._predict_state(
@@ -673,8 +719,11 @@ class ThermalEstimator:
             elif hvac_mode == "heat" and delta < 0:
                 Q_hvac *= max(0.5, 1.0 + _DUCT_LOSS_PER_F * delta)
 
-        # ── Solar gain (learned parameter) ───────────────────────
-        Q_solar = self._solar_gain(cloud_cover, sun_elevation, solar_gain_btu)
+        # ── Solar gain (learned parameter + multi-source irradiance) ──
+        irradiance_fraction, irradiance_source = self._estimate_irradiance_fraction(
+            cloud_cover, sun_elevation,
+        )
+        Q_solar_direct = self._solar_gain(irradiance_fraction, sun_elevation, solar_gain_btu)
 
         # ── Internal heat gain (occupancy-scaled) ────────────────
         people = self._current_people_count
@@ -692,12 +741,43 @@ class ThermalEstimator:
         Q_boundary = 0.0
         k_boundary = 0.0  # total boundary conductance for exponential integrator
         crawl_temp = self._current_crawlspace_temp
+        Q_solar_via_attic = 0.0
+        duct_loss_solar_fraction = 0.0
+        attic_solar_surplus = 0.0
+
         if attic_temp is not None:
-            Q_boundary += k_attic * (attic_temp - T_air)
-            k_boundary += k_attic
+            total_attic = k_attic * (attic_temp - T_air)
+
+            # Decompose attic heat: solar vs weather
+            # When the sun is up and attic is hotter than outdoor air, the
+            # surplus (T_attic - T_outdoor) is solar energy absorbed by the
+            # roof.  The remainder is weather-driven boundary heat transfer.
+            if (sun_elevation is not None and sun_elevation > 0
+                    and outdoor_temp is not None):
+                attic_solar_surplus = max(0.0, attic_temp - outdoor_temp)
+                Q_solar_via_attic = k_attic * attic_solar_surplus
+                attic_weather_contribution = total_attic - Q_solar_via_attic
+                Q_boundary += attic_weather_contribution
+                # Only weather-driven portion acts as temperature-coupled conductance
+                weather_fraction = max(0.0, 1.0 - attic_solar_surplus / max(1.0, abs(attic_temp - T_air)))
+                k_boundary += k_attic * weather_fraction
+                # Track what fraction of duct loss is solar-driven
+                if Q_hvac != 0 and abs(attic_temp - T_air) > 0.1:
+                    duct_loss_solar_fraction = attic_solar_surplus / max(1.0, abs(attic_temp - T_air))
+            else:
+                # Sun is down or no outdoor temp: all attic heat → boundary
+                Q_boundary += total_attic
+                k_boundary += k_attic
+        else:
+            total_attic = 0.0
+            attic_weather_contribution = 0.0
+
         if crawl_temp is not None:
             Q_boundary += k_crawl * (crawl_temp - T_air)
             k_boundary += k_crawl
+
+        # Total solar = direct (window/wall) + via attic (roof absorption)
+        Q_solar = Q_solar_direct + Q_solar_via_attic
 
         # ── Temperature updates (exponential decay integration) ──
         # Unconditionally stable: avoids oscillation at extreme parameter
@@ -724,8 +804,15 @@ class ThermalEstimator:
             + Q_hvac + Q_solar + Q_internal + Q_appliances + Q_aux_resistive
         )
         # Add boundary zone source terms (conductance × source temp)
+        # Only the weather-coupled portion of attic conductance acts as a
+        # temperature-dependent source.  The solar portion (Q_solar_via_attic)
+        # is already included in Q_solar as a flat heat flow.
         if attic_temp is not None:
-            forcing_air += k_attic * attic_temp
+            if sun_elevation is not None and sun_elevation > 0 and outdoor_temp is not None:
+                weather_frac = max(0.0, 1.0 - attic_solar_surplus / max(1.0, abs(attic_temp - T_air)))
+                forcing_air += k_attic * weather_frac * attic_temp
+            else:
+                forcing_air += k_attic * attic_temp
         if crawl_temp is not None:
             forcing_air += k_crawl * crawl_temp
 
@@ -746,19 +833,24 @@ class ThermalEstimator:
             T_mass_new = T_mass + C_mass_inv * R_int_inv * (T_air - T_mass) * dt_hours
 
         # ── Cache thermal load components for sensor exposure ───────
-        # Attic/crawlspace individual contributions for attribute breakdown
-        attic_contribution = k_attic * (attic_temp - T_air) if attic_temp is not None else 0.0
+        attic_contribution = total_attic if attic_temp is not None else 0.0
         crawl_contribution = k_crawl * (crawl_temp - T_air) if crawl_temp is not None else 0.0
         self._last_thermal_loads = {
             # Heat flow components (BTU/hr)
             "q_env": Q_env,
             "q_int": Q_int,
             "q_hvac": Q_hvac,
-            "q_solar": Q_solar,
+            "q_solar": Q_solar,  # total: direct + via attic
+            "q_solar_direct": Q_solar_direct,
+            "q_solar_via_attic": Q_solar_via_attic,
             "q_internal": Q_internal,
-            "q_boundary": Q_boundary,
+            "q_boundary": Q_boundary,  # excludes solar-driven attic heat during daytime
             "q_appliances": Q_appliances,
             "q_aux_resistive": Q_aux_resistive,
+            # Irradiance context
+            "irradiance_fraction": irradiance_fraction,
+            "irradiance_source": irradiance_source,
+            "uv_index": getattr(self, "_current_uv_index", None),
             # Context values for sensor attributes
             "infiltration_factor": infiltration,
             "ua_value": UA,
@@ -773,7 +865,10 @@ class ThermalEstimator:
             "attic_temp": attic_temp,
             "crawlspace_temp": crawl_temp,
             "attic_contribution_btu": attic_contribution,
+            "attic_solar_contribution_btu": Q_solar_via_attic,
+            "attic_weather_contribution_btu": attic_contribution - Q_solar_via_attic if attic_temp is not None else 0.0,
             "crawlspace_contribution_btu": crawl_contribution,
+            "duct_loss_solar_fraction": duct_loss_solar_fraction,
         }
 
         x_new = x.copy()
@@ -824,7 +919,8 @@ class ThermalEstimator:
         Q_int = R_int_inv * (T_mass - T_air)
         Q_hvac = self._hvac_output(hvac_mode, hvac_running, outdoor_temp,
                                     x[IDX_Q_COOL], x[IDX_Q_HEAT])
-        Q_solar = self._solar_gain(cloud_cover, sun_elevation, solar_gain_btu)
+        irradiance_fraction, _ = self._estimate_irradiance_fraction(cloud_cover, sun_elevation)
+        Q_solar_direct = self._solar_gain(irradiance_fraction, sun_elevation, solar_gain_btu)
 
         people = self._current_people_count
         if people is not None:
@@ -838,15 +934,26 @@ class ThermalEstimator:
         k_crawl = _K_CRAWLSPACE * area_scale
 
         Q_boundary = 0.0
+        Q_solar_via_attic = 0.0
         k_boundary = 0.0  # total boundary conductance affecting dT_air/dT_air
         attic_temp = self._current_attic_temp
         if attic_temp is not None:
-            Q_boundary += k_attic * (attic_temp - T_air)
-            k_boundary += k_attic
+            total_attic = k_attic * (attic_temp - T_air)
+            if sun_elevation is not None and sun_elevation > 0 and outdoor_temp is not None:
+                attic_solar_surplus = max(0.0, attic_temp - outdoor_temp)
+                Q_solar_via_attic = k_attic * attic_solar_surplus
+                Q_boundary += total_attic - Q_solar_via_attic
+                weather_fraction = max(0.0, 1.0 - attic_solar_surplus / max(1.0, abs(attic_temp - T_air)))
+                k_boundary += k_attic * weather_fraction
+            else:
+                Q_boundary += total_attic
+                k_boundary += k_attic
         crawl_temp = self._current_crawlspace_temp
         if crawl_temp is not None:
             Q_boundary += k_crawl * (crawl_temp - T_air)
             k_boundary += k_crawl
+
+        Q_solar = Q_solar_direct + Q_solar_via_attic
 
         Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
         Q_aux_resistive = getattr(self, "_current_aux_resistive_btu", 0.0)
@@ -903,11 +1010,11 @@ class ThermalEstimator:
                     cop_factor *= max(0.5, 1.0 + _DUCT_LOSS_PER_F * delta)
             F[IDX_T_AIR, IDX_Q_HEAT] = C_inv * cop_factor * dt
 
-        # dT_air / d(solar_gain_btu): partial of Q_solar w.r.t. solar_gain_btu
-        if cloud_cover is not None and sun_elevation is not None and sun_elevation > 0:
-            clear_sky = 1.0 - cloud_cover
+        # dT_air / d(solar_gain_btu): partial of Q_solar_direct w.r.t. solar_gain_btu
+        # Q_solar_direct = solar_gain_btu * irradiance_fraction * sin(elevation)
+        if sun_elevation is not None and sun_elevation > 0:
             altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
-            F[IDX_T_AIR, IDX_SOLAR_GAIN] = C_inv * clear_sky * altitude_factor * dt
+            F[IDX_T_AIR, IDX_SOLAR_GAIN] = C_inv * irradiance_fraction * altitude_factor * dt
 
         # ── dT_mass_new / d(state) ─────────────────────────────
         F[IDX_T_MASS, IDX_T_AIR] = C_mass_inv * R_int_inv * dt
@@ -999,20 +1106,80 @@ class ThermalEstimator:
 
         return 0.0
 
+    def _estimate_irradiance_fraction(
+        self,
+        cloud_cover: float | None,
+        sun_elevation: float | None,
+    ) -> tuple[float, str]:
+        """Estimate irradiance as a fraction of clear-sky peak (0.0-1.0).
+
+        Uses a priority hierarchy of available data sources:
+        1. Direct solar irradiance sensor (W/m²)
+        2. Solar panel-derived irradiance (W/m²)
+        3. UV index + cloud cover blend
+        4. UV index only
+        5. Cloud cover only
+        6. Elevation only (no weather data)
+
+        Returns:
+            (irradiance_fraction, source_label)
+        """
+        if sun_elevation is None or sun_elevation <= 0:
+            return 0.0, "night"
+
+        sin_elev = math.sin(math.radians(max(0.5, min(90, sun_elevation))))
+
+        # Tier 1: Direct or panel-derived solar irradiance (W/m²)
+        irradiance = getattr(self, "_current_solar_irradiance", None)
+        if irradiance is not None and irradiance > 0:
+            # Clear-sky reference ~1000 W/m² at normal incidence
+            frac = min(1.0, irradiance / (1000.0 * sin_elev))
+            source = "sensor" if not getattr(self, "_irradiance_from_panels", False) else "panel_derived"
+            return frac, source
+
+        # Tier 2/3: UV index (smooth hourly signal, measures actual irradiance)
+        uv = getattr(self, "_current_uv_index", None)
+        if uv is not None and uv >= 0:
+            # UV peaks ~6-8 at clear-sky noon for mid-latitudes; normalize
+            # against an elevation-adjusted clear-sky reference.
+            uv_clear_sky = 6.0 * sin_elev
+            uv_fraction = min(1.0, uv / max(0.1, uv_clear_sky))
+
+            if cloud_cover is not None:
+                # Blend: UV is the better irradiance measure (70%), cloud cover
+                # captures area coverage (30%)
+                cloud_fraction = 1.0 - cloud_cover
+                frac = 0.7 * uv_fraction + 0.3 * cloud_fraction
+                return max(0.0, min(1.0, frac)), "uv_blend"
+            else:
+                return max(0.0, min(1.0, uv_fraction)), "uv_only"
+
+        # Tier 4: Cloud cover only (current fallback)
+        if cloud_cover is not None:
+            return max(0.0, 1.0 - cloud_cover), "cloud"
+
+        # Tier 5: No weather data at all — assume moderate clear-sky
+        return 0.6, "elevation"
+
     @staticmethod
     def _solar_gain(
-        cloud_cover: float | None,
+        irradiance_fraction: float,
         sun_elevation: float | None,
         solar_gain_btu: float = DEFAULT_SOLAR_GAIN_BTU,
     ) -> float:
-        """Estimate solar heat gain (BTU/hr) using learned peak solar gain."""
-        if cloud_cover is None or sun_elevation is None or sun_elevation <= 0:
+        """Estimate solar heat gain (BTU/hr) using learned peak solar gain.
+
+        Args:
+            irradiance_fraction: 0.0-1.0 from _estimate_irradiance_fraction().
+            sun_elevation: Degrees above horizon, or None.
+            solar_gain_btu: Learned peak clear-sky-noon BTU/hr.
+        """
+        if sun_elevation is None or sun_elevation <= 0:
             return 0.0
 
-        clear_sky = 1.0 - cloud_cover
         altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
 
-        return solar_gain_btu * clear_sky * altitude_factor
+        return solar_gain_btu * irradiance_fraction * altitude_factor
 
     # ── Parameter Access ────────────────────────────────────────────
 

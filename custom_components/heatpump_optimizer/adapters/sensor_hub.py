@@ -73,6 +73,7 @@ class SensorHub:
         indoor_humidity_entities: list[str] | None = None,
         wind_speed_entity: str | None = None,
         solar_irradiance_entity: str | None = None,
+        uv_index_entity: str | None = None,
         barometric_pressure_entity: str | None = None,
         sun_entity: str = "sun.sun",
         solar_production_entity: str | None = None,
@@ -102,6 +103,7 @@ class SensorHub:
         self._outdoor_humidity_entities = outdoor_humidity_entities or []
         self._wind_speed_entity = wind_speed_entity
         self._solar_irradiance_entity = solar_irradiance_entity
+        self._uv_index_entity = uv_index_entity
         self._barometric_pressure_entity = barometric_pressure_entity
         self._sun_entity = sun_entity
 
@@ -802,6 +804,25 @@ class SensorHub:
             stale=self._is_stale(state),
         )
 
+    # ── UV index ────────────────────────────────────────────────────────
+
+    def read_uv_index(self) -> SensorReading | None:
+        """UV index from weather integration (e.g. OpenWeatherMap). No fallback."""
+        if not self._uv_index_entity:
+            return None
+        value = self._read_entity(
+            self._uv_index_entity, 0.0, 15.0, "UV index"
+        )
+        if value is None:
+            return None
+        state = self.hass.states.get(self._uv_index_entity)
+        return SensorReading(
+            value=value,
+            source=f"entity:{self._uv_index_entity}",
+            timestamp=self._now(),
+            stale=self._is_stale(state),
+        )
+
     # ── Barometric pressure ───────────────────────────────────────────
 
     def read_barometric_pressure(self) -> SensorReading | None:
@@ -985,6 +1006,25 @@ class SensorHub:
         return self._read_entity(
             self._solar_export_rate_entity, 0.0, 10.0, "Solar export rate"
         )
+
+    def derive_solar_irradiance_from_panels(
+        self,
+        panel_area_m2: float | None,
+        panel_efficiency: float | None,
+    ) -> float | None:
+        """Derive solar irradiance (W/m²) from panel production, area, and efficiency.
+
+        Returns None if production is unavailable or panel specs are missing.
+        Formula: irradiance = production_watts / (panel_area_m2 * efficiency)
+        """
+        if not panel_area_m2 or not panel_efficiency or panel_area_m2 <= 0:
+            return None
+        production = self.read_solar_production()
+        if production is None or production.stale or production.value <= 0:
+            return None
+        irradiance = production.value / (panel_area_m2 * panel_efficiency)
+        # Clamp to reasonable range (0-1500 W/m²)
+        return min(1500.0, irradiance)
 
     # ── Migrated sensor reads (from coordinator) ──────────────────────
 

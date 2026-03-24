@@ -1727,6 +1727,23 @@ class SolarHeatGainSensor(_ThermalLoadMixin, OptimizerBaseSensor):
                 round(comps["learned_peak_solar_gain"], 0)
                 if comps.get("learned_peak_solar_gain") is not None else None
             ),
+            "irradiance_fraction": (
+                round(comps["irradiance_fraction"], 3)
+                if comps.get("irradiance_fraction") is not None else None
+            ),
+            "irradiance_source": comps.get("irradiance_source"),
+            "uv_index": (
+                round(comps["uv_index"], 2)
+                if comps.get("uv_index") is not None else None
+            ),
+            "solar_direct_btu": (
+                round(comps["q_solar_direct"], 0)
+                if comps.get("q_solar_direct") is not None else None
+            ),
+            "solar_via_attic_btu": (
+                round(comps["q_solar_via_attic"], 0)
+                if comps.get("q_solar_via_attic") is not None else None
+            ),
             **self._confidence_attrs(),
         }
 
@@ -1807,9 +1824,21 @@ class BoundaryZoneHeatTransferSensor(_ThermalLoadMixin, OptimizerBaseSensor):
                 round(comps["attic_contribution_btu"], 0)
                 if comps.get("attic_contribution_btu") is not None else None
             ),
+            "attic_solar_portion_btu": (
+                round(comps["attic_solar_contribution_btu"], 0)
+                if comps.get("attic_solar_contribution_btu") is not None else None
+            ),
+            "attic_weather_portion_btu": (
+                round(comps["attic_weather_contribution_btu"], 0)
+                if comps.get("attic_weather_contribution_btu") is not None else None
+            ),
             "crawlspace_contribution_btu": (
                 round(comps["crawlspace_contribution_btu"], 0)
                 if comps.get("crawlspace_contribution_btu") is not None else None
+            ),
+            "duct_loss_solar_fraction": (
+                round(comps["duct_loss_solar_fraction"], 2)
+                if comps.get("duct_loss_solar_fraction") is not None else None
             ),
             **self._confidence_attrs(),
         }

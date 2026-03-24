@@ -99,8 +99,13 @@ from .const import (
     CONF_SLEEP_SCHEDULE_START,
     CONF_SOLAR_EXPORT_RATE_ENTITY,
     CONF_SOLAR_IRRADIANCE_ENTITY,
+    CONF_SOLAR_PANEL_AREA,
+    CONF_SOLAR_PANEL_AREA_EACH,
+    CONF_SOLAR_PANEL_COUNT,
+    CONF_SOLAR_PANEL_EFFICIENCY,
     CONF_SOLAR_PRODUCTION_ENTITY,
     CONF_SUN_ENTITY,
+    CONF_UV_INDEX_ENTITY,
     CONF_TOU_SCHEDULE,
     CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
@@ -140,6 +145,7 @@ from .const import (
     DEFAULT_SLEEP_SCHEDULE_ENABLED,
     DEFAULT_SLEEP_SCHEDULE_END,
     DEFAULT_SLEEP_SCHEDULE_START,
+    DEFAULT_SOLAR_PANEL_EFFICIENCY,
     DEFAULT_SUN_ENTITY,
     DOMAIN,
     WEIGHTING_MODE_EQUAL,
@@ -810,7 +816,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_menu(
             step_id="init",
-            menu_options=["mode", "comfort", "sleep_schedule", "presence", "energy", "equipment", "advanced"],
+            menu_options=["mode", "comfort", "sleep_schedule", "presence", "energy", "solar_panels", "equipment", "advanced"],
         )
 
     async def async_step_mode(
@@ -1035,6 +1041,15 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
+                        CONF_UV_INDEX_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_UV_INDEX_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            exclude_entities=exclude,
+                        ),
+                    ),
+                    vol.Optional(
                         CONF_BAROMETRIC_PRESSURE_ENTITY,
                         description={"suggested_value": self._options.get(CONF_BAROMETRIC_PRESSURE_ENTITY)},
                     ): selector.EntitySelector(
@@ -1128,9 +1143,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         power_default = _suggest_single(
             CONF_HVAC_POWER_ENTITY, discovery.discover_power_sensors()
         )
-        solar_default = _suggest_single(
-            CONF_SOLAR_PRODUCTION_ENTITY, discovery.discover_solar_sensors()
-        )
         co2_default = _suggest_single(
             CONF_CO2_ENTITY, discovery.discover_co2_sensors()
         )
@@ -1220,6 +1232,76 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
+                        CONF_TOU_SCHEDULE,
+                        description={"suggested_value": self._options.get(CONF_TOU_SCHEDULE, "")},
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(multiline=True),
+                    ),
+                    vol.Optional(
+                        CONF_DEMAND_RESPONSE_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_DEMAND_RESPONSE_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=["input_boolean", "binary_sensor"],
+                            exclude_entities=exclude,
+                        ),
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    # ── Solar Panels ────────────────────────────────────────────────
+
+    async def async_step_solar_panels(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Solar panel configuration: entities, panel specs, efficiency."""
+        if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
+            # If per-panel area and count are both provided, compute total area
+            area_each = user_input.get(CONF_SOLAR_PANEL_AREA_EACH)
+            count = user_input.get(CONF_SOLAR_PANEL_COUNT)
+            if area_each and count and count > 0:
+                # Per-panel × count takes precedence over total area
+                computed_total = area_each * count
+                # Convert from display units to m² if needed
+                if not _is_metric(self.hass):
+                    computed_total = computed_total / 10.764
+                user_input[CONF_SOLAR_PANEL_AREA] = round(computed_total, 2)
+            elif user_input.get(CONF_SOLAR_PANEL_AREA):
+                # Convert total area from display units to m²
+                if not _is_metric(self.hass):
+                    user_input[CONF_SOLAR_PANEL_AREA] = round(
+                        user_input[CONF_SOLAR_PANEL_AREA] / 10.764, 2
+                    )
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        discovery = EntityDiscovery(self.hass)
+        exclude = self._get_own_entity_ids()
+        solar_default = None
+        suggestions = discovery.discover_solar_sensors()
+        existing = self._options.get(CONF_SOLAR_PRODUCTION_ENTITY)
+        if existing:
+            solar_default = existing
+        elif suggestions:
+            solar_default = suggestions[0].entity_id
+
+        # Display area in user's unit system
+        is_metric = _is_metric(self.hass)
+        area_unit = "m²" if is_metric else "ft²"
+        area_conv = 1.0 if is_metric else 10.764  # m² → ft²
+        stored_area = self._options.get(CONF_SOLAR_PANEL_AREA)
+        display_area = round(stored_area * area_conv, 1) if stored_area else None
+        stored_each = self._options.get(CONF_SOLAR_PANEL_AREA_EACH)
+        display_each = round(stored_each * area_conv, 2) if stored_each else None
+
+        return self.async_show_form(
+            step_id="solar_panels",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
                         CONF_SOLAR_PRODUCTION_ENTITY,
                         description={"suggested_value": solar_default},
                     ): selector.EntitySelector(
@@ -1249,23 +1331,49 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         ),
                     ),
                     vol.Optional(
-                        CONF_TOU_SCHEDULE,
-                        description={"suggested_value": self._options.get(CONF_TOU_SCHEDULE, "")},
-                    ): selector.TextSelector(
-                        selector.TextSelectorConfig(multiline=True),
+                        CONF_SOLAR_PANEL_AREA,
+                        description={"suggested_value": display_area},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=10000 if not is_metric else 1000,
+                            step=0.1,
+                            unit_of_measurement=area_unit,
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
                     ),
                     vol.Optional(
-                        CONF_DEMAND_RESPONSE_ENTITY,
-                        description={"suggested_value": self._options.get(CONF_DEMAND_RESPONSE_ENTITY)},
-                    ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain=["input_boolean", "binary_sensor"],
-                            exclude_entities=exclude,
+                        CONF_SOLAR_PANEL_COUNT,
+                        description={"suggested_value": self._options.get(CONF_SOLAR_PANEL_COUNT)},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=1, max=200, step=1,
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SOLAR_PANEL_AREA_EACH,
+                        description={"suggested_value": display_each},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0, max=100 if not is_metric else 10,
+                            step=0.01,
+                            unit_of_measurement=area_unit,
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SOLAR_PANEL_EFFICIENCY,
+                        default=self._options.get(
+                            CONF_SOLAR_PANEL_EFFICIENCY, DEFAULT_SOLAR_PANEL_EFFICIENCY
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.05, max=0.35, step=0.01,
+                            mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
                 }
             ),
-            errors=errors,
         )
 
     # ── Behavior ─────────────────────────────────────────────────────

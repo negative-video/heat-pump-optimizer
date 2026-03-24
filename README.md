@@ -137,7 +137,8 @@ None of these are required. Each one improves accuracy or unlocks additional fea
 | Outdoor temperature | Direct measurement instead of forecast-derived values |
 | Outdoor humidity | Wind chill and wet-bulb adjustments for COP modeling |
 | Wind speed | Infiltration-adjusted heat loss estimates |
-| Solar irradiance | Solar gain modeling |
+| Solar irradiance | Direct irradiance measurement for solar gain (highest priority in irradiance hierarchy) |
+| UV index | Smooth, hourly irradiance proxy — blended with cloud cover for more accurate solar modeling than cloud cover alone |
 | Barometric pressure | Atmospheric pressure corrections to COP |
 | Indoor temperature (multi) | Room-weighted averages instead of a single thermostat reading |
 | Indoor humidity | Humidity-adjusted apparent temperature for comfort |
@@ -180,6 +181,24 @@ The integration asks for a few optional system specs during initial setup. Every
 4. Flat 3,500 W default
 
 A live HVAC power sensor (clamp meter or smart plug, configured in the Energy step) always supersedes all of the above for actual runtime accounting.
+
+### Solar Panels
+
+The **Solar Panels** configuration tab (Options → Solar Panels) lets you configure solar production entities and, optionally, panel specifications for deriving solar irradiance from production data.
+
+| Field | Description |
+|---|---|
+| **Solar production sensor** | Entity reporting current panel output in watts |
+| **Grid import sensor** | Entity reporting current grid import in watts (for net energy tracking) |
+| **Solar export rate** | Entity reporting feed-in tariff rate in $/kWh |
+| **Total panel area** | Combined surface area of all panels (auto-calculated if per-panel specs are provided). Displayed in your HA unit system (ft² or m²) |
+| **Number of panels** | Count of installed panels |
+| **Area per panel** | Surface area of a single panel |
+| **Efficiency coefficient** | Panel conversion efficiency (0.05–0.35). Modern residential panels are typically 0.18–0.22 |
+
+When both a production sensor and panel specs (area + efficiency) are configured, the optimizer derives solar irradiance: `W/m² = production / (area × efficiency)`. This derived irradiance is used in the [irradiance hierarchy](#irradiance-hierarchy) as priority 2 — better than UV/cloud estimates but superseded by a dedicated irradiance sensor if you have one.
+
+If per-panel area and count are both provided, they take precedence over the total area field (total is auto-calculated on save).
 
 ### Auxiliary Appliances
 
@@ -807,48 +826,61 @@ A cheap zigbee temperature sensor (under $15) placed in the attic and/or crawlsp
 
 ---
 
-### How does solar gain work, and what do the attic and irradiance sensors actually change about it?
+### How does solar gain work, and what do the attic, UV index, and irradiance sensors actually change about it?
 
-Solar gain is handled by two completely separate mechanisms in the model that are easy to conflate. Understanding the distinction is important because the two optional sensors — attic temperature and solar irradiance — affect different parts of the calculation.
+Solar gain is now modeled as two components that sum together:
 
-**The solar gain formula (Q_solar):**
+1. **Direct solar gain** (through windows and walls): `Q_solar_peak × f_irradiance × sin(elevation)`
+2. **Solar via attic** (roof absorption conducted indoors): `K_attic × max(0, T_attic − T_outdoor)`
 
-```
-Q_solar = solar_gain_btu × (1 − cloud_cover) × sin(sun_elevation)
-```
+#### The irradiance fraction hierarchy {#irradiance-hierarchy}
 
-- `solar_gain_btu` is a **learned EKF parameter** — state index 8, initialized at 3,000 BTU/hr, bounded 500–15,000 BTU/hr. The filter estimates it from thermostat data over time.
-- `cloud_cover` comes from the **weather forecast** (0 = clear, 1 = overcast). This is always available as long as you have a weather entity. There is no sensor that replaces it.
-- `sun_elevation` comes from HA's built-in `sun.sun` entity at runtime, and is pre-calculated from your lat/lon for future forecast hours.
+The `f_irradiance` term (0.0–1.0) is computed from the best available data source, checked in this order:
 
-If either `cloud_cover` or `sun_elevation` is unavailable, `Q_solar` returns 0.0 for that interval.
+| Priority | Source | Formula | When used |
+|----------|--------|---------|-----------|
+| 1 | Solar irradiance sensor (W/m²) | `min(1, irradiance / (1000 × sin(elev)))` | Direct pyranometer configured |
+| 2 | Solar panel production | Same formula, using `production / (area × efficiency)` as irradiance | Panel specs configured in Solar Panels tab |
+| 3 | UV index + cloud cover blend | `0.7 × UV_fraction + 0.3 × (1 − cloud_cover)` | UV index + weather entity available |
+| 4 | UV index only | `UV_fraction` alone | UV index available, cloud cover unavailable |
+| 5 | Cloud cover only | `1 − cloud_cover` | Weather entity only |
+| 6 | Elevation only | `0.6` (reasonable average) | No weather data |
 
-**What the attic sensor does (and does not do) for solar gain:**
+**Why UV index matters:** Cloud cover percentage measures *area coverage*, not *optical depth*. Thin high cirrus at 90% coverage barely attenuates solar radiation — UV index 4.58 has been observed at 90% cloud cover, nearly matching clear-sky levels. UV index directly measures the irradiance reaching the surface, making it a much better proxy.
 
-The attic sensor feeds an entirely different term — `Q_boundary = 50 × (T_attic − T_air)` — not `Q_solar`. These are separate lines in the governing equation. However, they *interact through the EKF's learned parameter* in a subtle way:
+#### Attic heat decomposition: solar vs weather
 
-On a hot sunny day, your attic might be 140°F. Without an attic sensor, the model sees two unexplained heat sources at once: actual solar gain through windows AND unaccounted ceiling conduction from a hot attic. Both appear to the EKF as "temperature rose faster than my current parameters predict." Since it can't separate them, it nudges `solar_gain_btu` upward to reduce the residual — but this inflated value is actually compensating for the missing ceiling load. The result is an overestimated `solar_gain_btu` that's entangled with your attic's thermal behavior.
+When an attic temperature sensor is configured and the sun is above the horizon, the optimizer decomposes attic heat transfer into two components:
 
-**With** the attic sensor, the ceiling conduction is fully accounted for as a known exogenous input. The EKF's residual on sunny days is now genuinely attributable to window/surface gain, so `solar_gain_btu` converges to a more physically accurate value (typically 2–8 weeks faster, and less likely to swing seasonally as attic temperatures change).
+- **Solar surplus**: `max(0, T_attic − T_outdoor)` — heat from the sun absorbed by the roof, conducted into the living space. Attributed to Q_solar.
+- **Weather boundary**: the remainder — heat exchange driven by the outdoor-indoor temperature differential. Attributed to Q_boundary.
 
-**What the solar irradiance sensor (W/m²) does:**
+This decomposition means a sunny 85°F day with a 108°F attic is modeled differently from an overcast 85°F day with an 87°F attic. The first has significant solar-driven attic heating (23°F surplus); the second has almost none.
 
-Counterintuitively, the irradiance sensor does **not** directly improve how `Q_solar` is computed at each 5-minute EKF update. The formula still uses `cloud_cover × sin(elevation)` — the irradiance reading doesn't substitute for that.
+At night (sun below horizon), all attic heat transfer is attributed to Q_boundary as before.
 
-What it does instead: the irradiance value is attached to the current `ForecastPoint` and aggregated into the grey-box LP optimizer's hourly planning data. This gives the optimizer a measured sky condition for the current hour rather than relying solely on forecast cloud fraction. On partly-cloudy days where the forecast says "50% cloud cover" but actual irradiance is spiking between 800 and 100 W/m² as clouds pass, the LP's cost weighting for that hour becomes more accurate — which slightly improves when it chooses to pre-cool.
+**HVAC duct loss:** For systems with air handlers in unconditioned attics, duct losses caused by solar-heated attic air are tracked separately via the `duct_loss_solar_fraction` attribute. This is diagnostic — it does not change duct loss calculations, but shows what percentage of duct losses are solar-driven.
 
-The irradiance sensor also helps the `solar_gain_btu` parameter converge faster during EKF learning because the grey-box optimizer's tighter scheduling means HVAC runs at more predictable times, giving the filter cleaner training intervals (less confounding from unexpected HVAC cycles).
+#### Solar panel-derived irradiance
 
-**The four scenarios summarized:**
+If you have solar panels but no dedicated irradiance sensor, the optimizer can derive irradiance from your panel production data. In the **Solar Panels** configuration tab, enter:
 
-| Configuration | Q_solar accuracy | Solar gain parameter convergence | Planning accuracy on cloudy/variable days |
-|---------------|-----------------|----------------------------------|------------------------------------------|
-| Neither sensor | Uses forecast cloud × sin(elev); `solar_gain_btu` entangled with unmodeled ceiling load | Slowest — inflated by attic heat in summer; needs seasonal correction | Relies on forecast cloud fraction only |
-| Attic sensor only | Same formula, but ceiling load is separated out | Faster — `solar_gain_btu` gets clean signal from window/surface gain alone | Still relies on forecast cloud fraction |
-| Irradiance sensor only | Same formula | Moderate improvement — tighter scheduling means cleaner learning intervals | Real-time sky condition for LP planning |
-| Both sensors | Same formula (cloud cover still from forecast) | Fastest convergence, least seasonal bias | Best: ceiling load separated + real-time sky for planner |
+- Total panel surface area (or per-panel area × number of panels)
+- Panel efficiency coefficient (typically 0.18–0.22 for modern residential panels)
 
-**The key takeaway:** No sensor combination changes the *formula* for `Q_solar` — it will always be `solar_gain_btu × clear_sky_fraction × sin(elevation)`. What changes is how accurately `solar_gain_btu` gets learned (attic sensor removes a major confounding source) and how precisely the LP optimizer weighs solar-load hours when scheduling (irradiance sensor provides ground-truth sky condition). The forecast cloud cover is the only input that can't be improved by a sensor — it's always forecast-derived.
+The optimizer computes: `irradiance_W_m² = production_watts / (panel_area_m² × efficiency)`
+
+This derived irradiance feeds into the same hierarchy as a direct sensor reading (priority 2).
+
+#### Sensor impact summary
+
+| Configuration | Q_solar accuracy | Solar parameter convergence | Sensor attributes exposed |
+|---|---|---|---|
+| No optional sensors | Cloud cover only (f_irradiance = 1 − cloud%) | Slowest — `solar_gain_btu` entangled with attic heat | `irradiance_source: cloud` |
+| UV index only | UV+cloud blend (much smoother) | Moderate | `irradiance_source: uv_blend` |
+| Attic sensor only | Cloud cover, but attic solar properly separated | Faster — clean window/wall signal | `solar_via_attic_btu`, `attic_solar_portion_btu` |
+| UV + attic | Best blend + proper decomposition | Fastest convergence | Full solar breakdown |
+| Irradiance/panels + attic | Direct measurement + decomposition | Best possible | `irradiance_source: sensor` or `panel_derived` |
 
 ---
 
@@ -1021,9 +1053,9 @@ Where each heat flow term (in BTU/hr) is:
 | Q_env | `UA · φ · (T_out_eff - T_air)` | Envelope heat flow (conduction + infiltration) |
 | Q_coupling | `R_int_inv · (T_mass - T_air)` | Internal coupling between air and thermal mass |
 | Q_hvac | See [HVAC model](#hvac-capacity-model) | Heating or cooling output |
-| Q_solar | `Q_solar_peak · (1 - cloud_cover) · sin(elevation)` | Solar heat gain through windows/surfaces |
+| Q_solar | `Q_solar_peak · f_irradiance · sin(elevation) + K_attic · max(0, T_attic - T_out)` | Solar heat gain: direct (windows/walls) + via attic (roof absorption). See [irradiance hierarchy](#irradiance-hierarchy) |
 | Q_internal | `800 + 350 · n_people` BTU/hr | Occupant and appliance base load |
-| Q_boundary | `K_attic · (T_attic - T_air) + K_crawl · (T_crawl - T_air)` | Buffer zone heat transfer |
+| Q_boundary | `K_attic · min(T_attic - T_out, 0) · ... + K_crawl · (T_crawl - T_air)` | Buffer zone heat transfer (excludes solar-driven attic heat during daytime) |
 | Q_appliances | Configured per-appliance BTU/hr | Auxiliary appliance thermal loads |
 | Q_aux_resistive | `(W_circuit - W_hp_learned) · 3.412` when aux active and W_circuit > W_hp_learned; else 0 | Resistive strip heat output, derived from circuit power minus learned HP baseline |
 
@@ -1258,12 +1290,16 @@ When system specs are provided during setup, the cold-start priors are tightened
 
 | User provides | Effect on state vector | Covariance improvement |
 |---|---|---|
-| Tonnage | `Q_cool = tons × 12,000 BTU/hr`; `Q_heat = tons × 13,200 BTU/hr` | `P[Q_cool] = (0.20 × Q_cool)²` — ±20% SD vs. a near-infinite default |
+| Tonnage | `Q_cool = tons × 12,000 BTU/hr`; `Q_heat = tons × 13,200 BTU/hr` | `P[Q_cool] = (0.10 × Q_cool)²` — ±10% SD vs. a near-infinite default |
 | Home sq ft | `C_inv = 1 / (0.6 × sqft)` — same formula as Beestat path | `P[C_inv] = (0.30 × C_inv)²` — ±30% SD vs. wide open default |
+
+When tonnage is provided, process noise for Q_cool/Q_heat is also reduced 100× (from 1.0 to 0.01) and per-cycle rate limiting caps parameter drift at 2% per update. This prevents the filter from overriding the user's rated capacity during the early learning period when observation data is sparse.
 
 With both provided, capacity and thermal mass converge in days rather than weeks. Without either, the filter still converges but the first-week predictions and savings estimates will be imprecise.
 
-**Beestat import**: R and C derived from Beestat's resist (passive drift) trendline slope. `R·C ≈ 1/slope`. HVAC capacity derived from cooling/heating delta measurements. Lower initial covariance (faster convergence, ~3–5 days).
+**Beestat import**: R derived from Beestat's resist (passive drift) trendline slope: `R·C ≈ 1/slope`. HVAC capacity derived from net cooling/heating deltas (raw delta minus resist drift at each outdoor temp) multiplied by the effective thermal capacitance (`C_effective = C_air + C_mass ≈ 11,500 BTU/°F`). Using the effective capacitance is necessary because Beestat deltas reflect the observed temperature change rate across the entire thermal mass (air + walls + furniture), not just the air volume.
+
+When tonnage is provided alongside a Beestat profile, the tonnage-based capacity takes precedence over Beestat-derived values and the same tonnage prior protections (dampened noise, rate limiting) are applied. This is recommended because Beestat-derived heating capacity is structurally limited — at cold outdoor temps, heat pump COP degradation, defrost cycles, and the separation of auxiliary heat into a different Beestat mode all cause the observed heat_1 deltas to significantly underestimate the system's actual heating capacity.
 
 ---
 

@@ -88,6 +88,7 @@ from .const import (
     CONF_SOLAR_IRRADIANCE_ENTITY,
     CONF_SOLAR_PRODUCTION_ENTITY,
     CONF_SUN_ENTITY,
+    CONF_UV_INDEX_ENTITY,
     CONF_TOU_SCHEDULE,
     CONF_USE_ADAPTIVE_MODEL,
     CONF_USE_GREYBOX_MODEL,
@@ -304,6 +305,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             indoor_humidity_entities=opts.get(CONF_INDOOR_HUMIDITY_ENTITIES) or [],
             wind_speed_entity=opts.get(CONF_WIND_SPEED_ENTITY),
             solar_irradiance_entity=opts.get(CONF_SOLAR_IRRADIANCE_ENTITY),
+            uv_index_entity=opts.get(CONF_UV_INDEX_ENTITY),
             barometric_pressure_entity=opts.get(CONF_BAROMETRIC_PRESSURE_ENTITY),
             sun_entity=opts.get(CONF_SUN_ENTITY, DEFAULT_SUN_ENTITY),
             solar_production_entity=opts.get(CONF_SOLAR_PRODUCTION_ENTITY),
@@ -419,7 +421,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 else:
                     self.model = PerformanceModel.from_file(profile_path)
                 self.estimator = ThermalEstimator.from_beestat(
-                    self.model._raw, indoor_temp=_init_indoor
+                    self.model._raw, indoor_temp=_init_indoor,
+                    tonnage=self._hvac_tonnage,
                 )
             except (FileNotFoundError, OSError, KeyError, ValueError) as err:
                 _LOGGER.error(
@@ -1719,7 +1722,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 )
                 model = PerformanceModel.from_file_data(profile_json)
                 self.estimator = ThermalEstimator.from_beestat(
-                    model._raw, indoor_temp=init_indoor
+                    model._raw, indoor_temp=init_indoor,
+                    tonnage=self._hvac_tonnage,
                 )
                 _LOGGER.info(
                     "Reset: re-loaded beestat profile from %s",
@@ -2080,17 +2084,46 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Determine HVAC state
         hvac_running = self._is_hvac_running(thermo_state)
-        hvac_mode = self.strategic.mode or "off"
+        # Use actual thermostat action when HVAC is running, so the EKF
+        # attributes heat flow in the correct direction (positive=heating,
+        # negative=cooling).  Fall back to strategic mode for idle periods.
+        if hvac_running and thermo_state.hvac_action in ("heating", "cooling"):
+            hvac_mode = "heat" if thermo_state.hvac_action == "heating" else "cool"
+        else:
+            hvac_mode = self.strategic.mode or "off"
 
         # Cloud cover from forecast (now a proper field on ForecastPoint)
+        # Use 7200s (2hr) window — OWM updates hourly; 600s was too aggressive
+        # and caused cloud_cover to be None ~87% of the time.
         cloud_cover = None
         if snapshot:
             closest = min(snapshot, key=lambda pt: abs((pt.time - now).total_seconds()))
-            if abs((closest.time - now).total_seconds()) < 600:
+            if abs((closest.time - now).total_seconds()) < 7200:
                 cloud_cover = closest.cloud_cover
 
         # Sun elevation via SensorHub (configurable entity, default sun.sun)
         sun_elevation = self.sensor_hub.read_sun_elevation()
+
+        # UV index for improved irradiance estimation
+        uv_reading = self.sensor_hub.read_uv_index()
+
+        # Solar irradiance: prefer direct sensor, fall back to panel-derived
+        irradiance_reading = self.sensor_hub.read_solar_irradiance()
+        solar_irradiance_w_m2 = None
+        irradiance_from_panels = False
+        if irradiance_reading and not irradiance_reading.stale:
+            solar_irradiance_w_m2 = irradiance_reading.value
+        else:
+            # Try to derive from solar panel production + specs
+            opts = self.config_entry.options
+            panel_area = opts.get("solar_panel_area")
+            panel_eff = opts.get("solar_panel_efficiency")
+            derived = self.sensor_hub.derive_solar_irradiance_from_panels(
+                panel_area, panel_eff,
+            )
+            if derived is not None:
+                solar_irradiance_w_m2 = derived
+                irradiance_from_panels = True
 
         # Wind speed, humidity, and pressure for enhanced COP modeling
         wind_reading = self.sensor_hub.read_wind_speed(snapshot)
@@ -2128,6 +2161,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Use multi-sensor averaged temp for better EKF convergence
         observed = getattr(self, "_effective_indoor_temp", None) or thermo_state.indoor_temp
         noise_scale = getattr(self, "_last_indoor_noise_scale", 1.0)
+        # Flag for estimator to know if irradiance came from panels
+        self.estimator._irradiance_from_panels = irradiance_from_panels
         innovation = self.estimator.update(
             observed_temp=observed,
             outdoor_temp=outdoor_temp,
@@ -2147,6 +2182,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             appliance_btu=appliance_btu,
             aux_resistive_btu_hr=getattr(self, "_cached_aux_resistive_btu", 0.0),
             measurement_noise_scale=noise_scale,
+            uv_index=uv_reading.value if uv_reading and not uv_reading.stale else None,
+            solar_irradiance_w_m2=solar_irradiance_w_m2,
         )
 
         if self.estimator._n_obs % 100 == 0:

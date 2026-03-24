@@ -914,32 +914,40 @@ function renderThermalLoadCard(states, _hass) {
     return n >= 0 ? `+${str}` : `\u2212${str}`;
   }
 
-  // Component data from the primary sensor's attributes
-  const components = [
+  // Component data from the primary sensor's attributes (environmental + HVAC)
+  const envComponents = [
     { key: "weather", label: "Weather", value: attrs.weather_heat_transfer ?? 0, color: "var(--orange)" },
     { key: "solar", label: "Solar", value: attrs.solar_heat_gain ?? 0, color: "#fdd835" },
     { key: "people", label: "People", value: attrs.occupancy_heat_gain ?? 0, color: "var(--accent)" },
     { key: "boundary", label: "Boundary", value: attrs.boundary_zone_heat_transfer ?? 0, color: "#8d6e63" },
     { key: "appliances", label: "Appliances", value: attrs.appliance_load ?? 0, color: "var(--blue)" },
   ];
+  const hvacComponent = { key: "hvac", label: "HVAC Output", value: attrs.hvac_output ?? 0, color: "#4caf50" };
+  const components = [...envComponents, ...(Math.abs(hvacComponent.value) > 0.5 ? [hvacComponent] : [])];
 
   // Filter out zero-value components and split by direction
   const active = components.filter(c => Math.abs(c.value) > 0.5);
   const gains = active.filter(c => c.value > 0);
   const removals = active.filter(c => c.value < 0);
 
-  // Build a stacked bar from a set of components
+  // Shared scale: both bars normalize against the same max so relative width is truthful
+  const gainTotal = gains.reduce((s, c) => s + Math.abs(c.value), 0);
+  const removalTotal = removals.reduce((s, c) => s + Math.abs(c.value), 0);
+  const sharedMax = Math.max(gainTotal, removalTotal, 1);
+
+  // Build a stacked bar from a set of components, scaled relative to sharedMax
   function stackedBar(items, cssExtra) {
     const total = items.reduce((s, c) => s + Math.abs(c.value), 0);
     if (total === 0) return "";
+    const barWidthPct = (total / sharedMax) * 100;
     let left = 0;
     const segs = items.map(c => {
       const pct = Math.max(2, (Math.abs(c.value) / total) * 100);
-      const seg = `<div class="tl-bar-seg" style="left:${left}%;width:${pct}%;background:${c.color}"></div>`;
+      const seg = `<div class="tl-bar-seg" data-label="${c.label}" data-value="${fmtBtu(c.value)} BTU/hr" style="left:${left}%;width:${pct}%;background:${c.color}"></div>`;
       left += pct;
       return seg;
     }).join("");
-    return `<div class="tl-stacked-bar${cssExtra || ""}">${segs}</div>`;
+    return `<div class="tl-stacked-bar${cssExtra || ""}" style="width:${barWidthPct}%">${segs}</div>`;
   }
 
   // Direction label
@@ -952,7 +960,7 @@ function renderThermalLoadCard(states, _hass) {
   if (gains.length > 0) {
     gainSection = `
       <div class="tl-bar-label">Adding heat</div>
-      ${stackedBar(gains, converging ? " tl-converging" : "")}`;
+      <div class="tl-bar-track">${stackedBar(gains, converging ? " tl-converging" : "")}</div>`;
   }
 
   // Removal bar
@@ -960,7 +968,7 @@ function renderThermalLoadCard(states, _hass) {
   if (removals.length > 0) {
     removalSection = `
       <div class="tl-bar-label">Removing heat</div>
-      ${stackedBar(removals, converging ? " tl-converging" : "")}`;
+      <div class="tl-bar-track">${stackedBar(removals, converging ? " tl-converging" : "")}</div>`;
   }
 
   // Legend — only active components
@@ -969,12 +977,14 @@ function renderThermalLoadCard(states, _hass) {
   ).join("");
 
   // Collapsible details — all components including HVAC and stored heat
+  const allDetailComponents = [
+    ...envComponents,
+    hvacComponent,
+  ];
   const detailRows = [
-    ...components.map(c =>
+    ...allDetailComponents.map(c =>
       `<div class="diag-row"><span>${c.label}</span><span>${fmtBtu(c.value)} BTU/hr</span></div>`
     ),
-    attrs.hvac_output != null
-      ? `<div class="diag-row"><span>HVAC Output</span><span>${fmtBtu(attrs.hvac_output)} BTU/hr</span></div>` : "",
     attrs.stored_heat_exchange != null
       ? `<div class="diag-row"><span>Stored Heat</span><span>${fmtBtu(attrs.stored_heat_exchange)} BTU/hr</span></div>` : "",
   ].filter(Boolean).join("");
@@ -983,7 +993,7 @@ function renderThermalLoadCard(states, _hass) {
     <div class="card thermal-load-card">
       <div class="building-header">
         <h2>House Thermal Load</h2>
-        ${converging ? `<span class="converging-tag">Learning</span>` : ""}
+        ${converging ? `<span class="converging-tag">Learning (${Math.round(confidence)}%)</span>` : ""}
       </div>
       <div class="tl-headline">
         <span class="tl-headline-value">${fmtBtu(netLoad)} BTU/hr</span>
@@ -991,6 +1001,7 @@ function renderThermalLoadCard(states, _hass) {
       </div>
       ${gainSection}
       ${removalSection}
+      <div class="tl-seg-tooltip" style="display:none"></div>
       <div class="tl-load-legend">${legendItems}</div>
       ${detailRows ? `
         <details class="diag-details thermal-load-details">
@@ -1829,6 +1840,37 @@ class HeatPumpOptimizerPanel extends HTMLElement {
           this._hass.callService("switch", isOn ? "turn_off" : "turn_on", {
             entity_id: enabled.entity_id,
           });
+        });
+      }
+    }
+
+    // Tap-to-reveal tooltip on thermal load bar segments
+    const tooltip = this._container.querySelector(".tl-seg-tooltip");
+    const segs = this._container.querySelectorAll(".tl-bar-seg");
+    if (tooltip && segs.length) {
+      let activeEl = null;
+      segs.forEach(seg => {
+        seg.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (activeEl === seg) {
+            tooltip.style.display = "none";
+            activeEl = null;
+            return;
+          }
+          activeEl = seg;
+          const label = seg.dataset.label;
+          const value = seg.dataset.value;
+          tooltip.textContent = `${label}: ${value}`;
+          tooltip.style.background = seg.style.background;
+          tooltip.style.display = "block";
+        });
+      });
+      // Dismiss tooltip when tapping elsewhere on the card
+      const card = this._container.querySelector(".thermal-load-card");
+      if (card) {
+        card.addEventListener("click", () => {
+          tooltip.style.display = "none";
+          activeEl = null;
         });
       }
     }
@@ -2749,21 +2791,54 @@ const PANEL_CSS = `
     margin-bottom: 4px;
     margin-top: 8px;
   }
-  .tl-stacked-bar {
+  .tl-bar-track {
     position: relative;
     height: 20px;
     background: color-mix(in srgb, var(--border) 30%, transparent);
     border-radius: 6px;
     overflow: hidden;
   }
+  .tl-stacked-bar {
+    position: relative;
+    height: 100%;
+    border-radius: 6px;
+    overflow: hidden;
+    transition: width 0.4s ease;
+  }
   .tl-stacked-bar.tl-converging {
-    opacity: 0.5;
+    background: repeating-linear-gradient(
+      -45deg,
+      transparent,
+      transparent 4px,
+      rgba(255,255,255,0.08) 4px,
+      rgba(255,255,255,0.08) 8px
+    );
+    animation: tl-shimmer 2s linear infinite;
+  }
+  @keyframes tl-shimmer {
+    0% { background-position: 0 0; }
+    100% { background-position: 20px 0; }
   }
   .tl-bar-seg {
     position: absolute;
     top: 0;
     height: 100%;
     opacity: 0.85;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .tl-bar-seg:hover, .tl-bar-seg:active {
+    opacity: 1;
+  }
+  .tl-seg-tooltip {
+    margin-top: 6px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    width: fit-content;
   }
   .tl-load-legend {
     display: flex;
