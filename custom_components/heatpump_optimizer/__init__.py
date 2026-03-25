@@ -86,6 +86,37 @@ from .services import async_setup_services, async_unload_services
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old config entries to current version."""
+    from .config_flow import HeatPumpOptimizerConfigFlow
+
+    target_version = HeatPumpOptimizerConfigFlow.VERSION
+
+    if config_entry.version > target_version:
+        _LOGGER.error(
+            "Cannot downgrade entry %s from v%s to v%s",
+            config_entry.entry_id, config_entry.version, target_version,
+        )
+        return False
+
+    if config_entry.version < 2:
+        data = dict(config_entry.data)
+        data.pop("profile_path", None)
+        if data.get("initialization_mode") == "beestat":
+            data["initialization_mode"] = "learning"
+        hass.config_entries.async_update_entry(
+            config_entry, data=data, version=2,
+        )
+        _LOGGER.info(
+            "Migrated entry %s to v2: removed Beestat profile_path, "
+            "initialization_mode=%s",
+            config_entry.entry_id,
+            data.get("initialization_mode", "learning"),
+        )
+
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Heat Pump Optimizer from a config entry."""
     hass.data.setdefault(DOMAIN, {})
