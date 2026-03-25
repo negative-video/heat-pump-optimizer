@@ -218,6 +218,7 @@
           "max_setpoint_change_per_hour": "Maximum temperature change rate",
           "use_adaptive_model": "Use adaptive thermal model (Kalman filter)",
           "use_greybox_model": "Use grey-box LP optimizer",
+          "calibration_enabled": "Enable coefficient calibration (experimental)",
           "thermostat_deadband": "Thermostat deadband (°F)",
           "dwell_time_minutes": "Minimum time between setpoint changes"
         },
@@ -228,6 +229,7 @@
           "max_setpoint_change_per_hour": "Limits how quickly the optimizer can change your setpoint to avoid jarring temperature swings.",
           "use_adaptive_model": "Enables online learning of your home's thermal characteristics via Extended Kalman Filter.",
           "use_greybox_model": "Uses a physics-based LP optimizer with learned parameters. Requires the adaptive model.",
+          "calibration_enabled": "Applies daily calibration of physics coefficients (wind infiltration, attic conductance, COP slopes) to your specific home. When off, the calibrator still runs in observe-only mode and logs proposed adjustments to diagnostic sensors.",
           "thermostat_deadband": "The temperature deadband (hysteresis) your thermostat uses. Used by the counterfactual simulator to model baseline behavior. Most thermostats use 0.5°F.",
           "dwell_time_minutes": "Minimum time between setpoint writes (5-30 min). Increase if your thermostat reacts poorly to frequent changes."
         }
