@@ -48,6 +48,10 @@ async def async_setup_entry(
         SavingsCO2CumulativeSensor(coordinator, entry),
         SavingsAccuracyTierSensor(coordinator, entry),
         LearningProgressSensor(coordinator, entry),
+        # COP visibility sensors
+        CurrentCopSensor(coordinator, entry),
+        CopRangeSensor(coordinator, entry),
+        OptimizationNarrativeSensor(coordinator, entry),
     ]
 
     # Full mode only — EKF, counterfactual, learning, and advanced diagnostics
@@ -1844,3 +1848,117 @@ class BoundaryZoneHeatTransferSensor(_ThermalLoadMixin, OptimizerBaseSensor):
             ),
             **self._confidence_attrs(),
         }
+
+
+# ── COP Visibility Sensors (core — both lite and full modes) ─────
+
+
+class CurrentCopSensor(OptimizerBaseSensor):
+    """Real-time relative efficiency at current outdoor temperature.
+
+    Shows how efficiently the HVAC is operating right now compared to
+    mild reference conditions. Higher = better.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "current_cop", "Current Efficiency"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:gauge"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("current_cop")
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return "x"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        return {
+            "outdoor_temp": self.coordinator.data.get("current_cop_outdoor_temp"),
+            "mode": self.coordinator.data.get("current_cop_mode"),
+        }
+
+
+class CopRangeSensor(OptimizerBaseSensor):
+    """Best and worst efficiency from today's forecast.
+
+    Shows the COP spread — how much opportunity exists for time-shifting.
+    A spread of 2.0x means the best hour is twice as efficient as the worst.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "cop_range", "Efficiency Spread"
+        )
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:arrow-expand-vertical"
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("cop_spread")
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        return "x"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        data = self.coordinator.data
+        attrs = {}
+        if data.get("cop_best_value") is not None:
+            best_time = data.get("cop_best_hour")
+            if best_time:
+                try:
+                    dt = datetime.fromisoformat(best_time)
+                    attrs["best_hour"] = dt.strftime("%I %p").lstrip("0")
+                except (ValueError, TypeError):
+                    attrs["best_hour"] = best_time
+            attrs["best_efficiency"] = data.get("cop_best_value")
+            attrs["best_outdoor_temp"] = data.get("cop_best_outdoor_temp")
+        if data.get("cop_worst_value") is not None:
+            worst_time = data.get("cop_worst_hour")
+            if worst_time:
+                try:
+                    dt = datetime.fromisoformat(worst_time)
+                    attrs["worst_hour"] = dt.strftime("%I %p").lstrip("0")
+                except (ValueError, TypeError):
+                    attrs["worst_hour"] = worst_time
+            attrs["worst_efficiency"] = data.get("cop_worst_value")
+            attrs["worst_outdoor_temp"] = data.get("cop_worst_outdoor_temp")
+        return attrs
+
+
+class OptimizationNarrativeSensor(OptimizerBaseSensor):
+    """Human-readable explanation of what the optimizer is doing and why.
+
+    Updates every coordinator cycle with context-aware descriptions like:
+    - "Pre-cooling at high efficiency (42°F outdoor). Tomorrow's high: 89°F."
+    - "Coasting — thermal mass carrying through 86°F peak outdoor."
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "optimization_narrative", "Optimization Status"
+        )
+        self._attr_icon = "mdi:text-box-outline"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("optimization_narrative")

@@ -1403,6 +1403,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Gather current environmental context for the optimizer
         people_count = self.occupancy.get_people_home_count()
 
+        # Build optimization weights from user config, with auto-enable logic:
+        # If user configured rate data but left cost weight at 0, enable it.
+        from .engine.data_types import OptimizationWeights
+        eff_cost_weight = self._cost_weight
+        eff_carbon_weight = self._carbon_weight
+        if eff_cost_weight == 0.0 and (self._tou_schedule or self._rate_entity_id):
+            eff_cost_weight = 0.5
+        if eff_carbon_weight == 0.0 and self._co2_entity_id:
+            eff_carbon_weight = 0.3
+        opt_weights = OptimizationWeights(
+            electricity_cost=eff_cost_weight,
+            carbon_intensity=eff_carbon_weight,
+        )
+
         # Run optimizer in executor (synchronous engine)
         try:
             _aux_threshold = (
@@ -1425,6 +1439,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.appliance_manager.total_thermal_impact_btu(),
                 _aux_threshold,
                 _aux_active,
+                opt_weights,
             )
         finally:
             # Restore original model references
@@ -2963,6 +2978,142 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             })
         return result or None
 
+    def _build_cop_visibility(self, outdoor_temp: float | None) -> dict[str, Any]:
+        """Build COP visibility data for sensors (works in both lite and full modes)."""
+        mode = self.strategic.mode or "off"
+        result: dict[str, Any] = {
+            "current_cop": None,
+            "current_cop_outdoor_temp": outdoor_temp,
+            "current_cop_mode": mode,
+            "cop_best_hour": None,
+            "cop_best_value": None,
+            "cop_best_outdoor_temp": None,
+            "cop_worst_hour": None,
+            "cop_worst_value": None,
+            "cop_worst_outdoor_temp": None,
+            "cop_spread": None,
+            "optimization_narrative": "Idle",
+        }
+
+        if outdoor_temp is None or mode == "off":
+            return result
+
+        # Current COP: use relative_efficiency if model supports it,
+        # otherwise derive from delta ratio
+        model = self.model
+        if mode == "cool":
+            current_delta = abs(model.cooling_delta(outdoor_temp))
+            ref_delta = abs(model.cooling_delta(65.0))  # reference: mild conditions
+            result["current_cop"] = round(current_delta / ref_delta, 2) if ref_delta > 0 else None
+        elif mode == "heat":
+            current_delta = model.heating_delta(outdoor_temp)
+            ref_delta = model.heating_delta(50.0)
+            result["current_cop"] = round(current_delta / ref_delta, 2) if ref_delta > 0 else None
+
+        # COP range from forecast
+        forecast = self._last_good_forecast
+        if forecast:
+            best_cop = 0.0
+            worst_cop = float("inf")
+            best_pt = None
+            worst_pt = None
+
+            for pt in forecast[:24]:
+                if mode == "cool":
+                    delta = abs(model.cooling_delta(pt.outdoor_temp))
+                    ref = abs(model.cooling_delta(65.0))
+                elif mode == "heat":
+                    delta = model.heating_delta(pt.outdoor_temp)
+                    ref = model.heating_delta(50.0)
+                else:
+                    continue
+
+                cop = delta / ref if ref > 0 else 0.0
+                if cop > best_cop:
+                    best_cop = cop
+                    best_pt = pt
+                if cop < worst_cop:
+                    worst_cop = cop
+                    worst_pt = pt
+
+            if best_pt:
+                result["cop_best_hour"] = best_pt.time.isoformat()
+                result["cop_best_value"] = round(best_cop, 2)
+                result["cop_best_outdoor_temp"] = round(best_pt.outdoor_temp, 1)
+            if worst_pt:
+                result["cop_worst_hour"] = worst_pt.time.isoformat()
+                result["cop_worst_value"] = round(worst_cop, 2)
+                result["cop_worst_outdoor_temp"] = round(worst_pt.outdoor_temp, 1)
+            if best_cop > 0 and worst_cop > 0:
+                result["cop_spread"] = round(best_cop / worst_cop, 1)
+
+        # Optimization narrative
+        result["optimization_narrative"] = self._build_optimization_narrative(
+            outdoor_temp, mode, forecast,
+        )
+
+        return result
+
+    def _build_optimization_narrative(
+        self,
+        outdoor_temp: float,
+        mode: str,
+        forecast: list | None,
+    ) -> str:
+        """Generate a human-readable explanation of current optimizer activity."""
+        phase = self._phase
+
+        if self._paused or phase == PHASE_PAUSED:
+            return "Paused — manual override detected."
+
+        if not self._active:
+            if self._is_learning_active():
+                return "Learning — observing your thermostat to build a thermal model."
+            if self._monitor_only:
+                return "Monitor only — observing but not controlling the thermostat."
+            return "Idle"
+
+        # Describe next-day peak for context
+        next_day_peak = None
+        if forecast:
+            next_day_peak = max(
+                (pt.outdoor_temp for pt in forecast[:24]),
+                default=None,
+            )
+
+        mode_label = "Cooling" if mode == "cool" else "Heating"
+        cop_str = ""
+        current_cop = self._cop_ratio(outdoor_temp, mode)
+        if current_cop is not None:
+            cop_str = f" (efficiency {current_cop:.1f}x at {outdoor_temp:.0f}°F outdoor)"
+
+        if "pre-cool" in phase.lower() or "pre-heat" in phase.lower():
+            peak_str = ""
+            if next_day_peak is not None:
+                peak_str = f" Tomorrow's forecast high: {next_day_peak:.0f}°F."
+            return f"Pre-{mode_label.lower()}ing at high efficiency{cop_str}.{peak_str}"
+
+        if "coast" in phase.lower():
+            return f"Coasting — thermal mass carrying through {outdoor_temp:.0f}°F outdoor."
+
+        if phase in (PHASE_IDLE, "idle"):
+            return f"{mode_label} mode — waiting for next scheduled action."
+
+        return f"{mode_label}{cop_str}."
+
+    def _cop_ratio(self, outdoor_temp: float, mode: str) -> float | None:
+        """Calculate relative COP at the given outdoor temp vs reference."""
+        model = self.model
+        if mode == "cool":
+            current = abs(model.cooling_delta(outdoor_temp))
+            ref = abs(model.cooling_delta(65.0))
+        elif mode == "heat":
+            current = model.heating_delta(outdoor_temp)
+            ref = model.heating_delta(50.0)
+        else:
+            return None
+        return round(current / ref, 1) if ref > 0 else None
+
     # ── Data for sensor entities ────────────────────────────────────
 
     def _build_data(self, thermo_state=None) -> dict[str, Any]:
@@ -3300,6 +3451,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 r.value if (r := self.sensor_hub.read_grid_import())
                 else None
             ),
+
+            # COP visibility — available in both lite and full modes
+            **self._build_cop_visibility(_outdoor_val),
 
             # Weather forecast for panel (enables chart during learning)
             "weather_forecast": self._build_weather_forecast(),

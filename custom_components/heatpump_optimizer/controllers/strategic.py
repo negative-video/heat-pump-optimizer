@@ -108,6 +108,7 @@ class StrategicPlanner:
         appliance_btu: float = 0.0,
         aux_threshold_f: float | None = None,
         aux_heat_active: bool = False,
+        weights: OptimizationWeights | None = None,
     ) -> OptimizedSchedule | None:
         """Run the optimizer and update internal state.
 
@@ -150,11 +151,19 @@ class StrategicPlanner:
                 len(occupancy_timeline),
             )
 
+        # Forecast-aware pre-cooling depth modulation:
+        # Scale overnight cooling band based on how hot tomorrow will be.
+        # Before mild days → compress band → less pre-cooling.
+        # Before hot days → full band → deep pre-cooling.
+        if mode == "cool":
+            self._apply_precool_modulation(forecast, comfort)
+
         # Run optimizer (grey-box LP or heuristic)
         try:
             if self._use_greybox and self.greybox_optimizer is not None:
                 schedule = self.greybox_optimizer.optimize(
                     indoor_temp, forecast, comfort, mode,
+                    weights=weights,
                     people_home_count=people_home_count,
                     indoor_humidity=indoor_humidity,
                     appliance_btu=appliance_btu,
@@ -163,7 +172,8 @@ class StrategicPlanner:
                 )
             else:
                 schedule = self.optimizer.optimize_setpoints(
-                    indoor_temp, forecast, comfort, mode
+                    indoor_temp, forecast, comfort, mode,
+                    weights=weights,
                 )
         except Exception:
             _LOGGER.error("Optimization failed", exc_info=True)
@@ -172,7 +182,8 @@ class StrategicPlanner:
                 _LOGGER.info("Falling back to heuristic optimizer")
                 try:
                     schedule = self.optimizer.optimize_setpoints(
-                        indoor_temp, forecast, comfort, mode
+                        indoor_temp, forecast, comfort, mode,
+                        weights=weights,
                     )
                 except Exception:
                     _LOGGER.error("Heuristic fallback also failed", exc_info=True)
@@ -385,6 +396,69 @@ class StrategicPlanner:
                 f"{seg.start_time.isoformat()}:{seg.end_time.isoformat()}:{seg.mode}"
             )
         return "|".join(parts)
+
+    def _calculate_precool_factor(self, forecast: list[ForecastPoint]) -> float:
+        """Calculate 0.0-1.0 factor for how much pre-cooling is needed.
+
+        Based on the peak outdoor temp in the forecast window relative to
+        the balance point. Higher factor = hotter day ahead = more pre-cooling.
+
+        Returns:
+            0.0: mild day, pre-cooling not needed
+            1.0: very hot day, maximum pre-cooling depth
+        """
+        if not forecast:
+            return 0.5
+        peak = max(pt.outdoor_temp for pt in forecast[:24])
+        # Scale: balance_point → 0.0, balance_point+25 → 1.0
+        raw = (peak - self.resist_balance_point) / 25.0
+        return max(0.0, min(1.0, raw))
+
+    def _apply_precool_modulation(
+        self,
+        forecast: list[ForecastPoint],
+        comfort: tuple[float, float],
+    ) -> None:
+        """Narrow overnight cooling comfort bands when tomorrow is mild.
+
+        For forecast hours where outdoor temp is well below comfort_min
+        (natural cooling possible), scale the comfort band based on
+        how hot the next day will be. This prevents the optimizer from
+        aggressively pre-cooling before mild days.
+        """
+        factor = self._calculate_precool_factor(forecast)
+        if factor >= 0.95:
+            # Very hot day — full pre-cooling depth, no modulation needed
+            return
+
+        comfort_min, comfort_max = comfort
+        band = comfort_max - comfort_min
+        # Compress band toward midpoint: less pre-cooling when factor is low
+        # factor=0 → comfort_min rises by 50% of band (minimal pre-cooling)
+        # factor=1 → no change (full pre-cooling)
+        adjusted_min = comfort_min + (1.0 - factor) * band * 0.5
+
+        for pt in forecast:
+            if pt.outdoor_temp >= comfort_min:
+                # Outdoor is warm enough that cooling is genuinely needed,
+                # not a pre-cooling opportunity — leave comfort unchanged
+                continue
+            # Only modulate hours where outdoor < comfort_min
+            # (these are the overnight/pre-cooling hours)
+            if pt.comfort_min is None:
+                pt.comfort_min = adjusted_min
+                pt.comfort_max = comfort_max
+            else:
+                # Already stamped by occupancy — raise the floor
+                pt_band = pt.comfort_max - pt.comfort_min
+                pt.comfort_min = pt.comfort_min + (1.0 - factor) * pt_band * 0.5
+
+        if factor < 0.5:
+            _LOGGER.info(
+                "Pre-cooling modulated: factor=%.2f (mild day ahead, "
+                "forecast peak=%.0f°F) — reduced overnight cooling depth",
+                factor, max(pt.outdoor_temp for pt in forecast[:24]),
+            )
 
     @property
     def schedule(self) -> OptimizedSchedule | None:
