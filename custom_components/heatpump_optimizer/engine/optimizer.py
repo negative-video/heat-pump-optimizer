@@ -6,7 +6,7 @@ Two approaches:
 2. Simulation-based: Generate setpoint schedules and simulate forward.
 
 The work-based approach is more reliable because it doesn't depend on simulation
-accuracy. It directly uses the Beestat delta ratios.
+accuracy. It directly uses the performance model delta ratios.
 """
 
 from __future__ import annotations

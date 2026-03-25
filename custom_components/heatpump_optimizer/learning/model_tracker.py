@@ -202,7 +202,7 @@ class ModelTracker:
             if deviation > ALERT_THRESHOLD and not self._alert_triggered.get(mode):
                 _LOGGER.warning(
                     "Model correction for %s has drifted to %.2f (%.0f%% from baseline). "
-                    "Consider regenerating the Beestat temperature profile.",
+                    "Consider resetting learning to recalibrate.",
                     mode, weighted_correction, deviation * 100,
                 )
                 self._alert_triggered[mode] = True

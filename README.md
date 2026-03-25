@@ -34,7 +34,7 @@ The Extended Kalman Filter jointly estimates several coupled building parameters
 
 ## Features
 
-- **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data. Or import a [Beestat](https://beestat.io/) profile to start with measured data.
+- **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data, with optional history bootstrap for faster convergence.
 - **Forecast-driven scheduling** — Hourly weather forecasts, with optional electricity rate and carbon intensity awareness.
 - **Savings tracking** — A counterfactual simulation of what your thermostat would have done without optimization, decomposed into runtime, COP, rate, and carbon components.
 - **Occupancy-aware** — Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
@@ -75,7 +75,7 @@ The config flow has three steps:
 | Step | What you'll configure |
 |------|----------------------|
 | **Equipment** | Thermostat + one or more weather entities (first is primary, rest are fallbacks) |
-| **Thermal Model** | Learn from scratch, import a Beestat profile, or restore a previously exported model |
+| **Thermal Model** | Learn automatically or restore a previously exported model |
 | **Temperature Boundaries** | Comfort range (where the optimizer works) and safety limits (never exceeded) |
 
 After setup, open **Configure** on the integration card for advanced options: sensors, energy tracking, optimizer tuning, occupancy, calendars, room-aware sensing, and auxiliary appliances.
@@ -89,7 +89,7 @@ After setup, open **Configure** on the integration card for advanced options: se
 | **Week 2–3** | With a reasonable temperature range, the model starts producing useful estimates. | Estimated-tier layout: conservative savings with uncertainty band, rough indoor forecast (dashed), baseline schedule grid |
 | **Month 1–2+** | Confidence grows as it observes different weather patterns. Full calibration depends on temperature variety. | Calibrated-tier layout: full savings panel, 24h forecast chart, thermal profile card with plain-English narrative and per-parameter position bars |
 
-> **Tip:** Importing a Beestat profile gives the model a head start, but baseline capture still needs 7 days. Restoring a previously exported model is immediate.
+> **Tip:** Providing HVAC tonnage and home square footage during setup significantly speeds up model convergence. Restoring a previously exported model is immediate.
 
 > **History bootstrap:** On first setup, the integration loads up to 10 days of thermostat and weather history from Home Assistant's recorder. If sufficient data exists, this can reduce or skip the cold-start learning period.
 
@@ -124,8 +124,7 @@ All sensors are also available as standard HA entities for dashboards and automa
 
 | Mode | Description |
 |------|-------------|
-| **Learn automatically** | Starts with conservative defaults and learns from thermostat readings (weeks to months depending on weather variety) |
-| **Import Beestat profile** | Uses measured temperature deltas from a [Beestat](https://beestat.io/) export; seeds both the Kalman filter (R/C/Q priors) and the performance profiler (°F/hr lookup tables across all modes and outdoor temps). Dramatically reduces learning time vs. starting from scratch. |
+| **Learn automatically** | Starts with conservative defaults and learns from thermostat readings. Providing tonnage and sqft reduces convergence from weeks to days. History bootstrap replays recorder data on first startup for immediate progress. |
 | **Restore exported model** | Loads a previously exported model via the `export_model` service (immediate) |
 
 ### Optional Sensors
@@ -412,7 +411,7 @@ The profiler builds lookup tables of observed HVAC performance (°F/hr change vs
 
 Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across modes with at least 30 observations — modes with fewer observations are excluded from the calculation and hidden from the card until they accumulate enough data. This prevents seasonal modes (e.g., aux heat in spring) from permanently dragging confidence to 0%.
 
-If a Beestat profile was imported, the profiler is seeded with its temperature deltas on first startup (or after a model reset). This gives every mode immediate coverage across its expected outdoor temperature range, so confidence starts high and live observations refine the values over time rather than building from zero.
+The profiler builds coverage from live observations across all HVAC modes and outdoor temperature bins. As more varied weather is experienced, the profiler's confidence grows and its measured reality data eventually supersedes the EKF-derived model for heuristic optimization.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
@@ -731,7 +730,7 @@ Sensor Entities (50+)
 | Problem | Likely cause | Fix |
 |---------|-------------|-----|
 | Savings show 0 kWh | Baseline capture hasn't completed (needs 7 days) | Wait for the `baseline_complete` event; check Learning Progress sensor |
-| Model confidence stuck at 0% | Not enough weather variety | Needs outdoor temperature swings; importing a Beestat profile helps |
+| Model confidence stuck at 0% | Not enough weather variety | Needs outdoor temperature swings; providing tonnage and sqft during setup helps |
 | Setpoint not changing | Optimizer paused or switch off | Check the Optimizer Enabled switch and Current Phase sensor |
 | "Safe mode entered" event | Forecast data stale (>6 hours) | Verify weather entity is updating; check Source Health sensor |
 | Override detected repeatedly | Manual thermostat adjustments | Increase `override_grace_period_hours` in Behavior options |
@@ -989,14 +988,30 @@ A temporary drop is normal and expected. The filter will re-converge as it accum
 
 ---
 
-### I imported a Beestat profile — why do I still need to wait 7 days?
+### Why do I still need to wait 7 days after setup?
 
-A Beestat import gives the model a head start in two ways:
-
-1. **Thermal model (EKF)** — Seeds R-value, thermal mass, and HVAC capacity priors so the Kalman filter starts close to the right answer instead of searching blindly. Reduces convergence from weeks to roughly 3–5 days.
-2. **Performance profiler** — Seeds the °F/hr lookup tables across all modes (cooling, heating, aux heat, passive drift) and outdoor temperature bins. Without Beestat, the profiler needs weeks to months of varied weather to cover all modes and temperature ranges. With Beestat, it starts with full coverage and live observations refine the values over time.
+The 7-day wait is for **baseline capture** — the optimizer needs to observe your home's normal thermostat behavior before it can meaningfully improve on it. The thermal model (EKF) converges separately and benefits from tonnage/sqft priors and history bootstrap, but baseline capture requires real-time observation of your existing schedule.
 
 Baseline capture is a separate process that records *your routine* — what setpoints you normally run, what times of day the HVAC runs, how your schedule varies by day of week. There's no equivalent shortcut for that. The 7-day minimum ensures the baseline covers a full week (including weekend patterns) before savings comparisons begin.
+
+---
+
+### I have a Beestat temperature profile. Why can't I import it to speed things up?
+
+Earlier versions of this integration supported importing a [Beestat](https://beestat.io/) temperature profile to seed the thermal model. This was removed because Beestat profiles actually *hurt* model accuracy.
+
+A Beestat profile measures one thing: how fast your indoor temperature changes at each outdoor temperature, broken out by HVAC mode. But those measurements **lump together every heat source and loss mechanism into a single number**. When your house cools at 0.5°F/hr with the HVAC off on a 40°F day, that rate reflects:
+
+- Heat loss through the building envelope (walls, windows, attic)
+- Solar radiation warming the house through south-facing windows
+- Body heat from occupants
+- Appliance waste heat (cooking, dryers, electronics)
+- Wind-driven infiltration varying hour to hour
+- Thermal mass buffering temperature swings
+
+The EKF model in this integration has **separate parameters** for each of these: envelope resistance (R), thermal mass capacitance (C), HVAC capacity (Q), and solar gain. When initialized from Beestat, the model started with an R-value that already had solar gain baked in, a heating capacity inflated by solar assistance, and a cooling capacity deflated by solar opposition. Then as the EKF tried to *also* learn solar gain separately, it was effectively double-counting — and had to spend days un-learning the biased priors before it could converge on the real values.
+
+The current approach — `cold_start()` with wide priors, optionally narrowed by your HVAC tonnage and home square footage — lets the EKF decompose these effects cleanly from day one using concurrent weather data (solar elevation, cloud cover, wind speed) that Beestat never had access to. Combined with history bootstrap (which replays your Home Assistant recorder data through the model on first startup), the integration typically reaches meaningful confidence within hours to days without any external profile.
 
 ---
 
@@ -1291,15 +1306,11 @@ When system specs are provided during setup, the cold-start priors are tightened
 | User provides | Effect on state vector | Covariance improvement |
 |---|---|---|
 | Tonnage | `Q_cool = tons × 12,000 BTU/hr`; `Q_heat = tons × 13,200 BTU/hr` | `P[Q_cool] = (0.10 × Q_cool)²` — ±10% SD vs. a near-infinite default |
-| Home sq ft | `C_inv = 1 / (0.6 × sqft)` — same formula as Beestat path | `P[C_inv] = (0.30 × C_inv)²` — ±30% SD vs. wide open default |
+| Home sq ft | `C_inv = 1 / (0.6 × sqft)` | `P[C_inv] = (0.30 × C_inv)²` — ±30% SD vs. wide open default |
 
 When tonnage is provided, process noise for Q_cool/Q_heat is also reduced 100× (from 1.0 to 0.01) and per-cycle rate limiting caps parameter drift at 2% per update. This prevents the filter from overriding the user's rated capacity during the early learning period when observation data is sparse.
 
 With both provided, capacity and thermal mass converge in days rather than weeks. Without either, the filter still converges but the first-week predictions and savings estimates will be imprecise.
-
-**Beestat import**: R derived from Beestat's resist (passive drift) trendline slope: `R·C ≈ 1/slope`. HVAC capacity derived from net cooling/heating deltas (raw delta minus resist drift at each outdoor temp) multiplied by the effective thermal capacitance (`C_effective = C_air + C_mass ≈ 11,500 BTU/°F`). Using the effective capacitance is necessary because Beestat deltas reflect the observed temperature change rate across the entire thermal mass (air + walls + furniture), not just the air volume.
-
-When tonnage is provided alongside a Beestat profile, the tonnage-based capacity takes precedence over Beestat-derived values and the same tonnage prior protections (dampened noise, rate limiting) are applied. This is recommended because Beestat-derived heating capacity is structurally limited — at cold outdoor temps, heat pump COP degradation, defrost cycles, and the separation of auxiliary heat into a different Beestat mode all cause the observed heat_1 deltas to significantly underestimate the system's actual heating capacity.
 
 ---
 

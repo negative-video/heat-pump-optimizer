@@ -15,22 +15,12 @@
       },
       "thermal_profile": {
         "title": "Thermal Model",
-        "description": "Choose how to initialize the optimizer's thermal model of your home. Learning mode works for everyone; a Beestat profile speeds things up.",
+        "description": "Choose how to initialize the optimizer's thermal model of your home.",
         "data": {
           "initialization_mode": "Initialization method"
         },
         "data_description": {
-          "initialization_mode": "\"Learn automatically\" starts fresh and takes 2-3 weeks to fully calibrate using conservative settings. \"Import Beestat profile\" uses your measured data for faster startup (~3-5 days). \"Restore exported model\" loads a previously saved model."
-        }
-      },
-      "thermal_profile_beestat": {
-        "title": "Beestat Profile Import",
-        "description": "Provide the path to your Beestat Temperature Profile JSON file.",
-        "data": {
-          "profile_path": "Beestat Temperature Profile path"
-        },
-        "data_description": {
-          "profile_path": "Full path inside your Home Assistant instance — no quotes needed around spaces. For HAOS/Docker: upload the file to your config directory (e.g. via Samba or File Editor add-on) and enter /config/beestat_profile.json. For Core installs, use the absolute filesystem path."
+          "initialization_mode": "\"Learn automatically\" starts fresh and calibrates from your thermostat history. \"Restore exported model\" loads a previously saved model."
         }
       },
       "thermal_profile_import": {
@@ -99,9 +89,6 @@
     },
     "error": {
       "sensor_overlap": "A sensor cannot be used as both indoor and outdoor — please remove the duplicate",
-      "profile_not_found": "File not found — check the path is accessible inside your HA container (no quotes needed around spaces)",
-      "profile_parse_error": "Could not parse file as JSON — verify the file is a valid Beestat temperature profile export",
-      "profile_missing_keys": "Missing required data — the file needs temperature deltas (cool_1, heat_1, resist) with linear trendlines and balance points",
       "invalid_model_data": "Invalid model data — paste the JSON from the export_model service",
       "cool_range_inverted": "Cooling minimum must be less than cooling maximum",
       "heat_range_inverted": "Heating minimum must be less than heating maximum",

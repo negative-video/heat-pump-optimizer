@@ -2,7 +2,7 @@
 
 Home Assistant's recorder keeps ~10 days of state history by default. Rather
 than cold-starting the EKF with synthetic defaults (2-3 week convergence) or
-requiring an external Beestat profile, this module batch-replays historical
+requiring external profile data, this module batch-replays historical
 thermostat and sensor data through the EKF to achieve meaningful model
 convergence immediately at first startup.
 

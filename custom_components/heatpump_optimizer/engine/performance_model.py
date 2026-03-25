@@ -1,22 +1,18 @@
-"""Performance model using Beestat temperature profile data.
+"""Performance model using temperature profile data.
 
-Instead of generic COP curves, this uses the actual measured temperature deltas
-from a year of Ecobee runtime data. Each delta represents the indoor temperature
+Models HVAC performance using measured temperature deltas — the indoor temperature
 change (°F) per hour of HVAC runtime at a given outdoor temperature.
 
-Example from this system's data:
+Example:
   Cooling at 75°F outdoor: -3.36°F/hr (effective)
   Cooling at 96°F outdoor: -0.66°F/hr (struggling) -> 5.1x less effective
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 
 class PerformanceModel:
-    """Models HVAC performance using Beestat temperature profile data."""
+    """Models HVAC performance using temperature profile data."""
 
     def __init__(self, profile_data: dict):
         self._raw = profile_data
@@ -55,24 +51,6 @@ class PerformanceModel:
         self.heat_differential = profile_data.get("differential", {}).get("heat", 1.0)
         self.cool_setpoint = profile_data.get("setpoint", {}).get("cool", 72.6)
         self.heat_setpoint = profile_data.get("setpoint", {}).get("heat", 60.9)
-
-    @classmethod
-    def from_file(cls, path: str | Path) -> PerformanceModel:
-        """Load from a Beestat Temperature Profile JSON file.
-
-        NOTE: This performs blocking I/O.  When called from an async
-        context (e.g. HA event loop), use ``from_file_data`` with data
-        pre-read via ``hass.async_add_executor_job``.
-        """
-        with open(path) as f:
-            data = json.load(f)
-        return cls(data)
-
-    @classmethod
-    def from_file_data(cls, raw_json: str) -> PerformanceModel:
-        """Construct from already-read JSON string (no blocking I/O)."""
-        data = json.loads(raw_json)
-        return cls(data)
 
     @classmethod
     def from_defaults(cls) -> PerformanceModel:
@@ -387,8 +365,8 @@ class PerformanceModel:
     def net_cooling_rate(self, outdoor_temp: float) -> float:
         """Net indoor temp change per hour when cooling is running.
 
-        The Beestat cooling delta already represents the observed net rate
-        during cooling operation (includes passive drift effects).
+        The cooling delta represents the observed net rate during cooling
+        operation (includes passive drift effects).
         More negative = cooling wins more decisively.
         """
         return self.cooling_delta(outdoor_temp)
@@ -396,8 +374,8 @@ class PerformanceModel:
     def net_heating_rate(self, outdoor_temp: float) -> float:
         """Net indoor temp change per hour when heating is running.
 
-        The Beestat heating delta already represents the observed net rate
-        during heating operation (includes passive drift effects).
+        The heating delta represents the observed net rate during heating
+        operation (includes passive drift effects).
         More positive = heating wins more decisively.
         """
         return self.heating_delta(outdoor_temp)

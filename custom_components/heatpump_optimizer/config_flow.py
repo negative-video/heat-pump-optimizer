@@ -86,7 +86,6 @@ from .const import (
     CONF_OUTDOOR_HUMIDITY_ENTITIES,
     CONF_OUTDOOR_TEMP_ENTITIES,
     CONF_OVERRIDE_GRACE_PERIOD_HOURS,
-    CONF_PROFILE_PATH,
     CONF_REOPTIMIZE_INTERVAL_HOURS,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
@@ -151,55 +150,11 @@ from .const import (
     WEIGHTING_MODE_EQUAL,
     WEIGHTING_MODE_OCCUPIED_ONLY,
     WEIGHTING_MODE_WEIGHTED,
-    INIT_MODE_BEESTAT,
     INIT_MODE_IMPORT,
     INIT_MODE_LEARNING,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def _validate_profile(path: str) -> str | None:
-    """Validate a Beestat temperature profile JSON file.
-
-    Returns None if valid, or an error key string matching strings.json.
-    """
-    if not os.path.isfile(path):
-        _LOGGER.error("Beestat profile not found at path: %s", path)
-        return "profile_not_found"
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as err:
-        _LOGGER.error("Beestat profile parse error at %s: %s", path, err)
-        return "profile_parse_error"
-
-    # Check required keys that PerformanceModel.__init__ expects
-    temp = data.get("temperature", {})
-    required_modes = ["cool_1", "heat_1", "resist"]
-    for mode in required_modes:
-        mode_data = temp.get(mode, {})
-        if not mode_data or not mode_data.get("deltas"):
-            _LOGGER.error(
-                "Beestat profile missing temperature.%s.deltas. "
-                "Top-level keys: %s, temperature keys: %s",
-                mode, list(data.keys()), list(temp.keys()),
-            )
-            return "profile_missing_keys"
-        if not mode_data.get("linear_trendline"):
-            _LOGGER.error(
-                "Beestat profile missing temperature.%s.linear_trendline", mode
-            )
-            return "profile_missing_keys"
-
-    if "balance_point" not in data:
-        _LOGGER.error(
-            "Beestat profile missing balance_point. Top-level keys: %s",
-            list(data.keys()),
-        )
-        return "profile_missing_keys"
-
-    return None
 
 
 def _is_metric(hass: HomeAssistant) -> bool:
@@ -312,7 +267,7 @@ def _validate_model_import(data_str: str) -> str | None:
 class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Heat Pump Optimizer."""
 
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
@@ -321,15 +276,22 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             # Downgrade not supported
             return False
 
-        if config_entry.version == 1:
-            # Current version — no migration needed.
-            pass
+        if config_entry.version < 2:
+            # v1 → v2: Remove legacy Beestat profile_path and remap init mode
+            data = dict(config_entry.data)
+            data.pop("profile_path", None)
+            if data.get("initialization_mode") == "beestat":
+                data["initialization_mode"] = "learning"
+            hass.config_entries.async_update_entry(
+                config_entry, data=data, version=2,
+            )
+            _LOGGER.info(
+                "Migrated entry %s to v2: removed Beestat profile_path, "
+                "initialization_mode=%s",
+                config_entry.entry_id,
+                data.get("initialization_mode", "learning"),
+            )
 
-        _LOGGER.info(
-            "Migration of entry %s to version %s successful",
-            config_entry.entry_id,
-            HeatPumpOptimizerConfigFlow.VERSION,
-        )
         return True
 
     def __init__(self) -> None:
@@ -626,8 +588,6 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             mode = user_input.get(CONF_INITIALIZATION_MODE, INIT_MODE_LEARNING)
             self._config_data[CONF_INITIALIZATION_MODE] = mode
 
-            if mode == INIT_MODE_BEESTAT:
-                return await self.async_step_thermal_profile_beestat()
             if mode == INIT_MODE_IMPORT:
                 return await self.async_step_thermal_profile_import()
             # Learning mode — no extra fields needed
@@ -647,10 +607,6 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                                     label="Learn automatically (recommended)",
                                 ),
                                 selector.SelectOptionDict(
-                                    value=INIT_MODE_BEESTAT,
-                                    label="Import Beestat profile (faster startup)",
-                                ),
-                                selector.SelectOptionDict(
                                     value=INIT_MODE_IMPORT,
                                     label="Restore exported model",
                                 ),
@@ -660,41 +616,6 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                     ),
                 }
             ),
-        )
-
-    async def async_step_thermal_profile_beestat(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Step 2b: Provide Beestat temperature profile file path."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            profile_path = user_input.get(CONF_PROFILE_PATH, "").strip().strip("'\"")
-            if not profile_path:
-                errors[CONF_PROFILE_PATH] = "profile_not_found"
-            else:
-                validation_error = await self.hass.async_add_executor_job(
-                    _validate_profile, profile_path
-                )
-                if validation_error:
-                    errors[CONF_PROFILE_PATH] = validation_error
-                    _LOGGER.error(
-                        "Profile validation failed: %s", validation_error
-                    )
-                else:
-                    self._config_data[CONF_PROFILE_PATH] = profile_path
-
-            if not errors:
-                return await self.async_step_comfort()
-
-        return self.async_show_form(
-            step_id="thermal_profile_beestat",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_PROFILE_PATH): str,
-                }
-            ),
-            errors=errors,
         )
 
     async def async_step_thermal_profile_import(

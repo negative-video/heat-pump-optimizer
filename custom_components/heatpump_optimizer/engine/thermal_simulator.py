@@ -1,7 +1,7 @@
 """Forward temperature simulation using the performance model.
 
 Simulates indoor temperature over time given a schedule and weather forecast.
-Uses 5-minute time steps to match the Beestat CSV resolution.
+Uses 5-minute time steps to match the thermostat update interval.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ class ThermalSimulator:
             initial_indoor_temp: Starting indoor temperature (°F)
             forecast: Outdoor temperature timeline
             schedule: Target temps and modes over time
-            dt_minutes: Time step (default 5 min to match Beestat data)
+            dt_minutes: Time step (default 5 min to match thermostat interval)
             passive_only: If True, use passive_drift() for all steps regardless
                 of schedule (for learning mode where HVAC is not controlled)
 
@@ -62,7 +62,7 @@ class ThermalSimulator:
             elif entry.mode == "cool":
                 hvac_running = self._should_cool(indoor_temp, entry.target_temp)
                 if hvac_running:
-                    # Beestat deltas represent the OBSERVED indoor temp change
+                    # Profile deltas represent the OBSERVED indoor temp change
                     # per hour of runtime, which already includes passive drift.
                     # Do NOT add passive_drift on top.
                     rate = self.model.cooling_delta(outdoor_temp)
@@ -72,7 +72,7 @@ class ThermalSimulator:
             elif entry.mode == "heat":
                 hvac_running = self._should_heat(indoor_temp, entry.target_temp)
                 if hvac_running:
-                    # Same: Beestat heating deltas already include drift.
+                    # Same: Profile heating deltas already include drift.
                     rate = self.model.heating_delta(outdoor_temp)
                     cumulative_runtime += dt_minutes
                 else:

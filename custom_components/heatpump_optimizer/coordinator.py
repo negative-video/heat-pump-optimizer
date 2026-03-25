@@ -131,7 +131,6 @@ from .const import (
     PHASE_IDLE,
     PHASE_PAUSED,
     PHASE_SAFE_MODE,
-    INIT_MODE_BEESTAT,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -183,7 +182,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
-        profile_path: str | None,
         climate_entity_id: str,
         weather_entity_id: str,
         comfort_cool: tuple[float, float],
@@ -193,10 +191,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         safety_limits: tuple[float, float] | None = None,
         occupancy_entity_ids: list[str] | None = None,
         options: dict[str, Any] | None = None,
-        initialization_mode: str = "beestat",
+        initialization_mode: str = "learning",
         model_import_data: str | None = None,
         behavior: dict[str, Any] | None = None,
-        profile_json: str | None = None,
         sleep_config: dict | None = None,
         monitor_only: bool = False,
     ):
@@ -364,7 +361,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Engine initialization — varies by mode
         self._initialization_mode = initialization_mode
-        self._profile_path = profile_path
         self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
         self._use_greybox = opts.get(CONF_USE_GREYBOX_MODEL, False)
 
@@ -413,32 +409,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     tonnage=self._hvac_tonnage,
                     sqft=self._home_sqft,
                 )
-        elif profile_path:
-            # Beestat mode (default, backward compatible)
-            try:
-                if profile_json:
-                    self.model = PerformanceModel.from_file_data(profile_json)
-                else:
-                    self.model = PerformanceModel.from_file(profile_path)
-                self.estimator = ThermalEstimator.from_beestat(
-                    self.model._raw, indoor_temp=_init_indoor,
-                    tonnage=self._hvac_tonnage,
-                )
-            except (FileNotFoundError, OSError, KeyError, ValueError) as err:
-                _LOGGER.error(
-                    "Failed to load Beestat profile '%s' (%s) — falling back to learning mode",
-                    profile_path, err,
-                )
-                self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start(
-                    indoor_temp=_init_indoor,
-                    tonnage=self._hvac_tonnage,
-                    sqft=self._home_sqft,
-                )
         else:
-            # Beestat mode selected but no profile path — fall back to learning
+            # Unknown mode — fall back to learning
             _LOGGER.warning(
-                "Beestat mode selected but no profile path configured — using learning mode"
+                "Unknown initialization mode '%s' — using learning mode",
+                initialization_mode,
             )
             self.model = PerformanceModel.from_defaults()
             self.estimator = ThermalEstimator.cold_start(
@@ -596,14 +571,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self._bootstrap_retry_count = stored.get(
                 "_bootstrap_retry_count", 0
             )
-
-        # Seed profiler from Beestat profile if available and profiler is empty
-        if (
-            self.profiler.total_observations == 0
-            and not self.profiler._seeded
-            and hasattr(self.model, "_raw")
-        ):
-            self.profiler.seed_from_beestat(self.model._raw)
 
         # NOTE: History bootstrap moved to async_at_started callback
         # (called from __init__.py) where the recorder is guaranteed ready.
@@ -1713,38 +1680,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         except Exception:
             init_indoor = 72.0
 
-        # Reset EKF thermal estimator — re-apply beestat priors if available
-        if self._initialization_mode == "beestat" and self._profile_path:
-            try:
-                from pathlib import Path
-                profile_json = await self.hass.async_add_executor_job(
-                    Path(self._profile_path).read_text
-                )
-                model = PerformanceModel.from_file_data(profile_json)
-                self.estimator = ThermalEstimator.from_beestat(
-                    model._raw, indoor_temp=init_indoor,
-                    tonnage=self._hvac_tonnage,
-                )
-                _LOGGER.info(
-                    "Reset: re-loaded beestat profile from %s",
-                    self._profile_path,
-                )
-            except Exception:
-                _LOGGER.warning(
-                    "Reset: failed to re-load beestat profile — using cold start",
-                    exc_info=True,
-                )
-                self.estimator = ThermalEstimator.cold_start(
-                    indoor_temp=init_indoor,
-                    tonnage=self._hvac_tonnage,
-                    sqft=self._home_sqft,
-                )
-        else:
-            self.estimator = ThermalEstimator.cold_start(
-                indoor_temp=init_indoor,
-                tonnage=self._hvac_tonnage,
-                sqft=self._home_sqft,
-            )
+        # Reset EKF thermal estimator
+        self.estimator = ThermalEstimator.cold_start(
+            indoor_temp=init_indoor,
+            tonnage=self._hvac_tonnage,
+            sqft=self._home_sqft,
+        )
         self.adaptive_model = AdaptivePerformanceModel(self.estimator)
         try:
             self.adaptive_model.cool_differential = self.model.cool_differential
@@ -1756,8 +1697,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Reset profiler, model tracker, solar adjuster
         self.profiler = PerformanceProfiler()
-        if hasattr(self.model, "_raw"):
-            self.profiler.seed_from_beestat(self.model._raw)
         self.model_tracker = ModelTracker()
         self.solar_adjuster = SolarAdjuster(latitude=self._get_latitude())
 
@@ -2205,7 +2144,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         Priority:
         1. PerformanceProfiler (measured reality) — if confidence >= 0.7
         2. Adaptive model (EKF-derived) — if confidence above threshold
-        3. Static Beestat/default model — fallback
+        3. Static default model — fallback
         (Not used when grey-box LP optimizer is active.)
         """
         # Profiler: measured performance trumps EKF-derived estimates
@@ -2222,7 +2161,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             return self.adaptive_model
         else:
             _LOGGER.debug(
-                "Adaptive model confidence %.0f%% below threshold — using Beestat fallback",
+                "Adaptive model confidence %.0f%% below threshold — using static fallback",
                 confidence * 100,
             )
             return self.model
@@ -2308,13 +2247,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Update the savings accuracy tier based on baseline and model confidence."""
         baseline_conf = self.baseline_capture.confidence
         model_conf = self.estimator.confidence
-        is_beestat = self._initialization_mode == INIT_MODE_BEESTAT
 
         if baseline_conf >= 0.7 and model_conf >= 0.5:
             tier = TIER_CALIBRATED
-        elif is_beestat and self.baseline_capture.is_ready:
-            # Beestat fast-track: skip ESTIMATED, go straight to SIMULATED
-            tier = TIER_SIMULATED if baseline_conf >= 0.3 else TIER_ESTIMATED
         elif baseline_conf >= 0.3 and model_conf >= 0.3:
             tier = TIER_SIMULATED
         elif self.baseline_capture.is_ready:

@@ -36,7 +36,6 @@ from .const import (
     CONF_OUTDOOR_HUMIDITY_ENTITIES,
     CONF_OUTDOOR_TEMP_ENTITIES,
     CONF_OVERRIDE_GRACE_PERIOD_HOURS,
-    CONF_PROFILE_PATH,
     CONF_REOPTIMIZE_INTERVAL_HOURS,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
@@ -77,7 +76,6 @@ from .const import (
     DEFAULT_DWELL_TIME_MINUTES,
     DEFAULT_THERMOSTAT_DEADBAND,
     DOMAIN,
-    INIT_MODE_BEESTAT,
     INIT_MODE_LEARNING,
     PLATFORMS,
     VERSION,
@@ -111,9 +109,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not weather_entity and weather_entities:
         weather_entity = weather_entities[0]
 
-    # Initialization mode (default to beestat for backward compat with existing entries)
-    init_mode = entry.data.get(CONF_INITIALIZATION_MODE, INIT_MODE_BEESTAT)
-    profile_path = entry.data.get(CONF_PROFILE_PATH)
+    # Initialization mode
+    init_mode = entry.data.get(CONF_INITIALIZATION_MODE, INIT_MODE_LEARNING)
+    # Migrate legacy Beestat entries to learning mode
+    if init_mode == "beestat":
+        _LOGGER.info("Migrating legacy Beestat initialization mode to learning mode")
+        init_mode = INIT_MODE_LEARNING
     model_import_data = entry.data.get(CONF_MODEL_IMPORT_DATA)
 
     # Occupancy: migrate singular → plural for backward compat
@@ -180,24 +181,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
     }
 
-    # Pre-read beestat profile off the event loop (blocking I/O)
-    profile_json: str | None = None
-    if profile_path and init_mode == INIT_MODE_BEESTAT:
-        try:
-            profile_json = await hass.async_add_executor_job(
-                Path(profile_path).read_text
-            )
-        except (FileNotFoundError, OSError) as err:
-            _LOGGER.error("Cannot read Beestat profile '%s': %s", profile_path, err)
-
     # Monitor-only mode: run full pipeline without writing setpoints
     monitor_only = opts.get(CONF_MONITOR_ONLY, entry.data.get(CONF_MONITOR_ONLY, False))
 
     # Create coordinator
     coordinator = HeatPumpOptimizerCoordinator(
         hass,
-        profile_path=profile_path,
-        profile_json=profile_json,
         climate_entity_id=climate_entity,
         weather_entity_id=weather_entity,
         weather_entity_ids=weather_entities,

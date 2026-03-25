@@ -1,6 +1,6 @@
 """Solar gain correction for passive thermal drift predictions.
 
-The Beestat resist profile averages across all sky conditions at each outdoor
+The resist profile averages across all sky conditions at each outdoor
 temperature. A sunny 85°F day heats the house faster than a cloudy 85°F day
 due to solar radiation through windows.
 
@@ -95,7 +95,7 @@ class SolarAdjuster:
         # Clear sky adds solar gain, overcast reduces it
         extra = self.solar_coefficient * clear_sky * altitude_factor
 
-        # The Beestat profile was measured under average conditions,
+        # The base profile was measured under average conditions,
         # so we adjust relative to that average
         # Average clear_sky * altitude contribution ≈ 0.25 (rough midpoint)
         average_solar = self.solar_coefficient * 0.5 * 0.5

@@ -1,6 +1,6 @@
 """Grey-Box Model optimizer using Linear Programming with learned thermal parameters.
 
-Combines Bayesian priors (from Beestat or conservative defaults) with online
+Combines Bayesian priors (from conservative defaults) with online
 Kalman filter estimation and LP-based optimal scheduling. This is the architecture
 used in commercial building energy optimization systems.
 

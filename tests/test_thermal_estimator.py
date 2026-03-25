@@ -1,7 +1,6 @@
 """Tests for the Extended Kalman Filter thermal estimator.
 
-Tests convergence, persistence, adaptive model interface,
-and Beestat-primed initialization.
+Tests convergence, persistence, and adaptive model interface.
 """
 
 import importlib
@@ -241,40 +240,6 @@ class TestEKFConvergence:
         # Confidence should generally increase
         assert confidences[-1] > confidences[0], (
             f"Confidence should increase: {confidences}"
-        )
-
-
-class TestBeestatPriming:
-    """Test initialization from Beestat profile data."""
-
-    @pytest.fixture
-    def beestat_profile(self):
-        """Load the actual Beestat profile if available."""
-        profile_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "Temperature Profile - 2026-03-06.json",
-        )
-        if not os.path.exists(profile_path):
-            pytest.skip("Beestat profile not found")
-        with open(profile_path) as f:
-            return json.load(f)
-
-    def test_from_beestat_creates_valid_state(self, beestat_profile):
-        est = ThermalEstimator.from_beestat(beestat_profile)
-        assert est.R_inv > 0
-        assert est.C_inv > 0
-        assert float(est.x[IDX_Q_COOL]) > 5000
-        assert float(est.x[IDX_Q_HEAT]) > 5000
-
-    def test_from_beestat_lower_uncertainty(self, beestat_profile):
-        cold = ThermalEstimator.cold_start()
-        primed = ThermalEstimator.from_beestat(beestat_profile)
-
-        cold_trace = np.trace(cold.P)
-        primed_trace = np.trace(primed.P)
-        assert primed_trace < cold_trace, (
-            "Beestat-primed should have lower uncertainty"
         )
 
 

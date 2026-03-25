@@ -1,14 +1,13 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.27"
+VERSION = "0.1.28"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
 CONF_MONITOR_ONLY = "monitor_only"
 CONF_CLIMATE_ENTITY = "climate_entity"
 CONF_WEATHER_ENTITY = "weather_entity"
-CONF_PROFILE_PATH = "profile_path"
 CONF_INITIALIZATION_MODE = "initialization_mode"
 CONF_MODEL_IMPORT_DATA = "model_import_data"
 CONF_COMFORT_COOL_MIN = "comfort_cool_min"
@@ -21,7 +20,6 @@ CONF_OCCUPANCY_ENTITY = "occupancy_entity"
 
 # Initialization modes
 INIT_MODE_LEARNING = "learning"
-INIT_MODE_BEESTAT = "beestat"
 INIT_MODE_IMPORT = "import"
 
 # Savings tracking config keys (optional — configured via options flow)
@@ -96,7 +94,7 @@ STORAGE_VERSION = 1
 
 # Kalman filter / adaptive model
 CONF_USE_ADAPTIVE_MODEL = "use_adaptive_model"
-DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.5  # fall back to Beestat below this
+DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.5  # fall back to static model below this
 
 # Grey-box model (LP optimizer + Kalman filter)
 CONF_USE_GREYBOX_MODEL = "use_greybox_model"

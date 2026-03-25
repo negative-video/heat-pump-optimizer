@@ -447,7 +447,6 @@ class TestDefaultValues:
 
     def test_init_modes_defined(self):
         assert const_mod.INIT_MODE_LEARNING == "learning"
-        assert const_mod.INIT_MODE_BEESTAT == "beestat"
         assert const_mod.INIT_MODE_IMPORT == "import"
 
     def test_aggressiveness_presets_defined(self):

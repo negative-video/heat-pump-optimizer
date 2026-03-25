@@ -502,18 +502,28 @@ class TestThermalMassStability:
         runaway.
         """
         mass_obs = te_mod._MASS_OBS_THRESHOLD
-        full_obs = te_mod._MASS_FULL_OBS_DELTA
+        peak_obs = te_mod._MASS_PEAK_OBS_DELTA
+        max_obs = te_mod._MASS_MAX_OBS_DELTA
 
         # Below hard threshold: factor should be 0
-        assert min(1.0, 0.3 / full_obs) < 0.5  # small
-        # At threshold: factor is threshold/full_obs
-        expected_at_threshold = mass_obs / full_obs
-        assert abs(min(1.0, mass_obs / full_obs) - expected_at_threshold) < 1e-9
-        # Above full_obs: factor = 1.0
-        assert min(1.0, 3.0 / full_obs) == 1.0
-        # Linear scaling in between
-        factor_at_1 = min(1.0, 1.0 / full_obs)
-        assert 0.0 < factor_at_1 < 1.0
+        delta = 0.3
+        assert delta < mass_obs  # confirm below threshold
+
+        # At peak: factor should be 1.0
+        # Between threshold and peak: linear ramp from 0 to 1
+        mid = (mass_obs + peak_obs) / 2
+        factor_mid = (mid - mass_obs) / (peak_obs - mass_obs)
+        assert 0.0 < factor_mid < 1.0
+
+        # Above max_obs: factor = 0 (diverged — freeze)
+        delta_high = max_obs + 1.0
+        # factor is 0 when delta >= max_obs
+        assert delta_high >= max_obs
+
+        # Between peak and max: linear ramp from 1 to 0
+        mid_high = (peak_obs + max_obs) / 2
+        factor_high = 1.0 - (mid_high - peak_obs) / (max_obs - peak_obs)
+        assert 0.0 < factor_high < 1.0
 
 
 IDX_Q_COOL_LOCAL = te_mod.IDX_Q_COOL

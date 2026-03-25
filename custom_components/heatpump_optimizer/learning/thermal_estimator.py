@@ -12,8 +12,8 @@ State vector (9 elements):
 
 The filter estimates building envelope resistance (R), internal coupling (R_int),
 air and mass thermal capacitance (C, C_mass), HVAC capacity at a reference
-temperature, and peak solar heat gain. These replace the static Beestat lookup
-tables with continuously adapting parameters.
+temperature, and peak solar heat gain — continuously adapting parameters learned
+from thermostat observations.
 
 Additional environmental inputs (all optional, gracefully degrade to no-op):
 - Occupancy count: scales internal heat gain (Q_internal)
@@ -193,8 +193,6 @@ class ThermalEstimator:
 
     # Envelope area (ft²) — scales per-area R_inv to whole-building conductance
     _envelope_area: float = 2000.0
-    # Resist balance point from Beestat (°F), used to seed mode detection
-    _resist_balance_point: float | None = None
 
     # Current environmental conditions (set each update, used by _hvac_output)
     _current_wind_speed: float | None = None
@@ -252,13 +250,13 @@ class ThermalEstimator:
         tonnage: float | None = None,
         sqft: float | None = None,
     ) -> ThermalEstimator:
-        """Initialize with conservative defaults (no Beestat data).
+        """Initialize with conservative defaults.
 
         When ``tonnage`` is provided the Q_cool/Q_heat priors are set to the
         rated capacity (tons × 12,000 BTU/hr) and the initial covariance is
         narrowed to ±20%, dramatically reducing convergence time from weeks to
         days.  When ``sqft`` is provided the air thermal capacitance prior uses
-        the same 0.6 BTU/°F/ft² formula as ``from_beestat()``.
+        a 0.6 BTU/°F/ft² formula.
 
         Without either, the filter falls back to generic conservative defaults
         suitable for a ~2,000 ft² home, which will still converge within
@@ -282,7 +280,7 @@ class ThermalEstimator:
         if sqft is not None:
             sqft = max(300.0, min(10000.0, sqft))
             est._envelope_area = sqft
-            c_air = 0.6 * sqft           # BTU/°F (same formula as from_beestat)
+            c_air = 0.6 * sqft           # BTU/°F
             c_inv = 1.0 / c_air
             c_inv_var = (0.30 * c_inv) ** 2  # ±30% SD
         else:
@@ -293,9 +291,9 @@ class ThermalEstimator:
             indoor_temp,  # T_air
             indoor_temp,  # T_mass (assume equilibrium at start)
             0.10,         # R_inv → R ≈ 10 °F·hr/BTU (moderate insulation)
-            50.0,         # R_int_inv → R_int ≈ 0.02 (mass τ ≈ 200 hr at default C_mass)
+            50.0,         # R_int_inv → R_int ≈ 0.02 (mass τ ≈ 72 hr at default C_mass)
             c_inv,        # C_inv
-            0.0001,       # C_mass_inv → C_mass ≈ 10,000 BTU/°F
+            1.0 / (_MAX_TAU_HOURS * 50.0),  # C_mass_inv → τ = 72 hr at R_int_inv=50
             q_cool,       # Q_cool_base
             q_heat,       # Q_heat_base
             DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu ≈ 3000 BTU/hr
@@ -310,144 +308,6 @@ class ThermalEstimator:
             q_cool_var, # Q_cool_base — tight if tonnage known, open otherwise
             q_heat_var, # Q_heat_base
             1e6,        # solar_gain_btu — uncertain without data
-        ])
-        est._P_initial = est.P.copy()
-        est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
-        est._prev_q_cool = float(est.x[IDX_Q_COOL])
-        est._prev_q_heat = float(est.x[IDX_Q_HEAT])
-        est._initialized = True
-        est._setup_default_noise()
-
-        # When tonnage is known, reduce process noise for capacity states
-        # so the filter respects the user-provided rating during early learning.
-        if tonnage is not None:
-            est._has_tonnage_prior = True
-            est.Q[IDX_Q_COOL, IDX_Q_COOL] = 0.01
-            est.Q[IDX_Q_HEAT, IDX_Q_HEAT] = 0.01
-
-        return est
-
-    @classmethod
-    def from_beestat(
-        cls,
-        profile_data: dict,
-        indoor_temp: float = 72.0,
-        tonnage: float | None = None,
-    ) -> ThermalEstimator:
-        """Initialize from Beestat temperature profile (better priors).
-
-        Extracts approximate R, C, Q from the measured deltas.  When
-        ``tonnage`` is provided, it overrides the Beestat-derived Q_cool/
-        Q_heat with rated capacity and applies the same tight prior
-        protections as ``cold_start()`` (dampened process noise, rate
-        limiting, ±10% covariance).
-
-        The filter will converge faster (~3-5 days) with these priors,
-        or ~2-3 days when tonnage is also supplied.
-        """
-        est = cls()
-
-        # Extract property square footage for area-dependent calculations
-        sqft = float(profile_data.get("property", {}).get("square_feet", 2000))
-        sqft = max(500.0, min(10000.0, sqft))  # sanity clamp
-        est._envelope_area = sqft
-
-        # Extract resist (passive drift) trendline to estimate R and C
-        resist = profile_data["temperature"]["resist"]
-        resist_slope = resist["linear_trendline"]["slope"]  # °F/hr per °F outdoor
-        resist_deltas = resist.get("deltas", {})
-        # slope ≈ 1/(R*C), so R*C ≈ 1/slope
-        rc_product = 1.0 / max(abs(resist_slope), 0.001)
-
-        # Extract balance point for mode detection seeding
-        est._resist_balance_point = float(
-            profile_data["balance_point"].get("resist", 50.0)
-        )
-
-        # Estimate C_air from square footage (~0.6 BTU/°F per ft²)
-        c_air = 0.6 * sqft
-        r_envelope = rc_product / c_air * sqft
-        r_envelope = max(2.0, min(20.0, r_envelope))
-
-        # Effective thermal capacitance: the observed deltas reflect not just
-        # air but the total thermal mass being heated/cooled (walls, furniture,
-        # slab).  Using C_air alone underestimates Q by ~8x.
-        c_mass_default = 10000.0
-        c_effective = c_air + c_mass_default
-
-        # ── Capacity priors ──────────────────────────────────────────
-        if tonnage is not None:
-            # User-provided tonnage takes precedence over Beestat-derived Q
-            q_cool = tonnage * 12000.0
-            q_heat = tonnage * 12000.0 * 1.1
-        else:
-            # Estimate cooling capacity from net deltas (subtract resist drift)
-            cool_deltas = profile_data["temperature"]["cool_1"]["deltas"]
-            if cool_deltas:
-                ref_temps = [int(t) for t in cool_deltas.keys() if 70 <= int(t) <= 80]
-                if ref_temps:
-                    # Net delta = cooling delta - resist delta at same outdoor temp
-                    net_deltas = []
-                    for t in ref_temps:
-                        raw = float(cool_deltas[str(t)])
-                        drift = float(resist_deltas.get(str(t), 0.0))
-                        net_deltas.append(raw - drift)
-                    avg_net_cool = sum(net_deltas) / len(net_deltas)
-                else:
-                    avg_net_cool = -3.0
-                q_cool = c_effective * abs(avg_net_cool)
-                q_cool = max(10000, min(60000, q_cool))
-            else:
-                q_cool = 20000.0
-
-            # Estimate heating capacity similarly
-            heat_deltas = profile_data["temperature"]["heat_1"]["deltas"]
-            if heat_deltas:
-                ref_temps = [int(t) for t in heat_deltas.keys() if 30 <= int(t) <= 50]
-                if ref_temps:
-                    net_deltas = []
-                    for t in ref_temps:
-                        raw = float(heat_deltas[str(t)])
-                        drift = float(resist_deltas.get(str(t), 0.0))
-                        net_deltas.append(raw - drift)
-                    avg_net_heat = sum(net_deltas) / len(net_deltas)
-                else:
-                    avg_net_heat = 1.0
-                q_heat = c_effective * abs(avg_net_heat)
-                q_heat = max(10000, min(60000, q_heat))
-            else:
-                q_heat = 18000.0
-
-        est.x = np.array([
-            indoor_temp,
-            indoor_temp,
-            1.0 / r_envelope,    # R_inv
-            50.0,                 # R_int_inv — physically plausible coupling (mass τ ≈ 200 hr)
-            1.0 / c_air,         # C_inv
-            1.0 / c_mass_default, # C_mass_inv
-            q_cool,
-            q_heat,
-            DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu (Beestat has no solar data)
-        ])
-
-        # Covariance: tight if tonnage known, moderate from Beestat
-        if tonnage is not None:
-            q_cool_var = (0.10 * q_cool) ** 2   # ±10% SD — trust user tonnage
-            q_heat_var = (0.10 * q_heat) ** 2
-        else:
-            q_cool_var = (0.30 * q_cool) ** 2   # ±30% — Beestat-derived
-            q_heat_var = (0.30 * q_heat) ** 2
-
-        est.P = np.diag([
-            0.1,       # T_air
-            10.0,      # T_mass — still uncertain
-            0.002,     # R_inv — moderate confidence
-            50.0,      # R_int_inv — wide range (not in Beestat data)
-            1e-5,      # C_inv — moderate confidence
-            1e-7,      # C_mass_inv — low confidence
-            q_cool_var,  # Q_cool
-            q_heat_var,  # Q_heat
-            1e6,       # solar_gain_btu — uncertain (not in Beestat)
         ])
         est._P_initial = est.P.copy()
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])

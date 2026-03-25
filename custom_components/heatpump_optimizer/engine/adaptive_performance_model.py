@@ -2,7 +2,7 @@
 
 Implements the same interface as PerformanceModel (cooling_delta, heating_delta,
 passive_drift, etc.) but derives values from the ThermalEstimator's learned
-R, C, and Q_hvac parameters instead of static Beestat lookup tables.
+R, C, and Q_hvac parameters instead of static lookup tables.
 
 In dual-mode operation, the coordinator chooses between this model and the
 static PerformanceModel based on the estimator's confidence level.
@@ -161,7 +161,7 @@ class AdaptivePerformanceModel:
     def cool_differential(self) -> float:
         """Thermostat deadband for cooling.
 
-        Uses the Beestat profile value if available (passed during init),
+        Uses the profile value if available (passed during init),
         otherwise defaults to 1.0°F.
         """
         return getattr(self, "_cool_differential", 1.0)

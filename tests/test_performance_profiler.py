@@ -1,4 +1,4 @@
-"""Tests for PerformanceProfiler — Beestat-equivalent live performance learning."""
+"""Tests for PerformanceProfiler — live performance learning."""
 
 import importlib
 import importlib.util
@@ -269,10 +269,10 @@ class TestTrendlineFitting:
         assert result["slope"] != 0
 
 
-class TestBeestatFormat:
+class TestProfileDataExport:
     def test_empty_profiler(self):
         p = PerformanceProfiler()
-        data = p.to_beestat_format()
+        data = p.to_profile_data()
         assert data["temperature"]["cool_1"] is None
         assert data["temperature"]["resist"] is None
 
@@ -293,7 +293,7 @@ class TestBeestatFormat:
                 )
                 indoor += delta_per_5min
 
-        data = p.to_beestat_format()
+        data = p.to_profile_data()
         cool = data["temperature"]["cool_1"]
         assert cool is not None
         assert "deltas" in cool
@@ -320,7 +320,7 @@ class TestBeestatFormat:
                 )
                 indoor += drift * (5 / 60)  # convert °F/hr to °F per 5 min
 
-        data = p.to_beestat_format()
+        data = p.to_profile_data()
         resist = data["temperature"]["resist"]
         assert resist is not None
         # Balance point should be near 50°F

@@ -1,13 +1,13 @@
-"""Performance profiler — builds Beestat-equivalent lookup tables from live data.
+"""Performance profiler — builds temperature profile lookup tables from live data.
 
 Accumulates observed HVAC performance (indoor °F/hr change vs outdoor temp)
 into binned lookup tables for four modes: compressor cooling (cool_1),
 compressor heating (heat_1), auxiliary heat (auxiliary_heat_1), and passive
 drift (resist).
 
-Over weeks/months of operation, this produces the same temperature profile
-that Beestat generates from Ecobee data — but from any thermostat via
-Home Assistant.  The profiler output is directly consumable by PerformanceModel,
+Over weeks/months of operation, this produces a measured temperature profile
+from any thermostat via Home Assistant.  The profiler output is directly
+consumable by PerformanceModel,
 replacing the hardcoded linear COP degradation constants (ALPHA_COOL/ALPHA_HEAT)
 with measured nonlinear reality.
 """
@@ -72,7 +72,7 @@ class BinAccumulator:
 
 
 class PerformanceProfiler:
-    """Accumulates live HVAC performance into Beestat-equivalent lookup tables.
+    """Accumulates live HVAC performance into temperature profile lookup tables.
 
     Usage:
         1. Call record_observation() every coordinator update cycle (5 min)
@@ -89,47 +89,6 @@ class PerformanceProfiler:
         self._previous_indoor_temp: float | None = None
         self._previous_timestamp: datetime | None = None
         self._total_observations: int = 0
-        self._seeded: bool = False
-
-    # ── Beestat Seeding ──────────────────────────────────────────────
-
-    def seed_from_beestat(self, profile_data: dict) -> int:
-        """Seed profiler bins from a Beestat temperature profile.
-
-        Populates each mode's bins with synthetic observations derived from
-        the Beestat delta values.  Each outdoor-temp bin gets
-        MIN_SAMPLES_PER_BIN synthetic samples so it qualifies for trendline
-        fitting immediately.  Live observations merge into the same bins and
-        gradually dominate the averages.
-
-        Returns the number of bins seeded.
-        """
-        temp_section = profile_data.get("temperature", {})
-        seeded = 0
-        for mode in MODES:
-            mode_data = temp_section.get(mode)
-            if not mode_data or not isinstance(mode_data, dict):
-                continue
-            deltas = mode_data.get("deltas", {})
-            for temp_str, delta in deltas.items():
-                try:
-                    temp = int(temp_str)
-                    delta_f = float(delta)
-                except (ValueError, TypeError):
-                    continue
-                if abs(delta_f) > OUTLIER_DELTA_THRESHOLD:
-                    continue
-                if temp not in self._bins[mode]:
-                    n = MIN_SAMPLES_PER_BIN
-                    self._bins[mode][temp] = BinAccumulator(
-                        sum_delta=delta_f * n,
-                        sum_sq_delta=(delta_f ** 2) * n,
-                        count=n,
-                    )
-                    seeded += 1
-        self._seeded = seeded > 0
-        _LOGGER.info("Profiler: seeded %d bins from Beestat profile", seeded)
-        return seeded
 
     # ── Recording ─────────────────────────────────────────────────────
 
@@ -256,8 +215,8 @@ class PerformanceProfiler:
 
     # ── Output ────────────────────────────────────────────────────────
 
-    def to_beestat_format(self) -> dict[str, Any]:
-        """Export profiler data in Beestat-compatible format.
+    def to_profile_data(self) -> dict[str, Any]:
+        """Export profiler data as a temperature profile dict.
 
         Produces the same dict structure consumed by PerformanceModel.__init__().
         """
@@ -322,7 +281,7 @@ class PerformanceProfiler:
         # Lazy import to avoid circular dependency
         from ..engine.performance_model import PerformanceModel
 
-        data = self.to_beestat_format()
+        data = self.to_profile_data()
 
         # PerformanceModel requires cool_1, heat_1, and resist to be non-None.
         # Fill missing modes from conservative defaults.
@@ -495,7 +454,6 @@ class PerformanceProfiler:
                 self._previous_timestamp.isoformat()
                 if self._previous_timestamp else None
             ),
-            "seeded": self._seeded,
         }
 
     @classmethod
@@ -505,7 +463,6 @@ class PerformanceProfiler:
             expected_interval_minutes=data.get("expected_interval", 5.0),
         )
         profiler._total_observations = data.get("total_observations", 0)
-        profiler._seeded = data.get("seeded", False)
         profiler._previous_indoor_temp = data.get("previous_indoor_temp")
         ts_str = data.get("previous_timestamp")
         if ts_str:

@@ -504,7 +504,7 @@ class TestIntegration:
     """Integration tests verifying grey-box works with the thermal estimator."""
 
     def test_with_cold_start_estimator(self):
-        """Grey-box should work with a cold-start (no Beestat) estimator."""
+        """Grey-box should work with a cold-start estimator."""
         est = ThermalEstimator.cold_start(72.0)
         est._n_obs = 50  # Past minimum observation threshold
         opt = GreyBoxOptimizer(est)

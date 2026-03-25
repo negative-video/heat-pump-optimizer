@@ -1,6 +1,6 @@
 """Tests for config flow validation helpers and options flow utilities.
 
-Covers _validate_profile, _validate_model_import, _strip_empty_strings,
+Covers _validate_model_import, _strip_empty_strings,
 _suggest_multi filtering, and sensor overlap detection.
 """
 
@@ -25,46 +25,8 @@ exec(
         """
 import json
 import logging
-import os
 
 _LOGGER = logging.getLogger(__name__)
-
-def _validate_profile(path: str):
-    if not os.path.isfile(path):
-        _LOGGER.error("Beestat profile not found at path: %s", path)
-        return "profile_not_found"
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as err:
-        _LOGGER.error("Beestat profile parse error at %s: %s", path, err)
-        return "profile_parse_error"
-
-    temp = data.get("temperature", {})
-    required_modes = ["cool_1", "heat_1", "resist"]
-    for mode in required_modes:
-        mode_data = temp.get(mode, {})
-        if not mode_data or not mode_data.get("deltas"):
-            _LOGGER.error(
-                "Beestat profile missing temperature.%s.deltas. "
-                "Top-level keys: %s, temperature keys: %s",
-                mode, list(data.keys()), list(temp.keys()),
-            )
-            return "profile_missing_keys"
-        if not mode_data.get("linear_trendline"):
-            _LOGGER.error(
-                "Beestat profile missing temperature.%s.linear_trendline", mode
-            )
-            return "profile_missing_keys"
-
-    if "balance_point" not in data:
-        _LOGGER.error(
-            "Beestat profile missing balance_point. Top-level keys: %s",
-            list(data.keys()),
-        )
-        return "profile_missing_keys"
-
-    return None
 
 def _validate_model_import(data_str: str):
     try:
@@ -86,116 +48,8 @@ def _strip_empty_strings(user_input: dict) -> dict:
     _globals,
 )
 
-_validate_profile = _globals["_validate_profile"]
 _validate_model_import = _globals["_validate_model_import"]
 _strip_empty_strings = _globals["_strip_empty_strings"]
-
-
-def _make_valid_profile():
-    """Return a minimal valid Beestat profile dict."""
-    return {
-        "temperature": {
-            "cool_1": {
-                "deltas": {"75": -3.36, "96": -0.66},
-                "linear_trendline": {"slope": 0.13, "intercept": -14.0},
-            },
-            "heat_1": {
-                "deltas": {"30": 0.4, "50": 1.7},
-                "linear_trendline": {"slope": 0.04, "intercept": -1.0},
-            },
-            "resist": {
-                "deltas": {"50": -0.11, "70": 0.75},
-                "linear_trendline": {"slope": 0.035, "intercept": -1.77},
-            },
-        },
-        "balance_point": {"heat_1": 24.9, "resist": 50.2},
-    }
-
-
-# ── _validate_profile tests ──────────────────────────────────────────
-
-
-class TestValidateProfile:
-    def test_valid_profile(self, tmp_path):
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(_make_valid_profile()))
-        assert _validate_profile(str(path)) is None
-
-    def test_valid_real_beestat_file(self):
-        """Validate against the actual Beestat export in docs/internal."""
-        real_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "docs",
-            "internal",
-            "Temperature Profile - 2026-03-06.json",
-        )
-        if os.path.isfile(real_path):
-            assert _validate_profile(real_path) is None
-
-    def test_file_not_found(self):
-        result = _validate_profile("/nonexistent/path/profile.json")
-        assert result == "profile_not_found"
-
-    def test_invalid_json(self, tmp_path):
-        path = tmp_path / "bad.json"
-        path.write_text("not valid json {{{")
-        result = _validate_profile(str(path))
-        assert result == "profile_parse_error"
-
-    def test_missing_cool_deltas(self, tmp_path):
-        profile = _make_valid_profile()
-        profile["temperature"]["cool_1"] = {}
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_missing_heat_deltas(self, tmp_path):
-        profile = _make_valid_profile()
-        profile["temperature"]["heat_1"] = {}
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_missing_resist_deltas(self, tmp_path):
-        profile = _make_valid_profile()
-        profile["temperature"]["resist"] = {}
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_missing_temperature_key(self, tmp_path):
-        profile = {"other": "data", "balance_point": {"heat_1": 24.9}}
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_empty_deltas_list(self, tmp_path):
-        profile = _make_valid_profile()
-        profile["temperature"]["cool_1"]["deltas"] = []
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_missing_linear_trendline(self, tmp_path):
-        profile = _make_valid_profile()
-        del profile["temperature"]["cool_1"]["linear_trendline"]
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_missing_balance_point(self, tmp_path):
-        profile = _make_valid_profile()
-        del profile["balance_point"]
-        path = tmp_path / "profile.json"
-        path.write_text(json.dumps(profile))
-        assert _validate_profile(str(path)) == "profile_missing_keys"
-
-    def test_path_with_spaces(self, tmp_path):
-        """Filenames with spaces should work (common in Beestat exports)."""
-        path = tmp_path / "Temperature Profile - 2026-03-06.json"
-        path.write_text(json.dumps(_make_valid_profile()))
-        assert _validate_profile(str(path)) is None
 
 
 # ── _validate_model_import tests ─────────────────────────────────────
@@ -264,47 +118,6 @@ class TestStripEmptyStrings:
 
     def test_all_empty_strings(self):
         assert _strip_empty_strings({"a": "", "b": ""}) == {}
-
-
-# ── Quote stripping in Beestat path handling ─────────────────────────
-
-
-class TestBeestatPathQuoteStripping:
-    """Test that the strip().strip(\"'\\\"\") pattern used in
-    async_step_thermal_profile_beestat correctly handles quoted paths.
-    """
-
-    def _strip_path(self, raw: str) -> str:
-        """Replicate the path stripping from config_flow.py."""
-        return raw.strip().strip("'\"")
-
-    def test_single_quoted_path(self):
-        raw = "'/homeassistant/Temperature Profile - 2026-03-06.json'"
-        assert self._strip_path(raw) == "/homeassistant/Temperature Profile - 2026-03-06.json"
-
-    def test_double_quoted_path(self):
-        raw = '"/homeassistant/profile.json"'
-        assert self._strip_path(raw) == "/homeassistant/profile.json"
-
-    def test_unquoted_path_unchanged(self):
-        raw = "/homeassistant/profile.json"
-        assert self._strip_path(raw) == raw
-
-    def test_whitespace_stripped(self):
-        raw = "  /homeassistant/profile.json  "
-        assert self._strip_path(raw) == "/homeassistant/profile.json"
-
-    def test_quoted_with_spaces(self):
-        raw = " '/config/Temperature Profile - 2026-03-06.json' "
-        assert self._strip_path(raw) == "/config/Temperature Profile - 2026-03-06.json"
-
-    def test_valid_profile_after_stripping(self, tmp_path):
-        """End-to-end: strip quotes then validate."""
-        path = tmp_path / "Temperature Profile - 2026-03-06.json"
-        path.write_text(json.dumps(_make_valid_profile()))
-        raw = f"'{path}'"
-        cleaned = self._strip_path(raw)
-        assert _validate_profile(cleaned) is None
 
 
 # ── Sensor overlap detection ─────────────────────────────────────────

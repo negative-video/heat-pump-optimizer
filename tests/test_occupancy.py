@@ -139,9 +139,9 @@ class TestInterpretState:
     def test_vacation_states(self, value):
         assert OccupancyAdapter._interpret_state(value) == OccupancyMode.VACATION
 
-    def test_unknown_defaults_to_home(self):
-        assert OccupancyAdapter._interpret_state("unknown") == OccupancyMode.HOME
-        assert OccupancyAdapter._interpret_state("unavailable") == OccupancyMode.HOME
+    def test_unknown_defaults_to_away(self):
+        assert OccupancyAdapter._interpret_state("unknown") == OccupancyMode.AWAY
+        assert OccupancyAdapter._interpret_state("unavailable") == OccupancyMode.AWAY
 
     def test_whitespace_stripped(self):
         assert OccupancyAdapter._interpret_state("  home  ") == OccupancyMode.HOME

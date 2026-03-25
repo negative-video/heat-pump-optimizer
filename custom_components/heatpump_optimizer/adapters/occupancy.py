@@ -232,6 +232,8 @@ class OccupancyAdapter:
         - person.* states: "home", "not_home", "away"
         - binary_sensor states: "on" (occupied), "off" (away)
         - input_select states: "home", "away", "vacation"
+        - "unavailable"/"unknown": treated as AWAY (not home) to avoid
+          phantom occupancy from entity hiccups inflating internal heat gain.
         """
         normalized = state_value.lower().strip()
 
@@ -239,8 +241,8 @@ class OccupancyAdapter:
             return OccupancyMode.HOME
         if normalized in ("vacation", "extended_away"):
             return OccupancyMode.VACATION
-        if normalized in ("not_home", "away", "off"):
+        if normalized in ("not_home", "away", "off", "unavailable", "unknown"):
             return OccupancyMode.AWAY
 
-        _LOGGER.debug("Unknown occupancy state '%s' — defaulting to HOME", state_value)
-        return OccupancyMode.HOME
+        _LOGGER.debug("Unknown occupancy state '%s' — defaulting to AWAY", state_value)
+        return OccupancyMode.AWAY

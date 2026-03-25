@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Simulate EKF thermal model performance against historical CSV data.
 
-Compares three initialization paths:
-  A) Beestat profile only (no user onboarding)
+Compares initialization paths:
+  A) cold_start with no priors (generic defaults)
   B) cold_start with user-provided tonnage + sqft (onboarding path)
-  C) Beestat + tonnage override (both data sources)
+  C) cold_start with tonnage + sqft (same as B, baseline for occupancy comparison)
+  D) cold_start with tonnage + sqft + occupancy/appliance loads
 """
 
 import csv
@@ -36,9 +37,6 @@ IDX_Q_HEAT = _mod.IDX_Q_HEAT
 IDX_SOLAR_GAIN = _mod.IDX_SOLAR_GAIN
 
 # ── Load data ──────────────────────────────────────────────────────────
-with open("docs/internal/Temperature Profile - 2026-03-06.json") as f:
-    profile = json.load(f)
-
 def parse_ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
@@ -254,10 +252,10 @@ def run_sim(est, label, extra_update_kwargs=None):
     return {"mae": mae, "rmse": rmse, "bias": bias, "conf": est.confidence, "est": est}
 
 # ══════════════════════════════════════════════════════════════════════
-# PATH A: Beestat profile only
+# PATH A: cold_start with no priors (generic defaults)
 # ══════════════════════════════════════════════════════════════════════
-est_a = ThermalEstimator.from_beestat(profile, indoor_temp=climate_rows[0]["temp"])
-ra = run_sim(est_a, "PATH A: Beestat-only (no onboarding)")
+est_a = ThermalEstimator.cold_start(indoor_temp=climate_rows[0]["temp"])
+ra = run_sim(est_a, "PATH A: Cold start (no priors)")
 
 # ══════════════════════════════════════════════════════════════════════
 # PATH B: cold_start with tonnage + sqft (user onboarding)
@@ -266,38 +264,19 @@ est_b = ThermalEstimator.cold_start(indoor_temp=climate_rows[0]["temp"], tonnage
 rb = run_sim(est_b, "PATH B: Onboarding (3.5 ton, 2500 ft², 14 SEER)")
 
 # ══════════════════════════════════════════════════════════════════════
-# PATH C: Beestat + tonnage override (both data sources)
+# PATH C: cold_start with tonnage + sqft (baseline for D comparison)
 # ══════════════════════════════════════════════════════════════════════
-est_c = ThermalEstimator.from_beestat(profile, indoor_temp=climate_rows[0]["temp"])
-tonnage = 3.5
-est_c.x[IDX_Q_COOL] = tonnage * 12000.0
-est_c.x[IDX_Q_HEAT] = tonnage * 12000.0 * 1.1
-est_c.P[IDX_Q_COOL, IDX_Q_COOL] = (0.10 * est_c.x[IDX_Q_COOL]) ** 2
-est_c.P[IDX_Q_HEAT, IDX_Q_HEAT] = (0.10 * est_c.x[IDX_Q_HEAT]) ** 2
-est_c._has_tonnage_prior = True
-est_c.Q[IDX_Q_COOL, IDX_Q_COOL] = 0.01
-est_c.Q[IDX_Q_HEAT, IDX_Q_HEAT] = 0.01
-est_c._prev_q_cool = float(est_c.x[IDX_Q_COOL])
-est_c._prev_q_heat = float(est_c.x[IDX_Q_HEAT])
-rc = run_sim(est_c, "PATH C: Beestat + Tonnage (3.5 ton override)")
+est_c = ThermalEstimator.cold_start(indoor_temp=climate_rows[0]["temp"], tonnage=3.5, sqft=2500)
+rc = run_sim(est_c, "PATH C: Tonnage + sqft (baseline for occupancy comparison)")
 
 # ══════════════════════════════════════════════════════════════════════
-# PATH D: Beestat + Tonnage + occupancy/appliance loads
+# PATH D: cold_start with tonnage + sqft + occupancy/appliance loads
 #   1200 BTU/hr human load → ~1 person (model: 800 base + 350/person, so
 #     with people_home_count=1 → 800+350=1150, close enough to 1200)
 #   2500 BTU/hr constant appliance load → appliance_btu=2500
 # ══════════════════════════════════════════════════════════════════════
-est_d = ThermalEstimator.from_beestat(profile, indoor_temp=climate_rows[0]["temp"])
-est_d.x[IDX_Q_COOL] = tonnage * 12000.0
-est_d.x[IDX_Q_HEAT] = tonnage * 12000.0 * 1.1
-est_d.P[IDX_Q_COOL, IDX_Q_COOL] = (0.10 * est_d.x[IDX_Q_COOL]) ** 2
-est_d.P[IDX_Q_HEAT, IDX_Q_HEAT] = (0.10 * est_d.x[IDX_Q_HEAT]) ** 2
-est_d._has_tonnage_prior = True
-est_d.Q[IDX_Q_COOL, IDX_Q_COOL] = 0.01
-est_d.Q[IDX_Q_HEAT, IDX_Q_HEAT] = 0.01
-est_d._prev_q_cool = float(est_d.x[IDX_Q_COOL])
-est_d._prev_q_heat = float(est_d.x[IDX_Q_HEAT])
-rd = run_sim(est_d, "PATH D: Beestat + Tonnage + Occupancy/Appliances (1200+2500 BTU)",
+est_d = ThermalEstimator.cold_start(indoor_temp=climate_rows[0]["temp"], tonnage=3.5, sqft=2500)
+rd = run_sim(est_d, "PATH D: Tonnage + Occupancy/Appliances (1200+2500 BTU)",
              extra_update_kwargs={"people_home_count": 1, "appliance_btu": 2500.0})
 
 # ══════════════════════════════════════════════════════════════════════
@@ -321,7 +300,7 @@ rd = run_sim(est_d, "PATH D: Beestat + Tonnage + Occupancy/Appliances (1200+2500
 print(f"\n{'=' * 70}")
 print("COMPARISON SUMMARY")
 print(f"{'=' * 70}")
-print(f"  {'Metric':<22s} {'Beestat':>12s} {'Onboard':>12s} {'Bee+Ton':>12s} {'Bee+Ton+Occ':>12s}")
+print(f"  {'Metric':<22s} {'No Priors':>12s} {'Onboard':>12s} {'Ton+Sqft':>12s} {'Ton+Occ':>12s}")
 print(f"  {'─'*22}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*12}")
 results = [ra, rb, rc, rd]
 print(f"  {'MAE (°F)':<22s} {ra['mae']:>12.3f} {rb['mae']:>12.3f} {rc['mae']:>12.3f} {rd['mae']:>12.3f}")
