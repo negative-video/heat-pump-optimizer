@@ -16,7 +16,7 @@ Most thermostats don't account for this — they react to the current temperatur
 
 ## How It Works
 
-The integration builds a physics-based thermal model of your home (insulation, thermal mass, HVAC capacity) that it learns automatically from thermostat readings via a Kalman filter. Three control layers run on top of it:
+The integration builds a physics-based thermal model of your home (insulation, thermal mass, HVAC capacity) that it learns automatically from thermostat readings via a Kalman filter. The model starts with textbook-average coefficients for wind infiltration, attic/crawlspace heat transfer, occupancy heat, and COP degradation, then a daily calibration pass analyzes prediction errors to adjust these coefficients to match your home's actual behavior. Three control layers run on top of it:
 
 1. **Strategic planner** — Re-optimizes setpoint schedule every 1–4 hours based on weather forecasts, electricity rates, and grid carbon intensity.
 2. **Tactical controller** — Checks reality against the model every 5 minutes and nudges the setpoint if the house is drifting.
@@ -883,6 +883,35 @@ This derived irradiance feeds into the same hierarchy as a direct sensor reading
 
 ---
 
+### The model uses estimates for solar gain, wind infiltration, occupancy heat, and boundary zone conductance. How accurate are these for my specific house?
+
+The thermal model relies on about a dozen physics coefficients — wind infiltration per mph, attic ceiling conductance, COP degradation slope, heat per occupant, etc. — that are initialized to textbook averages from ASHRAE and building science literature. These are reasonable starting points, but every home is different.
+
+**Why the defaults vary per home:**
+
+Your home's wind exposure depends on orientation, tree coverage, and air sealing quality. A well-sealed new-build might see 10× less infiltration per mph than a drafty 1960s ranch. Attic conductance depends on your actual insulation R-value and attic ventilation — a spray-foamed attic at R-49 conducts far less heat than a blown fiberglass attic at R-13. COP degradation slopes are equipment-specific: a variable-speed heat pump degrades more gently than a fixed-speed unit. Even "350 BTU/hr per occupant" is an average — it varies with activity level and body mass.
+
+**What happens without adaptation:**
+
+Without correction, the EKF absorbs all these errors into its envelope conductance parameter (R_inv). This makes R_inv an *effective* value rather than a physical one — it's whatever number makes the model's predictions match reality *given all the other assumptions*. This works acceptably under the conditions where R_inv was calibrated, but produces systematic prediction error when conditions shift. For example, if the model calibrated during calm weather with a slightly-too-high wind infiltration coefficient, R_inv will be biased low to compensate. Then on the first windy day, both the wind coefficient and the wrong R_inv compound the error.
+
+**How the coefficient calibrator fixes this:**
+
+A daily calibration pass analyzes the past 24–72 hours of prediction errors (innovations), tagged with environmental context — wind speed, attic temperature, occupancy count, HVAC mode, outdoor temperature. Using sensitivity-weighted ridge regression, it identifies which coefficients are biased for your home and computes bounded correction multipliers.
+
+If the model consistently over-predicts heat loss on windy days, the wind infiltration coefficient is adjusted downward. If nighttime prediction error correlates with attic temperature, the attic conductance is adjusted. If the HVAC capacity prediction is systematically wrong at extreme outdoor temperatures, the COP degradation slopes are tuned.
+
+The calibrator also detects "natural experiments" — periods where confounders are minimized and a single effect dominates. A calm, clear night with nobody home and HVAC off isolates the pure building envelope. A windy night compared to that baseline isolates wind infiltration. These high-confidence windows provide supplementary calibration when they occur.
+
+**Safeguards:**
+
+- Corrections are rate-limited to 20% per day per coefficient and smoothed with an exponential moving average
+- All multipliers are bounded to 20%–500% of the textbook default (no physically nonsensical values)
+- Ridge regularization biases the regression toward "no change" when data is ambiguous
+- The calibrator ships in observe-only mode by default — it logs what it *would* adjust to diagnostic sensors, but doesn't apply changes until you explicitly enable it
+
+---
+
 ### Why does the optimizer only update every 5 minutes? My thermostat changes state faster than that.
 
 Two separate mechanisms handle fast vs. slow events.
@@ -1311,6 +1340,89 @@ When system specs are provided during setup, the cold-start priors are tightened
 When tonnage is provided, process noise for Q_cool/Q_heat is also reduced 100× (from 1.0 to 0.01) and per-cycle rate limiting caps parameter drift at 2% per update. This prevents the filter from overriding the user's rated capacity during the early learning period when observation data is sparse.
 
 With both provided, capacity and thermal mass converge in days rather than weeks. Without either, the filter still converges but the first-week predictions and savings estimates will be imprecise.
+
+---
+
+## Coefficient Calibrator
+
+The EKF learns 9 states from a single observation (thermostat temperature). Adding more states is not feasible — the system is already at its observability limit, and the three-layer thermal mass stability system was hard-won. But ~10 hardcoded physics coefficients vary significantly between homes. Without adaptation, the learned envelope conductance (R_inv) absorbs all coefficient errors, producing systematic prediction bias under novel conditions.
+
+The coefficient calibrator is a slow outer loop that operates on a completely different timescale from the EKF. The EKF runs every 5 minutes and never knows the calibrator exists; the calibrator runs daily, analyzes conditioned innovations, and adjusts the coefficients the EKF consumes — architecturally identical to how weather data flows in.
+
+### Two-timescale architecture
+
+```
+Fast EKF (5-min) → conditioned innovations → Slow Calibrator (daily)
+                                                   ↓
+                                           CoefficientStore multipliers
+                                                   ↓
+                                           Fast EKF reads calibrated values
+```
+
+The calibrator never touches the EKF's internal state vector, covariance, or process noise. It adjusts the *environment* the EKF operates in. The timescale separation (daily vs. 5-minute) prevents the two layers from fighting each other.
+
+### Sensitivity-weighted ridge regression
+
+Each conditioned innovation record includes the full thermal load context: wind speed, attic temperature, occupancy count, HVAC mode, outdoor temperature, etc. The coefficient sensitivity `s_k(t)` = ∂T_air_pred/∂θ_k is computed analytically:
+
+| Coefficient | Sensitivity |
+|---|---|
+| Wind infiltration | `s = UA · v_wind · (T_out_eff − T_air) · Δt` |
+| Attic conductance | `s = A_scale · (T_attic − T_air) · Δt` |
+| COP cooling | `s = −Q_cool · (T_out − T_ref) / (1 − α·ΔT) · Δt` |
+| COP heating | `s = Q_heat · (T_ref − T_out) / (1 − α·ΔT) · Δt` |
+| Internal base gain | `s = Δt` |
+| Per-person gain | `s = n_people · Δt` |
+
+The daily calibrator builds the sensitivity matrix J (N × K) and solves:
+
+```
+δ = (JᵀJ + λI)⁻¹ Jᵀe
+```
+
+where `e` is the innovation vector and `λ` is a regularization parameter (default 1.0) that biases toward no change when data is ambiguous. This is standard ridge regression, solvable in microseconds.
+
+Corrections are applied as bounded multiplicative updates with EMA smoothing:
+
+```
+multiplier_new = β · multiplier_old + (1 − β) · (multiplier_old + α · clamp(δ_k, ±0.20))
+```
+
+### Calibratable coefficients
+
+| Tier | Coefficient | Default | Observable when |
+|---|---|---|---|
+| 1 | Wind infiltration | 0.025/mph | Windy vs. calm periods |
+| 1 | Attic conductance | 50 BTU/hr/°F | Attic sensor present |
+| 1 | Crawlspace conductance | 25 BTU/hr/°F | Crawlspace sensor present |
+| 1 | Internal gain (base) | 800 BTU/hr | Empty house, HVAC off |
+| 1 | COP cooling slope | 0.012/°F | Cooling at various outdoor temps |
+| 1 | COP heating slope | 0.015/°F | Heating at various outdoor temps |
+| 2 | Stack effect | 0.02/√°F | Calm cold nights |
+| 2 | Per-person heat gain | 350 BTU/hr | Occupancy transitions |
+| 2 | Precipitation offset | 3.0°F | Rainy periods |
+
+Tier 1 coefficients are calibrated via the general regression. Tier 2 coefficients are calibrated opportunistically when data permits.
+
+### Natural experiment detection
+
+The calibrator scans for windows where confounders are minimized:
+
+| Experiment | Conditions | Isolates |
+|---|---|---|
+| Pure envelope | Night, HVAC off, empty house, calm, dry | Envelope baseline |
+| Wind isolation | Same as above but wind > 8 mph | Wind infiltration |
+| Occupancy isolation | Night, HVAC off, 0 vs. 2+ people | Internal heat gain |
+| COP curve | Active HVAC at varied outdoor temps | COP degradation slopes |
+
+### Safeguards
+
+- **Rate limiting**: Max 20% change per day per coefficient
+- **Hard bounds**: Multipliers clamped to [0.2, 5.0] (20%–500% of default)
+- **Regularization**: Ridge λ=1.0 biases toward no change
+- **EMA smoothing**: β=0.8 dampens oscillation
+- **Cold-start holdoff**: No calibration until 72 hours of data; natural experiments require 7 days
+- **Dry-run by default**: Ships in observe-only mode — logs proposed adjustments to diagnostic sensors without applying them
 
 ---
 

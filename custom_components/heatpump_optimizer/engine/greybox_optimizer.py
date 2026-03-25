@@ -35,6 +35,7 @@ from .data_types import (
 )
 
 if TYPE_CHECKING:
+    from ..learning.coefficient_store import CoefficientStore
     from ..learning.thermal_estimator import ThermalEstimator
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,8 +80,20 @@ class GreyBoxOptimizer:
     4. Convert duty cycles to a ScheduleEntry-based schedule
     """
 
-    def __init__(self, estimator: ThermalEstimator):
+    def __init__(
+        self,
+        estimator: ThermalEstimator,
+        coeff_store: CoefficientStore | None = None,
+    ):
         self.estimator = estimator
+        self._coeff_store = coeff_store
+
+    # ── Calibrated coefficient helpers ──────────────────────────
+
+    def _eff(self, name: str, default: float) -> float:
+        """Return calibrated coefficient value (or raw default if no store)."""
+        cs = self._coeff_store
+        return cs.effective(name, default) if cs else default
 
     def optimize(
         self,
@@ -288,7 +301,7 @@ class GreyBoxOptimizer:
         # Internal heat gain (use current occupancy as best estimate for horizon)
         people = getattr(self, "_people_home_count", None)
         if people is not None:
-            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+            Q_internal = self._eff("internal_gain_base", _INTERNAL_GAIN_BASE_BTU) + self._eff("internal_gain_per_person", _INTERNAL_GAIN_PER_PERSON_BTU) * people
         else:
             Q_internal = _DEFAULT_INTERNAL_GAIN_BTU
 
@@ -296,7 +309,7 @@ class GreyBoxOptimizer:
             T_out = hourly_forecast[t]["temp"]
             # Precipitation: evaporative cooling reduces effective outdoor temp
             if hourly_forecast[t].get("precipitation", False):
-                T_out = T_out - _PRECIPITATION_OFFSET_F
+                T_out = T_out - self._eff("precipitation_offset", _PRECIPITATION_OFFSET_F)
             # Approximate air temp with passive drift
             Q_env = UA * (T_out - T_air)
             Q_int = R_int_inv * (T_mass[t] - T_air)
@@ -336,14 +349,14 @@ class GreyBoxOptimizer:
 
         people = getattr(self, "_people_home_count", None)
         if people is not None:
-            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+            Q_internal = self._eff("internal_gain_base", _INTERNAL_GAIN_BASE_BTU) + self._eff("internal_gain_per_person", _INTERNAL_GAIN_PER_PERSON_BTU) * people
         else:
             Q_internal = _DEFAULT_INTERNAL_GAIN_BTU
 
         for t in range(n):
             T_out = hourly_forecast[t]["temp"]
             if hourly_forecast[t].get("precipitation", False):
-                T_out = T_out - _PRECIPITATION_OFFSET_F
+                T_out = T_out - self._eff("precipitation_offset", _PRECIPITATION_OFFSET_F)
 
             Q_env = UA * (T_out - T_air)
             Q_int = R_int_inv * (T_mass[t] - T_air)
@@ -391,7 +404,7 @@ class GreyBoxOptimizer:
         # Internal heat gain (use current occupancy as best estimate for horizon)
         people = getattr(self, "_people_home_count", None)
         if people is not None:
-            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+            Q_internal = self._eff("internal_gain_base", _INTERNAL_GAIN_BASE_BTU) + self._eff("internal_gain_per_person", _INTERNAL_GAIN_PER_PERSON_BTU) * people
         else:
             Q_internal = _DEFAULT_INTERNAL_GAIN_BTU
 
@@ -409,7 +422,7 @@ class GreyBoxOptimizer:
             is_precip = hourly_forecast[t].get("precipitation", False)
 
             # Precipitation: evaporative cooling reduces effective envelope temp
-            env_T_out = T_out - _PRECIPITATION_OFFSET_F if is_precip else T_out
+            env_T_out = T_out - self._eff("precipitation_offset", _PRECIPITATION_OFFSET_F) if is_precip else T_out
 
             # State transition: how much of current T_air carries forward
             A[t] = 1.0 - C_inv * (UA + R_int_inv) * dt
@@ -457,7 +470,7 @@ class GreyBoxOptimizer:
             indoor_humidity: Indoor relative humidity 0-100 (for SHR correction).
         """
         if mode == "cool":
-            raw_factor = 1.0 - _ALPHA_COOL * (T_out - _T_REF)
+            raw_factor = 1.0 - self._eff("alpha_cool", _ALPHA_COOL) * (T_out - _T_REF)
             cop_factor = max(0.1, raw_factor)
             if raw_factor <= 0.1:
                 _LOGGER.warning(
@@ -476,7 +489,7 @@ class GreyBoxOptimizer:
                 cop_factor *= (pressure_hpa / 1013.25) ** 0.1
             return -params["Q_cool_base"] * cop_factor
         elif mode == "heat":
-            raw_factor = 1.0 - _ALPHA_HEAT * (_T_REF - T_out)
+            raw_factor = 1.0 - self._eff("alpha_heat", _ALPHA_HEAT) * (_T_REF - T_out)
             cop_factor = max(0.1, raw_factor)
             if raw_factor <= 0.1:
                 _LOGGER.warning(
@@ -576,7 +589,7 @@ class GreyBoxOptimizer:
                 depth_below = max(0.0, aux_threshold_f - T_eff)
                 if depth_below > 0.0:
                     # COP of heat pump at the threshold temperature
-                    hp_cop_at_threshold = max(0.1, 1.0 - _ALPHA_HEAT * (_T_REF - aux_threshold_f))
+                    hp_cop_at_threshold = max(0.1, 1.0 - self._eff("alpha_heat", _ALPHA_HEAT) * (_T_REF - aux_threshold_f))
                     # Fraction of extra electricity required by resistive vs. heat pump:
                     # e.g., COP_hp=0.25 → penalty_multiplier=3.0 (300% more electricity)
                     penalty_multiplier = (1.0 / hp_cop_at_threshold) - 1.0
@@ -1121,11 +1134,11 @@ class GreyBoxOptimizer:
         """
         if mode == "cool":
             base_cop = 3.5
-            degradation = _ALPHA_COOL * (outdoor_temp - _T_REF)
+            degradation = self._eff("alpha_cool", _ALPHA_COOL) * (outdoor_temp - _T_REF)
             return max(1.0, base_cop * (1.0 - degradation))
         elif mode == "heat":
             base_cop = 3.0
-            degradation = _ALPHA_HEAT * (_T_REF - outdoor_temp)
+            degradation = self._eff("alpha_heat", _ALPHA_HEAT) * (_T_REF - outdoor_temp)
             return max(1.0, base_cop * (1.0 - degradation))
         return 1.0
 

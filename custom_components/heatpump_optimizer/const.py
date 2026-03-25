@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.28"
+VERSION = "0.1.29"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -98,6 +98,9 @@ DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.5  # fall back to static model below this
 
 # Grey-box model (LP optimizer + Kalman filter)
 CONF_USE_GREYBOX_MODEL = "use_greybox_model"
+
+# Coefficient calibration (slow outer-loop adaptation of physics coefficients)
+CONF_CALIBRATION_ENABLED = "calibration_enabled"
 
 # HA event types
 EVENT_OPTIMIZATION_COMPLETE = f"{DOMAIN}_optimization_complete"

@@ -33,6 +33,8 @@ from datetime import datetime, timezone
 
 import numpy as np
 
+from .coefficient_store import CoefficientStore
+
 _LOGGER = logging.getLogger(__name__)
 
 # State vector indices
@@ -207,6 +209,15 @@ class ThermalEstimator:
 
     # Last computed thermal load components (BTU/hr), populated by _predict_state
     _last_thermal_loads: dict = field(default_factory=dict)
+
+    # Conditioned innovations: innovation + full thermal load context for the
+    # coefficient calibrator.  72-hour rolling buffer, NOT persisted (rebuilds
+    # from live data after restart, same as _innovations).
+    _conditioned_innovations: list[dict] = field(default_factory=list)
+
+    # Optional coefficient store — when set, the EKF reads calibrated
+    # multipliers instead of raw module-level constants.
+    _coeff_store: CoefficientStore | None = None
 
     # Previous C_mass_inv for per-cycle rate limiting (not persisted)
     _prev_c_mass_inv: float | None = None
@@ -543,12 +554,27 @@ class ThermalEstimator:
 
         # Record innovation for accuracy tracking
         now = datetime.now(timezone.utc)
-        self._innovations.append((now, float(innovation)))
+        inn_val = float(innovation)
+        self._innovations.append((now, inn_val))
         self._trim_innovations()
+
+        # Record conditioned innovation (full context for coefficient calibrator)
+        if self._last_thermal_loads:
+            cond = dict(self._last_thermal_loads)
+            cond["timestamp"] = now.isoformat()
+            cond["innovation"] = inn_val
+            cond["hvac_mode"] = hvac_mode
+            cond["hvac_running"] = hvac_running
+            cond["outdoor_temp"] = outdoor_temp
+            cond["precipitation"] = self._current_precipitation
+            cond["dt_hours"] = dt_hours
+            self._conditioned_innovations.append(cond)
+            self._trim_conditioned_innovations()
+
         self._n_obs += 1
         self._last_update = now
 
-        return float(innovation)
+        return inn_val
 
     def _predict_state(
         self,
@@ -571,10 +597,20 @@ class ThermalEstimator:
         Q_heat_base = x[IDX_Q_HEAT]
         solar_gain_btu = x[IDX_SOLAR_GAIN]
 
+        # ── Resolve calibratable coefficients ──────────────────
+        cs = self._coeff_store
+        wind_coeff = cs.effective("wind_infiltration", _WIND_INFILTRATION_COEFF) if cs else _WIND_INFILTRATION_COEFF
+        stack_coeff = cs.effective("stack_effect", _STACK_EFFECT_COEFF) if cs else _STACK_EFFECT_COEFF
+        precip_offset = cs.effective("precipitation_offset", _PRECIPITATION_OFFSET_F) if cs else _PRECIPITATION_OFFSET_F
+        int_gain_base = cs.effective("internal_gain_base", _INTERNAL_GAIN_BASE_BTU) if cs else _INTERNAL_GAIN_BASE_BTU
+        int_gain_pp = cs.effective("internal_gain_per_person", _INTERNAL_GAIN_PER_PERSON_BTU) if cs else _INTERNAL_GAIN_PER_PERSON_BTU
+        cal_k_attic = cs.effective("k_attic", _K_ATTIC) if cs else _K_ATTIC
+        cal_k_crawl = cs.effective("k_crawlspace", _K_CRAWLSPACE) if cs else _K_CRAWLSPACE
+
         # ── Effective outdoor temp (precipitation correction) ────
         effective_outdoor = outdoor_temp
         if self._current_precipitation:
-            effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F
+            effective_outdoor = outdoor_temp - precip_offset
 
         # ── Envelope heat flow ───────────────────────────────────
         # R_inv is per-area conductance (1/R_wall); multiply by envelope area
@@ -583,9 +619,9 @@ class ThermalEstimator:
         UA = R_inv * self._envelope_area
         wind_infiltration = 0.0
         if self._current_wind_speed is not None and self._current_wind_speed > 0:
-            wind_infiltration = _WIND_INFILTRATION_COEFF * self._current_wind_speed
+            wind_infiltration = wind_coeff * self._current_wind_speed
         # Stack effect: buoyancy-driven infiltration scales with sqrt(|ΔT|)
-        stack_effect = _STACK_EFFECT_COEFF * math.sqrt(abs(effective_outdoor - T_air))
+        stack_effect = stack_coeff * math.sqrt(abs(effective_outdoor - T_air))
         infiltration = min(
             _MAX_INFILTRATION_MULTIPLIER,
             1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration + stack_effect,
@@ -617,15 +653,15 @@ class ThermalEstimator:
         # ── Internal heat gain (occupancy-scaled) ────────────────
         people = self._current_people_count
         if people is not None:
-            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+            Q_internal = int_gain_base + int_gain_pp * people
         else:
             Q_internal = DEFAULT_INTERNAL_GAIN_BTU
 
         # ── Boundary zone heat transfer ──────────────────────────
         # Scale conductances by home size (base values assume 2000 ft²)
         area_scale = self._envelope_area / 2000.0
-        k_attic = _K_ATTIC * area_scale
-        k_crawl = _K_CRAWLSPACE * area_scale
+        k_attic = cal_k_attic * area_scale
+        k_crawl = cal_k_crawl * area_scale
 
         Q_boundary = 0.0
         k_boundary = 0.0  # total boundary conductance for exponential integrator
@@ -785,16 +821,28 @@ class ThermalEstimator:
         C_mass_inv = x[IDX_C_MASS_INV]
         solar_gain_btu = x[IDX_SOLAR_GAIN]
 
+        # ── Resolve calibratable coefficients (must match _predict_state) ──
+        cs = self._coeff_store
+        wind_coeff = cs.effective("wind_infiltration", _WIND_INFILTRATION_COEFF) if cs else _WIND_INFILTRATION_COEFF
+        stack_coeff = cs.effective("stack_effect", _STACK_EFFECT_COEFF) if cs else _STACK_EFFECT_COEFF
+        precip_offset = cs.effective("precipitation_offset", _PRECIPITATION_OFFSET_F) if cs else _PRECIPITATION_OFFSET_F
+        int_gain_base = cs.effective("internal_gain_base", _INTERNAL_GAIN_BASE_BTU) if cs else _INTERNAL_GAIN_BASE_BTU
+        int_gain_pp = cs.effective("internal_gain_per_person", _INTERNAL_GAIN_PER_PERSON_BTU) if cs else _INTERNAL_GAIN_PER_PERSON_BTU
+        cal_k_attic = cs.effective("k_attic", _K_ATTIC) if cs else _K_ATTIC
+        cal_k_crawl = cs.effective("k_crawlspace", _K_CRAWLSPACE) if cs else _K_CRAWLSPACE
+        alpha_cool = cs.effective("alpha_cool", ALPHA_COOL) if cs else ALPHA_COOL
+        alpha_heat = cs.effective("alpha_heat", ALPHA_HEAT) if cs else ALPHA_HEAT
+
         # Precipitation correction for effective outdoor temp
         effective_outdoor = outdoor_temp
         if self._current_precipitation:
-            effective_outdoor = outdoor_temp - _PRECIPITATION_OFFSET_F
+            effective_outdoor = outdoor_temp - precip_offset
 
         # Infiltration multiplier (must match _predict_state)
         wind_infiltration = 0.0
         if self._current_wind_speed is not None and self._current_wind_speed > 0:
-            wind_infiltration = _WIND_INFILTRATION_COEFF * self._current_wind_speed
-        stack_effect = _STACK_EFFECT_COEFF * math.sqrt(abs(effective_outdoor - T_air))
+            wind_infiltration = wind_coeff * self._current_wind_speed
+        stack_effect = stack_coeff * math.sqrt(abs(effective_outdoor - T_air))
         infiltration = min(
             _MAX_INFILTRATION_MULTIPLIER,
             1.0 + 2.0 * self._current_open_doors_windows + wind_infiltration + stack_effect,
@@ -813,14 +861,14 @@ class ThermalEstimator:
 
         people = self._current_people_count
         if people is not None:
-            Q_internal = _INTERNAL_GAIN_BASE_BTU + _INTERNAL_GAIN_PER_PERSON_BTU * people
+            Q_internal = int_gain_base + int_gain_pp * people
         else:
             Q_internal = DEFAULT_INTERNAL_GAIN_BTU
 
         # Boundary zone heat transfer (scaled by home size)
         area_scale = self._envelope_area / 2000.0
-        k_attic = _K_ATTIC * area_scale
-        k_crawl = _K_CRAWLSPACE * area_scale
+        k_attic = cal_k_attic * area_scale
+        k_crawl = cal_k_crawl * area_scale
 
         Q_boundary = 0.0
         Q_solar_via_attic = 0.0
@@ -864,7 +912,7 @@ class ThermalEstimator:
         # dT_air / dQ_cool_base and dQ_heat_base
         # Include environmental corrections so Jacobian matches _hvac_output
         if hvac_running and hvac_mode == "cool":
-            cop_factor = max(0.1, 1.0 - ALPHA_COOL * (outdoor_temp - T_REF_F))
+            cop_factor = max(0.1, 1.0 - alpha_cool * (outdoor_temp - T_REF_F))
             # Outdoor humidity correction
             humidity = getattr(self, "_current_humidity", None)
             if humidity is not None and humidity > 50.0:
@@ -886,7 +934,7 @@ class ThermalEstimator:
                     cop_factor *= max(0.5, 1.0 - _DUCT_LOSS_PER_F * delta)
             F[IDX_T_AIR, IDX_Q_COOL] = C_inv * (-cop_factor) * dt
         elif hvac_running and hvac_mode == "heat":
-            cop_factor = max(0.1, 1.0 - ALPHA_HEAT * (T_REF_F - outdoor_temp))
+            cop_factor = max(0.1, 1.0 - alpha_heat * (T_REF_F - outdoor_temp))
             # Pressure correction
             pressure = getattr(self, "_current_pressure", None)
             if pressure is not None:
@@ -946,7 +994,9 @@ class ThermalEstimator:
 
         if mode == "cool":
             # Capacity decreases as outdoor temp rises above reference
-            raw_factor = 1.0 - ALPHA_COOL * (outdoor_temp - T_REF_F)
+            cs = self._coeff_store
+            a_cool = cs.effective("alpha_cool", ALPHA_COOL) if cs else ALPHA_COOL
+            raw_factor = 1.0 - a_cool * (outdoor_temp - T_REF_F)
             cop_factor = max(0.1, raw_factor)
             if raw_factor <= 0.1:
                 _LOGGER.warning(
@@ -977,7 +1027,9 @@ class ThermalEstimator:
 
         if mode == "heat":
             # Capacity decreases as outdoor temp drops below reference
-            raw_factor = 1.0 - ALPHA_HEAT * (T_REF_F - outdoor_temp)
+            cs = self._coeff_store
+            a_heat = cs.effective("alpha_heat", ALPHA_HEAT) if cs else ALPHA_HEAT
+            raw_factor = 1.0 - a_heat * (T_REF_F - outdoor_temp)
             cop_factor = max(0.1, raw_factor)
             if raw_factor <= 0.1:
                 _LOGGER.warning(
@@ -1297,6 +1349,22 @@ class ThermalEstimator:
             return
         cutoff = datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=max_hours)
         self._innovations = [(t, v) for t, v in self._innovations if t > cutoff]
+
+    def _trim_conditioned_innovations(self, max_hours: int = 72):
+        """Keep only last 72 hours of conditioned innovations."""
+        if not self._conditioned_innovations:
+            return
+        cutoff = (
+            datetime.now(timezone.utc)
+            - __import__("datetime").timedelta(hours=max_hours)
+        ).isoformat()
+        self._conditioned_innovations = [
+            c for c in self._conditioned_innovations if c.get("timestamp", "") > cutoff
+        ]
+
+    def get_conditioned_innovations(self) -> list[dict]:
+        """Return a copy of the conditioned innovation buffer (read-only)."""
+        return list(self._conditioned_innovations)
 
     # ── Persistence ─────────────────────────────────────────────────
 

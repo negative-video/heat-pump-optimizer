@@ -90,6 +90,7 @@ from .const import (
     CONF_SUN_ENTITY,
     CONF_UV_INDEX_ENTITY,
     CONF_TOU_SCHEDULE,
+    CONF_CALIBRATION_ENABLED,
     CONF_USE_ADAPTIVE_MODEL,
     CONF_USE_GREYBOX_MODEL,
     CONF_WIND_SPEED_ENTITY,
@@ -158,6 +159,8 @@ from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
+from .learning.coefficient_calibrator import CoefficientCalibrator
+from .learning.coefficient_store import CoefficientStore
 from .learning.thermal_estimator import ThermalEstimator
 from .savings_tracker import SavingsTracker, TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED
 
@@ -431,8 +434,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.adaptive_model.cool_differential = self.model.cool_differential
         self.adaptive_model.heat_differential = self.model.heat_differential
 
+        # Coefficient calibrator (slow outer loop for EKF physics coefficients)
+        self.coeff_store = CoefficientStore()
+        self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
+        self.estimator._coeff_store = self.coeff_store
+
         # Grey-box optimizer (LP + Kalman)
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
 
         # Aux heat activation learner
         self.aux_heat_learner = AuxHeatLearner(
@@ -1686,14 +1694,18 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             tonnage=self._hvac_tonnage,
             sqft=self._home_sqft,
         )
+        self.estimator._coeff_store = self.coeff_store
         self.adaptive_model = AdaptivePerformanceModel(self.estimator)
         try:
             self.adaptive_model.cool_differential = self.model.cool_differential
             self.adaptive_model.heat_differential = self.model.heat_differential
         except AttributeError:
             pass
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
         self.strategic.greybox_optimizer = self.greybox_optimizer
+
+        # Reset coefficient calibrator (but keep the learned store)
+        self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
 
         # Reset profiler, model tracker, solar adjuster
         self.profiler = PerformanceProfiler()
@@ -1881,10 +1893,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             return
         try:
             self.estimator = ThermalEstimator.from_dict(state_data)
+            self.estimator._coeff_store = self.coeff_store
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
             self.adaptive_model.cool_differential = self.model.cool_differential
             self.adaptive_model.heat_differential = self.model.heat_differential
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
             self.strategic.greybox_optimizer = self.greybox_optimizer
             _LOGGER.info(
                 "Imported model: %d observations, confidence=%.0f%%",
@@ -2124,6 +2137,29 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             uv_index=uv_reading.value if uv_reading and not uv_reading.stale else None,
             solar_irradiance_w_m2=solar_irradiance_w_m2,
         )
+
+        # ── Coefficient calibrator check (daily slow loop) ──────
+        if self.coeff_calibrator.should_calibrate(now):
+            try:
+                cond_inns = self.estimator.get_conditioned_innovations()
+                # Dry-run by default; live mode requires explicit config flag
+                cal_enabled = self.config_entry.options.get(
+                    CONF_CALIBRATION_ENABLED, False
+                )
+                result = self.coeff_calibrator.calibrate(
+                    cond_inns, dry_run=not cal_enabled,
+                )
+                if not result.get("skipped"):
+                    _LOGGER.info(
+                        "Coefficient calibration %s (%d samples, residual=%.3f°F)",
+                        "applied" if result.get("applied") else "dry-run",
+                        result.get("samples_used", 0),
+                        result.get("regression_residual", 0),
+                    )
+            except Exception:
+                _LOGGER.warning(
+                    "Coefficient calibration failed", exc_info=True
+                )
 
         if self.estimator._n_obs % 100 == 0:
             _LOGGER.info(
@@ -2458,6 +2494,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "counterfactual": self.counterfactual.to_dict(),
             "performance_profiler": self.profiler.to_dict(),
             "aux_heat_learner": self.aux_heat_learner.to_dict(),
+            "coefficient_store": self.coeff_store.to_dict(),
+            "coefficient_calibrator": self.coeff_calibrator.to_dict(),
             "_history_bootstrap_completed": self._history_bootstrap_completed,
             "_bootstrap_retry_count": self._bootstrap_retry_count,
         }
@@ -2529,11 +2567,31 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             except Exception:
                 _LOGGER.warning("Failed to restore savings tracker — using fresh state",
                                 exc_info=True)
+        if "coefficient_store" in stored:
+            try:
+                self.coeff_store = CoefficientStore.from_dict(stored["coefficient_store"])
+                _LOGGER.debug(
+                    "Restored coefficient store (%d calibrations)",
+                    self.coeff_store.calibration_count,
+                )
+            except Exception:
+                _LOGGER.warning("Failed to restore coefficient store — using defaults",
+                                exc_info=True)
+        if "coefficient_calibrator" in stored:
+            try:
+                self.coeff_calibrator = CoefficientCalibrator.from_dict(
+                    stored["coefficient_calibrator"], self.coeff_store,
+                )
+                _LOGGER.debug("Restored coefficient calibrator")
+            except Exception:
+                _LOGGER.warning("Failed to restore coefficient calibrator — using fresh state",
+                                exc_info=True)
         if "thermal_estimator" in stored:
             try:
                 self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
+                self.estimator._coeff_store = self.coeff_store
                 self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-                self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+                self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
                 self.strategic.greybox_optimizer = self.greybox_optimizer
                 _LOGGER.info(
                     "Restored Kalman filter (%d observations, confidence=%.0f%%)",
@@ -2661,8 +2719,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         if result.success:
             # Rebuild dependent objects with updated estimator state
+            self.estimator._coeff_store = self.coeff_store
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator)
+            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
             self.strategic.greybox_optimizer = self.greybox_optimizer
 
             # Reset profiler tracking so the first live cycle starts clean
@@ -3009,6 +3068,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Thermal load breakdown (BTU/hr components from EKF)
             "thermal_load_components": self.estimator.thermal_load_components,
             "house_thermal_load_btu": self._compute_net_passive_load(),
+
+            # Coefficient calibration (slow outer loop)
+            "coefficient_multipliers": self.coeff_store.multipliers,
+            "coefficient_confidence": self.coeff_store.all_confidence,
+            "coefficient_proposed": self.coeff_calibrator.proposed_multipliers,
+            "coefficient_calibration_count": self.coeff_store.calibration_count,
+            "coefficient_last_calibration": (
+                self.coeff_store.last_calibration.isoformat()
+                if self.coeff_store.last_calibration else None
+            ),
+            "coefficient_experiments_detected": len(self.coeff_calibrator.last_experiments),
 
             # Overrides
             "override_count_30d": override_stats.get("total_overrides_30d", 0),

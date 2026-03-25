@@ -109,6 +109,7 @@ from .const import (
     CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
+    CONF_CALIBRATION_ENABLED,
     CONF_USE_ADAPTIVE_MODEL,
     CONF_USE_GREYBOX_MODEL,
     CONF_WEATHER_ENTITIES,
@@ -1395,6 +1396,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_USE_GREYBOX_MODEL,
                         default=self._options.get(CONF_USE_GREYBOX_MODEL, False),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_CALIBRATION_ENABLED,
+                        default=self._options.get(CONF_CALIBRATION_ENABLED, False),
                     ): selector.BooleanSelector(),
                 }
             ),
