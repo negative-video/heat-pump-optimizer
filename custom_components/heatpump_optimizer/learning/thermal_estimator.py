@@ -135,6 +135,19 @@ _C_MASS_MAX_CHANGE_FRAC = 0.05
 # over days, but prevents the 75 % collapse seen in early learning.
 _Q_HVAC_MAX_CHANGE_FRAC = 0.02
 
+# Maximum fractional change in R_inv per 5-minute EKF cycle.
+# Envelope thermal resistance is a physical property that doesn't change
+# between cycles.  3 % per step ≈ 36 %/hr — fast enough for convergence
+# but prevents the wild swings (R=5 to R=36) seen when HVAC mode changes
+# confound envelope estimation during early learning.
+_R_INV_MAX_CHANGE_FRAC = 0.03
+
+# Kalman gain attenuation for R_inv and R_int_inv during active HVAC.
+# When HVAC is running, Q_hvac dominates the temperature change, making it
+# hard to observe envelope characteristics separately.  Reducing the gain
+# prevents HVAC-driven temperature changes from corrupting R estimates.
+_R_INV_HVAC_GAIN_FACTOR = 0.2
+
 # Physical bounds for parameter clamping
 BOUNDS = {
     IDX_R_INV: (0.01, 1.0),       # R: 1.0 to 100 °F·hr/BTU
@@ -183,6 +196,11 @@ class ThermalEstimator:
     # Last observed temperature — used to detect quantization no-change
     _last_observed_temp: float | None = None
 
+    # Last pre-update prediction — stored so predicted_indoor_temp sensor
+    # shows what the model PREDICTED before seeing the observation, making
+    # it consistent with prediction_error (innovation = observed - predicted).
+    _last_predicted_temp: float | None = None
+
     # Innovation (prediction error) history for accuracy reporting
     _innovations: list[tuple[datetime, float]] = field(default_factory=list)
     _n_obs: int = 0
@@ -206,6 +224,9 @@ class ThermalEstimator:
     _current_attic_temp: float | None = None
     _current_crawlspace_temp: float | None = None
     _current_precipitation: bool = False
+
+    # Previous R_inv value for rate limiting (prevents wild swings)
+    _prev_r_inv: float | None = None
 
     # Last computed thermal load components (BTU/hr), populated by _predict_state
     _last_thermal_loads: dict = field(default_factory=dict)
@@ -321,6 +342,7 @@ class ThermalEstimator:
             1e6,        # solar_gain_btu — uncertain without data
         ])
         est._P_initial = est.P.copy()
+        est._prev_r_inv = float(est.x[IDX_R_INV])
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._prev_q_cool = float(est.x[IDX_Q_COOL])
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])
@@ -471,6 +493,7 @@ class ThermalEstimator:
         # Innovation
         z = observed_temp
         z_pred = x_pred[IDX_T_AIR]
+        self._last_predicted_temp = float(z_pred)
         innovation = z - z_pred
 
         # ── Quantization-aware measurement noise ────────────────
@@ -512,6 +535,36 @@ class ThermalEstimator:
         else:
             obs_factor = 0.0  # diverged — freeze C_mass learning entirely
         K[IDX_C_MASS_INV, :] *= obs_factor
+
+        # R_inv observability gating during active HVAC.  When HVAC is
+        # running, Q_hvac dominates the temperature signal, confounding
+        # envelope resistance estimation.  Attenuate the Kalman gain for
+        # R_inv and R_int_inv to prevent HVAC-driven changes from
+        # corrupting insulation estimates.
+        if hvac_running:
+            K[IDX_R_INV, :] *= _R_INV_HVAC_GAIN_FACTOR
+            K[IDX_R_INT_INV, :] *= _R_INV_HVAC_GAIN_FACTOR
+
+        # Early learning damping: reduce parameter Kalman gain for the
+        # first ~12 hours (144 observations at 5-min intervals).  Wide
+        # initial priors cause enormous gains that produce chaotic
+        # parameter jumps on minimal data.  Ramps from 50% to 100%.
+        if self._n_obs < 144:
+            damping = 0.5 + 0.5 * (self._n_obs / 144.0)
+            K[_IDX_FIRST_PARAM:, :] *= damping
+
+        # Persistent bias correction: when recent innovations show a
+        # consistent directional error (mean > 1.5°F over the last 12
+        # steps / 1 hour), boost parameter Kalman gains to accelerate
+        # correction.  Without this, the EKF can overpredict or
+        # underpredict for 12+ hours without meaningful self-correction.
+        if len(self._innovations) >= 12:
+            recent_innovations = [v for _, v in self._innovations[-12:]]
+            mean_inn = sum(recent_innovations) / len(recent_innovations)
+            if abs(mean_inn) > 1.5:
+                # Boost parameter gains by up to 3x (scaled by bias magnitude)
+                boost = min(3.0, 1.0 + abs(mean_inn) / 1.5)
+                K[_IDX_FIRST_PARAM:, :] *= boost
 
         # Quantization pause: when thermostat reports same integer as last
         # time, freeze parameter learning. The zero innovation carries no
@@ -1245,6 +1298,101 @@ class ThermalEstimator:
             "solar_gain_btu": float(stds[IDX_SOLAR_GAIN]),
         }
 
+    @property
+    def parameter_confidence(self) -> dict[str, float]:
+        """Per-parameter confidence (0.0-1.0) based on variance reduction."""
+        names = [
+            "envelope", "internal_coupling", "air_mass",
+            "thermal_mass", "cooling_capacity", "heating_capacity",
+            "solar_gain",
+        ]
+        if self._n_obs < 10:
+            return {name: 0.0 for name in names}
+        current_diag = np.diag(self.P)[2:N_STATES]
+        initial_diag = np.diag(self._P_initial)[2:N_STATES]
+        ratios = current_diag / np.maximum(initial_diag, 1e-30)
+        confs = 1.0 - np.minimum(ratios, 1.0)
+        return {name: round(float(c), 3) for name, c in zip(names, confs)}
+
+    def mode_confidence(self, hvac_mode: str) -> float:
+        """Confidence for a specific HVAC mode (0.0-1.0).
+
+        Only averages parameters relevant to the given mode, so unobserved
+        seasonal parameters (e.g. Q_cool in winter) don't drag the score down.
+
+        Heating uses: R_inv, R_int_inv, C_inv, C_mass_inv, Q_heat
+        Cooling uses: R_inv, R_int_inv, C_inv, C_mass_inv, Q_cool, solar_gain
+        """
+        if self._n_obs < 10:
+            return 0.0
+
+        current_diag = np.diag(self.P)[2:N_STATES]
+        initial_diag = np.diag(self._P_initial)[2:N_STATES]
+        ratios = current_diag / np.maximum(initial_diag, 1e-30)
+        all_confs = 1.0 - np.minimum(ratios, 1.0)
+
+        # Indices into the learned-parameter sub-array (offset by 2 from state vector)
+        idx_r = IDX_R_INV - 2       # 0
+        idx_rint = IDX_R_INT_INV - 2  # 1
+        idx_c = IDX_C_INV - 2       # 2
+        idx_cm = IDX_C_MASS_INV - 2  # 3
+        idx_qcool = IDX_Q_COOL - 2  # 4
+        idx_qheat = IDX_Q_HEAT - 2  # 5
+        idx_solar = IDX_SOLAR_GAIN - 2  # 6
+
+        # Shared envelope parameters always included
+        envelope_indices = [idx_r, idx_rint, idx_c, idx_cm]
+
+        if hvac_mode == "heat":
+            relevant = envelope_indices + [idx_qheat]
+        elif hvac_mode == "cool":
+            relevant = envelope_indices + [idx_qcool, idx_solar]
+        else:
+            # For idle/auto, use all parameters (same as global confidence)
+            relevant = list(range(len(all_confs)))
+
+        selected = [float(all_confs[i]) for i in relevant]
+        return max(0.0, min(1.0, sum(selected) / len(selected)))
+
+    @property
+    def learning_needs(self) -> list[str]:
+        """Human-readable list of what the model still needs to learn."""
+        pc = self.parameter_confidence
+        needs = []
+        if pc["envelope"] < 0.5:
+            needs.append("More HVAC-off periods needed to measure insulation")
+        if pc["cooling_capacity"] < 0.3 and pc["heating_capacity"] < 0.3:
+            needs.append("Waiting for HVAC cycling to measure system capacity")
+        elif pc["cooling_capacity"] < 0.3:
+            needs.append("No cooling cycles observed yet")
+        elif pc["heating_capacity"] < 0.3:
+            needs.append("No heating cycles observed yet")
+        if pc["solar_gain"] < 0.3:
+            needs.append("Needs sunny daytime data for solar gain estimate")
+        if pc["thermal_mass"] < 0.3:
+            needs.append("More temperature swings needed to measure thermal mass")
+        return needs
+
+    @property
+    def learning_rate(self) -> str:
+        """Qualitative learning rate: 'active', 'slow', or 'paused'.
+
+        Based on how many recent innovations (last hour / 12 observations)
+        had magnitude > 0.3°F.  Helps users understand why confidence is
+        stagnating during stable temperature periods.
+        """
+        if self._n_obs < 10:
+            return "initializing"
+        recent = self._innovations[-12:]
+        if not recent:
+            return "paused"
+        significant = sum(1 for _, v in recent if abs(v) > 0.3)
+        if significant >= 6:
+            return "active"
+        elif significant >= 2:
+            return "slow"
+        return "paused"
+
     # ── Accuracy Reporting ──────────────────────────────────────────
 
     @property
@@ -1293,6 +1441,15 @@ class ThermalEstimator:
 
     def _clamp_parameters(self):
         """Enforce physical bounds and rate limits on estimated parameters."""
+        # Rate-limit R_inv: cap change to ±_R_INV_MAX_CHANGE_FRAC per cycle.
+        if self._prev_r_inv is not None and self._prev_r_inv > 0:
+            prev = self._prev_r_inv
+            max_delta = _R_INV_MAX_CHANGE_FRAC * prev
+            self.x[IDX_R_INV] = np.clip(
+                self.x[IDX_R_INV], prev - max_delta, prev + max_delta,
+            )
+        self._prev_r_inv = float(self.x[IDX_R_INV])
+
         # Rate-limit C_mass_inv: cap change to ±_C_MASS_MAX_CHANGE_FRAC per cycle.
         if self._prev_c_mass_inv is not None and self._prev_c_mass_inv > 0:
             prev = self._prev_c_mass_inv
@@ -1429,6 +1586,7 @@ class ThermalEstimator:
             # Expand Q (process noise) — use default noise for solar gain
             est.Q = _expand_matrix(est.Q, 1e-4)
 
+        est._prev_r_inv = float(est.x[IDX_R_INV])
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._prev_q_cool = float(est.x[IDX_Q_COOL])
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])

@@ -10,6 +10,8 @@ build/
 .env
 *.log
 *.db
-tools/entities.json
-tools/export_*.csv
+tools/*
+!tools/validate.py
 docs/internal/
+.claude/plans/
+.claude/settings.local.json

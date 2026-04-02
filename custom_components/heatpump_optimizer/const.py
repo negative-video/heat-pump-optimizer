@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.1.29"
+VERSION = "0.1.30"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -87,6 +87,7 @@ PHASE_MAINTAINING = "maintaining"
 PHASE_PAUSED = "paused"
 PHASE_SAFE_MODE = "safe_mode"
 PHASE_IDLE = "idle"
+PHASE_LEARNING = "learning"
 
 # Storage keys
 STORAGE_KEY = f"{DOMAIN}_data"
@@ -95,6 +96,24 @@ STORAGE_VERSION = 1
 # Kalman filter / adaptive model
 CONF_USE_ADAPTIVE_MODEL = "use_adaptive_model"
 DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.5  # fall back to static model below this
+
+# Graduated activation tiers
+# Conservative: wider comfort bands, no aggressive pre-conditioning
+# Standard: normal operation with full optimization
+# Confident: aggressive pre-conditioning and rate arbitrage
+ACTIVATION_TIER_LEARNING = "learning"       # not yet activated
+ACTIVATION_TIER_CONSERVATIVE = "conservative"  # early activation with guardrails
+ACTIVATION_TIER_STANDARD = "standard"       # full optimization
+ACTIVATION_TIER_CONFIDENT = "confident"     # aggressive strategies enabled
+
+# Conservative mode activates when:
+# - Baseline is captured (7 days)
+# - Passive drift profiler confidence >= 70%
+# - At least 30 HVAC observations in the current mode
+CONSERVATIVE_DRIFT_CONFIDENCE = 0.7
+CONSERVATIVE_MIN_MODE_OBS = 30
+# Comfort band widening in conservative mode (°F added to each side)
+CONSERVATIVE_COMFORT_BUFFER = 1.0
 
 # Grey-box model (LP optimizer + Kalman filter)
 CONF_USE_GREYBOX_MODEL = "use_greybox_model"

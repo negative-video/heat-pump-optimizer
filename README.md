@@ -26,20 +26,29 @@ The integration builds a physics-based thermal model of your home (insulation, t
 
 The Extended Kalman Filter jointly estimates several coupled building parameters (insulation R-value, thermal mass, HVAC capacity, solar gain) from a single observation — your thermostat's temperature reading. Several safeguards prevent these estimates from diverging during low-information conditions:
 
-**Thermal mass and R-value bounds and gating** — Thermal mass is capped at 30,000 BTU/°F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges. When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass − T_air| < 0.5°F`), the filter freezes thermal mass learning entirely — the observation carries no information about mass in this regime, and unchecked updates cause runaway estimates. A smooth gain taper between 0.5–2.0°F provides a gradual transition. Per-cycle rate limiting (5% max change) provides a final safety net.
+**Thermal mass and R-value bounds and gating** — Thermal mass is capped at 30,000 BTU/°F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges (R_inv: 0.01 to 1.0, giving R-values from 1 to 100 °F·hr/BTU). When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass - T_air| < 0.5°F`), the filter freezes thermal mass learning entirely. A bell-shaped gain curve peaks at 3.0°F delta (optimal observability) and tapers to zero at both extremes (below 0.5°F = equilibrium, above 8.0°F = likely filter divergence). Per-cycle rate limiting (5% max change for thermal mass, 3% for R-value) provides a final safety net.
 
-**Tonnage-anchored HVAC capacity** — When you provide system tonnage at setup, the filter treats it as a strong prior: initial uncertainty is ±10% (not the ±316% blind default), process noise is reduced 100×, and per-cycle drift is capped at 2%. This prevents the capacity estimate from collapsing during early learning when the air thermal capacitance (`C_air`) is still poorly estimated. The filter can still converge to the true value over days — it just can't abandon the rated capacity in a few hours. Without tonnage, the filter converges freely from a generic default.
+**R-value stability during HVAC operation** — When the HVAC is actively running, the dominant temperature forcing is from the compressor output, not the building envelope. The filter attenuates R-value and internal coupling Kalman gains by 80% during active HVAC to prevent compressor-driven temperature changes from corrupting insulation estimates.
+
+**Early learning damping** — During the first ~12 hours (144 observations), parameter Kalman gains are scaled from 50% to 100%. This prevents the wide initial priors from causing chaotic parameter jumps based on a handful of readings while still allowing meaningful convergence.
+
+**Persistent bias correction** — When the model consistently over- or under-predicts indoor temperature (mean innovation magnitude > 1.5°F over the last hour), parameter Kalman gains are temporarily boosted up to 3x to accelerate self-correction. This prevents the EKF from drifting for hours without meaningfully adjusting its estimates.
+
+**Tonnage-anchored HVAC capacity** — When you provide system tonnage at setup, the filter treats it as a strong prior: initial uncertainty is ±10% (not the ±316% blind default), process noise is reduced 100x, and per-cycle drift is capped at 2%. This prevents the capacity estimate from collapsing during early learning when the air thermal capacitance (`C_air`) is still poorly estimated. The filter can still converge to the true value over days — it just can't abandon the rated capacity in a few hours. Without tonnage, the filter converges freely from a generic default.
 
 **HVAC observability gating** — Cooling capacity only learns when cooling is running; heating capacity only learns when heating is running. Cross-correlations are zeroed for unobserved modes to prevent covariance leakage from dragging idle-mode estimates toward bounds.
 
 ## Features
 
 - **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data, with optional history bootstrap for faster convergence.
+- **Graduated activation** — Starts optimizing conservatively once it has enough data for current conditions, rather than waiting for full confidence on all parameters. Four tiers: learning, conservative, standard, confident.
 - **Forecast-driven scheduling** — Hourly weather forecasts, with optional electricity rate and carbon intensity awareness.
 - **Savings tracking** — A counterfactual simulation of what your thermostat would have done without optimization, decomposed into runtime, COP, rate, and carbon components.
 - **Occupancy-aware** — Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
 - **Room-aware sensing** — Weights indoor temperature by room occupancy instead of averaging all sensors equally.
 - **House thermal load breakdown** — Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
+- **Temperature profile chart** — Observation coverage visualization showing where the model has data and where gaps remain, with per-mode trendlines and observation density by outdoor temperature.
+- **Per-parameter confidence** — Model confidence broken down by parameter (insulation, thermal mass, heating capacity, cooling capacity, solar gain) with human-readable explanations of what the model still needs to learn.
 - **Auxiliary appliances** — Model thermal impacts of other equipment (heat pump water heaters, dryers, ovens) so the Kalman filter doesn't confuse their effects with building parameter changes.
 - **Aux/emergency heat awareness** — Automatically learns your heat pump's baseline power draw and derives the resistive strip's BTU contribution so the EKF treats it as a known input rather than a surprise heating event.
 - **Sleep schedule** — Configure tighter nighttime comfort bounds with separate heating and cooling targets, active during a customizable sleep window.
@@ -86,12 +95,29 @@ After setup, open **Configure** on the integration card for advanced options: se
 |----------|-----------------|-----------------|
 | **Day 1** | Passive observation only — the optimizer watches your thermostat without changing it. Model starts collecting observations. | Learning mode layout: retrospective 48h chart, three learning-progress cards (thermal model, baseline schedule, profiler), milestone checklist, today's snapshot |
 | **Week 1** | Baseline capture completes (7 day minimum). No setpoint writes until this finishes. | Same as Day 1 until baseline completes; milestone "Baseline schedule" marks as done |
-| **Week 2–3** | With a reasonable temperature range, the model starts producing useful estimates. | Estimated-tier layout: conservative savings with uncertainty band, rough indoor forecast (dashed), baseline schedule grid |
-| **Month 1–2+** | Confidence grows as it observes different weather patterns. Full calibration depends on temperature variety. | Calibrated-tier layout: full savings panel, 24h forecast chart, thermal profile card with plain-English narrative and per-parameter position bars |
+| **Week 2–3** | Graduated activation begins. The optimizer starts making conservative decisions based on well-observed conditions. | Conservative activation: wider comfort bands, savings tracking begins |
+| **Month 1–2+** | Confidence grows as it observes different weather patterns. Activation tier upgrades from conservative to standard to confident as data coverage expands. | Full optimization: normal comfort bands, aggressive pre-conditioning, full savings panel |
 
 > **Tip:** Providing HVAC tonnage and home square footage during setup significantly speeds up model convergence. Restoring a previously exported model is immediate.
 
 > **History bootstrap:** On first setup, the integration loads up to 10 days of thermostat and weather history from Home Assistant's recorder. If sufficient data exists, this can reduce or skip the cold-start learning period.
+
+### Graduated Activation
+
+Rather than waiting for a single global confidence score to reach a fixed threshold, the optimizer uses **graduated activation** to provide value sooner while being honest about what it knows:
+
+| Tier | Requirements | Behavior |
+|------|-------------|----------|
+| **Learning** | Baseline not yet captured (first 7 days) | Passive observation only. No thermostat changes. |
+| **Conservative** | Baseline captured + passive drift profiler >= 70% confident + at least 30 HVAC observations in active mode | Optimization active with wider comfort bands (+/- 1F). No aggressive pre-conditioning. Shorter lookahead window. |
+| **Standard** | Global EKF confidence >= 50%, OR mode-specific EKF confidence >= 50%, OR profiler per-mode confidence >= 50% | Full optimization with normal comfort bands. |
+| **Confident** | Global EKF >= 70% or profiler overall confidence >= 70% | Aggressive pre-conditioning, rate arbitrage, full forecast lookahead. |
+
+**Why graduated activation?** A traditional single-threshold approach forces users to wait 6+ weeks for value because the global confidence score averages across all learned parameters equally. Parameters for conditions the home hasn't experienced (e.g., cooling capacity in spring, aux heat performance in summer) drag the score down even though the model may have excellent data for current conditions.
+
+**Condition matching:** The optimizer only operates within temperature ranges it has observed. If outdoor conditions fall outside the profiler's data range for the current HVAC mode, the system automatically falls back to conservative behavior. The temperature profile chart in the dashboard shows exactly which conditions the model covers.
+
+**Mode-specific confidence:** The EKF tracks seven physical parameters (envelope R-value, internal coupling, air mass, thermal mass, cooling capacity, heating capacity, solar gain). Not all parameters matter equally for every mode. Heating mode primarily needs envelope parameters + heating capacity. Cooling mode needs envelope parameters + cooling capacity + solar gain. The `mode_confidence()` metric only considers relevant parameters for the current operating mode.
 
 ### Dashboard
 
@@ -102,9 +128,12 @@ A **Heat Pump** tab appears in the sidebar after installation. Its layout adapts
 While the system is building its baseline, the panel shifts focus from forecasting to observing:
 
 - **Retrospective chart** — 48h of actual indoor and outdoor temperatures with HVAC on/off shading. The "Model" trace shows the EKF's measurement-corrected estimate of indoor temperature — every 5 minutes the Kalman filter predicts where the temperature should be, compares that prediction to the actual thermostat reading, and corrects its estimate using the Kalman gain. The Model dots should track actual readings closely (typically within 0.5°F); persistent divergence indicates the filter hasn't converged yet or conditions are outside its experience. The separate "Forecast" trace (hollow circles, right of the "Now" line) shows forward-looking simulation using the currently learned parameters — these have no future measurements to correct against, so they may drift.
-- **Three progress cards** — Thermal Model (confidence %, R-value with climate-relative quality label, thermal mass, capacity), Baseline Schedule (day-of-week dot grid showing which days have been captured), and Performance Data (per-mode observation counts and confidence).
+- **Three progress cards** — Thermal Model (confidence % with per-parameter breakdown, R-value with climate-relative quality label, thermal mass, capacity), Baseline Schedule (day-of-week dot grid showing which days have been captured), and Performance Data (per-mode observation counts and confidence).
+- **Temperature profile chart** — Scatter/density chart showing observed indoor temperature change rate vs outdoor temperature, colored by HVAC mode (heating, cooling, passive drift). Trendlines drawn only within the observed temperature range. Shows at a glance where the model has data and where gaps remain.
 - **Milestone checklist** — Step-by-step progress from "sensors connected" through "full optimization enabled." Shows which step is currently in progress.
 - **Today's Snapshot** — Objective energy facts for the day (estimated kWh, current draw, outdoor temp range, aux heat if any). No savings comparisons until the baseline completes.
+
+The optimizer phase badge shows **Learning** during this period (not "Idle") to indicate the system is actively collecting data. When learning stalls due to stable temperatures, the learning progress sensor explains: "No insights gained at stable temps. Progress will resume with fresh, unobserved conditions."
 
 #### Post-baseline (calibrated)
 
@@ -297,7 +326,7 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Current Phase | Optimizer phase (pre-cooling, coasting, maintaining, idle, paused, safe_mode) | — |
+| Current Phase | Optimizer phase (learning, pre-cooling, pre-heating, coasting, maintaining, idle, paused, safe_mode, preconditioning) | — |
 | Target Setpoint | Current desired thermostat setpoint | °F |
 | Next Action | Human-readable next scheduled action | — |
 | Schedule | Schedule entry count (full schedule in attributes) | — |
@@ -944,7 +973,7 @@ When you provide your system specs, those starting intervals are narrowed to phy
 
 | What you provide | Parameter seeded | Starting uncertainty | Without it |
 |---|---|---|---|
-| Tonnage | Q_cool, Q_heat | ±20% of rated capacity | ±316% (essentially unconstrained) |
+| Tonnage | Q_cool, Q_heat | ±10% of rated capacity | ±316% (essentially unconstrained) |
 | Home sq ft | C_air (thermal mass) | ±30% | Wide open |
 
 The EKF update equations themselves don't change — every interval still refines every parameter based on observed temperature response. But starting closer to the truth means **fewer intervals needed to reach a useful estimate**, which directly translates to:
@@ -978,6 +1007,18 @@ Three things cause reported savings to change:
 3. **Seasonal variation** — A cold March looks nothing like a mild November to the counterfactual. The optimizer's advantage is largest when there's a meaningful spread between efficient and inefficient hours (big daily temperature swings, variable grid prices). Mild, stable weather naturally produces smaller savings.
 
 The `Savings Accuracy Tier` sensor tells you how much to trust the current numbers. During `learning` and `estimated` tiers, treat the figures as directional, not precise.
+
+---
+
+### Why do daily savings show small values while cumulative totals stay at zero?
+
+During the learning period (Days 1–7), you may notice `Energy Saved Today`, `Cost Saved Today`, and `CO₂ Avoided Today` reporting small, noisy values each day — but `Energy Saved Cumulative`, `Cost Saved Cumulative`, and `CO₂ Avoided Cumulative` remain stuck at zero. This is intentional.
+
+**Daily sensors** record hourly savings regardless of the current accuracy tier. Before the baseline template is built, they use a ratio-based fallback (estimated baseline-to-actual multiplier) that produces rough numbers. These are diagnostic — they show the savings tracker is running, but the values aren't reliable because the optimizer isn't actually controlling the thermostat yet. The daily totals reset at local midnight each day, so nothing accumulates.
+
+**Cumulative sensors** are gated by the accuracy tier. While the tier is `learning` or `projected`, cumulative totals are intentionally blocked from accumulating. This prevents phantom savings (from the noisy ratio fallback) from inflating your all-time numbers before the optimizer has earned them. When the tier eventually upgrades to `estimated` (after baseline capture completes on Day 7+), any previously recorded phantom data is explicitly reset to zero — and from that point forward, savings are accumulated using the counterfactual simulator rather than the ratio fallback.
+
+**In short:** the daily sensors are "best effort" diagnostics during learning. The cumulative sensors wait until the integration can actually measure savings it caused. If you see daily numbers but zero cumulative totals, the system is working correctly — it's just being honest about what it knows.
 
 ---
 
@@ -1219,10 +1260,10 @@ Parameters are clamped to physical bounds after each update:
 
 | Parameter | Min | Max | Physical meaning |
 |-----------|-----|-----|-----------------|
-| R_inv | 0.01 | 2.0 | R-value range: 0.5–100 °F·hr/BTU |
+| R_inv | 0.01 | 1.0 | R-value range: 1–100 °F·hr/BTU |
 | R_int_inv | 0.5 | 500 | Mass time constant: ~20–20,000 hours |
 | C_inv | 1e-5 | 0.01 | Air capacitance: 100–100,000 BTU/°F |
-| C_mass_inv | 1e-6 | 0.001 | Mass capacitance: 1,000–1,000,000 BTU/°F |
+| C_mass_inv | 3.3e-5 | 0.001 | Mass capacitance: 1,000–30,000 BTU/°F |
 | Q_cool_base | 5,000 | 80,000 | Cooling capacity in BTU/hr |
 | Q_heat_base | 5,000 | 80,000 | Heating capacity in BTU/hr |
 | Q_solar_peak | 500 | 15,000 | Peak solar gain in BTU/hr |
@@ -1284,7 +1325,7 @@ Standard EKF update with Joseph form for numerical stability:
 
 ```
 innovation = z - H · x_pred
-S = H · P_pred · Hᵀ + R_meas           (innovation covariance; R_meas = 0.25 °F²)
+S = H · P_pred · Hᵀ + R_meas           (innovation covariance; R_meas = 0.5 °F²)
 K = P_pred · Hᵀ · S⁻¹                  (Kalman gain)
 x = x_pred + K · innovation
 P = (I - K·H) · P_pred · (I - K·H)ᵀ + K · R_meas · Kᵀ

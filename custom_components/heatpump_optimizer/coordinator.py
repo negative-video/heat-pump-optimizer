@@ -111,6 +111,13 @@ from .const import (
     DEFAULT_COST_WEIGHT,
     DEFAULT_HVAC_POWER_WATTS,
     DEFAULT_MODEL_CONFIDENCE_THRESHOLD,
+    ACTIVATION_TIER_LEARNING,
+    ACTIVATION_TIER_CONSERVATIVE,
+    ACTIVATION_TIER_STANDARD,
+    ACTIVATION_TIER_CONFIDENT,
+    CONSERVATIVE_DRIFT_CONFIDENCE,
+    CONSERVATIVE_MIN_MODE_OBS,
+    CONSERVATIVE_COMFORT_BUFFER,
     DEFAULT_FORECAST_CACHE_MAX_AGE_HOURS,
     DEFAULT_STALE_FORECAST_HOURS,
     DEFAULT_THERMOSTAT_TOLERANCE_CYCLES,
@@ -130,6 +137,7 @@ from .const import (
     EVENT_SAFE_MODE_ENTERED,
     PHASE_PRECONDITIONING,
     PHASE_IDLE,
+    PHASE_LEARNING,
     PHASE_PAUSED,
     PHASE_SAFE_MODE,
     STORAGE_KEY,
@@ -524,6 +532,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._phase: str = PHASE_IDLE
         self._active: bool = True
         self._paused: bool = False
+        self._cached_activation_tier: str | None = None  # Reset each update cycle
         self._last_learning_persist: datetime | None = None
         self._thermostat_was_unavailable: bool = False
         self._thermostat_unavailable_count: int = 0
@@ -624,6 +633,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     async def _update_cycle(self) -> dict[str, Any]:
         """Full 5-minute update cycle."""
+        self._cached_activation_tier = None  # Invalidate per-cycle cache
         now = datetime.now(timezone.utc)
 
         # Always fetch weather early — panel needs it even when paused/override
@@ -975,7 +985,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             if tactical_result.predicted_temp is not None:
                 self._feed_model_tracker(thermo_state, tactical_result, current_entry, now)
         else:
-            self._phase = PHASE_IDLE
+            # Show "learning" when the model isn't ready for control yet,
+            # rather than "idle" which implies the system could be active.
+            if not self._baseline_ready_for_control:
+                self._phase = PHASE_LEARNING
+            else:
+                self._phase = PHASE_IDLE
 
         # ── Departure detection (Stage 2 pre-conditioning) ───────────
 
@@ -1338,11 +1353,16 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         active_model = self._get_active_model()
         use_greybox_now = self._should_use_greybox()
 
-        # Update balance point if using adaptive or grey-box model
+        # Update balance point if using adaptive or grey-box model, but only
+        # when internal coupling is confident enough.  The adaptive balance
+        # point formula amplifies T_mass-T_air gaps by R_int_inv/R_inv, which
+        # can produce absurd values (1000°F+) when R_int_inv is poorly learned.
         if active_model is self.adaptive_model or use_greybox_now:
-            bp = self.adaptive_model.resist_balance_point
-            if bp is not None:
-                self.strategic.resist_balance_point = bp
+            param_conf = self.estimator.parameter_confidence
+            if param_conf.get("internal_coupling", 0) >= 0.3:
+                bp = self.adaptive_model.resist_balance_point
+                if bp is not None:
+                    self.strategic.resist_balance_point = bp
 
         # Configure strategic planner for grey-box or heuristic path
         self.strategic._use_greybox = use_greybox_now
@@ -1386,6 +1406,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # During learning mode, replace the simulation with a passive-only
         # version so tactical predictions reflect reality (no HVAC control).
+        # Also clear the stale runtime metadata to avoid showing contradictory
+        # numbers (e.g., 2880 min runtime but hvac:false in the forecast).
         if schedule and self._is_learning_active() and schedule.simulation:
             passive_sim = self.simulator.simulate(
                 thermo_state.indoor_temp,
@@ -1394,6 +1416,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 passive_only=True,
             )
             schedule.simulation = passive_sim
+            schedule.baseline_runtime_minutes = 0
+            schedule.optimized_runtime_minutes = 0
+            schedule.savings_pct = 0
             _LOGGER.debug(
                 "Learning mode: replaced schedule simulation with passive-only forecast"
             )
@@ -2192,13 +2217,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if not self._use_adaptive and not self._use_greybox:
             return self.model
 
-        confidence = self.adaptive_model.confidence
-        if confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
+        # Use adaptive model when activation tier permits it
+        tier = self._activation_tier
+        if tier != ACTIVATION_TIER_LEARNING:
             return self.adaptive_model
         else:
             _LOGGER.debug(
-                "Adaptive model confidence %.0f%% below threshold — using static fallback",
-                confidence * 100,
+                "Adaptive model: activation tier '%s' — using static fallback",
+                tier,
             )
             return self.model
 
@@ -2206,21 +2232,26 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Determine whether to use the grey-box LP optimizer.
 
         Grey-box requires the Kalman filter to have reached minimum
-        confidence. Falls back to the heuristic optimizer otherwise.
+        confidence (global or mode-specific). Falls back to the heuristic
+        optimizer otherwise.
         """
         if not self._use_greybox:
             return False
 
-        confidence = self.estimator.confidence
-        if confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
+        # Standard or confident tier: use greybox
+        tier = self._activation_tier
+        if tier in (ACTIVATION_TIER_STANDARD, ACTIVATION_TIER_CONFIDENT):
             return True
-        else:
-            _LOGGER.debug(
-                "Grey-box model confidence %.0f%% below threshold — "
-                "using heuristic optimizer",
-                confidence * 100,
-            )
-            return False
+
+        # Conservative tier: use greybox but with wider comfort bands
+        # (handled by _active_comfort_range)
+        if tier == ACTIVATION_TIER_CONSERVATIVE:
+            return True
+
+        _LOGGER.debug(
+            "Grey-box: activation tier '%s' — using heuristic optimizer", tier,
+        )
+        return False
 
     # ── Helpers ─────────────────────────────────────────────────────
 
@@ -2254,8 +2285,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         safety_min, safety_max = self.safety_limits
         comfort = (max(comfort[0], safety_min), min(comfort[1], safety_max))
 
-        # Learning mode conservatism: use inner 60% of band
-        if self._is_learning_active():
+        # Conservative activation: widen comfort band to reduce risk of
+        # discomfort when the model has limited HVAC performance data.
+        # Skip the learning-mode shrinking below — conservative mode
+        # manages its own comfort band width.
+        if self._is_conservative_mode:
+            comfort = (
+                comfort[0] - CONSERVATIVE_COMFORT_BUFFER,
+                comfort[1] + CONSERVATIVE_COMFORT_BUFFER,
+            )
+            # Re-apply safety limits after widening
+            comfort = (max(comfort[0], safety_min), min(comfort[1], safety_max))
+        elif self._is_learning_active():
+            # Learning mode conservatism: use inner 60% of band (only when
+            # NOT in conservative activation — conservative has its own widening)
             band = comfort[1] - comfort[0]
             margin = band * 0.2  # shrink by 20% from each side
             comfort = (comfort[0] + margin, comfort[1] - margin)
@@ -2268,16 +2311,115 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         return self._is_learning_active()
 
     def _is_learning_active(self) -> bool:
-        """Check if the model is still calibrating (below confidence threshold)."""
-        return self.estimator.confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD
+        """Check if the model is still in learning mode (not yet controlling).
+
+        Respects the graduated activation tier: if the optimizer has
+        activated (conservative/standard/confident), it is no longer
+        in learning mode even if global EKF confidence is below 50%.
+        """
+        return self._activation_tier == ACTIVATION_TIER_LEARNING
+
+    @property
+    def _activation_tier(self) -> str:
+        """Determine the optimizer's current activation tier (cached per cycle).
+
+        Graduated activation allows the optimizer to provide value sooner
+        by operating conservatively when it has partial data, rather than
+        waiting for full confidence on all parameters.
+
+        Tiers:
+        - learning: baseline not captured, or insufficient data
+        - conservative: baseline captured + good passive drift data + some HVAC obs
+        - standard: global EKF confidence >= 50% or mode-specific readiness
+        - confident: global EKF >= 70% or profiler per-mode >= 70%
+        """
+        if self._cached_activation_tier is not None:
+            return self._cached_activation_tier
+
+        tier = self._compute_activation_tier()
+        self._cached_activation_tier = tier
+        return tier
+
+    def _compute_activation_tier(self) -> str:
+        """Compute the activation tier (called once per cycle, cached by property)."""
+        if not self.baseline_capture.is_ready:
+            return ACTIVATION_TIER_LEARNING
+
+        global_conf = self.estimator.confidence
+
+        # Confident: strong global confidence or strong profiler mode data
+        if global_conf >= 0.7 or self.profiler.confidence() >= 0.7:
+            return ACTIVATION_TIER_CONFIDENT
+
+        # Standard: global threshold met, OR mode-specific EKF confidence
+        # combined with profiler validation
+        if global_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
+            return ACTIVATION_TIER_STANDARD
+
+        # Check mode-specific readiness
+        current_mode = self.thermostat.get_active_mode()
+        profiler_mode = "heat_1" if current_mode == "heat" else "cool_1"
+        mode_conf = self.estimator.mode_confidence(current_mode)
+        profiler_mode_conf = self.profiler.confidence(profiler_mode)
+        if mode_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD or profiler_mode_conf >= 0.5:
+            return ACTIVATION_TIER_STANDARD
+
+        # Conservative: baseline captured + good passive drift + minimum HVAC obs
+        drift_conf = self.profiler.confidence("resist")
+        mode_obs = self.profiler.mode_observation_count(profiler_mode)
+        if drift_conf >= CONSERVATIVE_DRIFT_CONFIDENCE and mode_obs >= CONSERVATIVE_MIN_MODE_OBS:
+            return ACTIVATION_TIER_CONSERVATIVE
+
+        return ACTIVATION_TIER_LEARNING
 
     @property
     def _baseline_ready_for_control(self) -> bool:
-        """Optimizer may only write setpoints after baseline is captured and model is confident."""
-        return (
-            self.baseline_capture.is_ready
-            and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
-        )
+        """Optimizer may write setpoints when activation tier is above learning."""
+        return self._activation_tier != ACTIVATION_TIER_LEARNING
+
+    @property
+    def _is_conservative_mode(self) -> bool:
+        """True when operating in conservative mode with wider comfort bands."""
+        return self._activation_tier == ACTIVATION_TIER_CONSERVATIVE
+
+    def _build_profiler_chart_data(self) -> dict:
+        """Build temperature profile chart data for the frontend.
+
+        Returns per-mode bin data (outdoor temp -> mean delta, count) and
+        trendlines for rendering a BeeStat-style observation coverage chart.
+        """
+        profile = self.profiler.to_profile_data()
+        chart = {}
+        for mode in ("cool_1", "heat_1", "auxiliary_heat_1", "resist"):
+            coverage = self.profiler.bin_coverage(mode)
+            temp_range = self.profiler.observed_temp_range(mode)
+            trendline = None
+            if profile["temperature"].get(mode) is not None:
+                trendline = profile["temperature"][mode].get("linear_trendline")
+            chart[mode] = {
+                "bins": coverage["bins"],
+                "total_observations": coverage["total_observations"],
+                "temp_range": list(temp_range) if temp_range else None,
+                "trendline": trendline,
+            }
+        chart["balance_points"] = profile.get("balance_point", {})
+        return chart
+
+    def _get_calibration_status(self) -> str:
+        """Human-readable coefficient calibration status."""
+        cal = self.coeff_calibrator
+        n_cond = len(self.estimator._conditioned_innovations)
+        if cal._first_innovation_time is None:
+            return "waiting_for_data"
+        hours_elapsed = (
+            datetime.now(timezone.utc) - cal._first_innovation_time
+        ).total_seconds() / 3600
+        if hours_elapsed < 72:
+            hours_left = round(72 - hours_elapsed)
+            return f"collecting_data ({hours_left}h until first calibration)"
+        if n_cond < 200:
+            return f"collecting_samples ({n_cond}/200 innovations)"
+        return "active"
 
     def _update_accuracy_tier(self) -> None:
         """Update the savings accuracy tier based on baseline and model confidence."""
@@ -2931,9 +3073,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         current_entry = self._get_current_entry(now)
         next_entry = self._get_next_entry(now)
 
-        # Tactical stats
+        # Tactical stats (fall back to EKF innovations when tactical isn't active)
         tactical_mae = self.tactical.mean_absolute_error
         tactical_bias = self.tactical.mean_signed_error
+        if tactical_mae is None and self.estimator._innovations:
+            innovations = self.estimator._innovations
+            tactical_mae = round(
+                sum(abs(v) for _, v in innovations) / len(innovations), 2
+            )
+            tactical_bias = round(
+                sum(v for _, v in innovations) / len(innovations), 2
+            )
 
         # Model tracker report
         accuracy_report = self.model_tracker.get_accuracy_report()
@@ -2942,7 +3092,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         override_stats = self.override_tracker.get_stats()
 
         # Savings
-        today_savings = self.savings_tracker.today_report()
+        today_savings = self.savings_tracker.today_report(tz=dt_util.DEFAULT_TIME_ZONE)
         cumulative = self.savings_tracker.cumulative_totals()
 
         # Effective HVAC capacity at current outdoor temp
@@ -2964,10 +3114,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         return {
             # Core state
             "phase": self._phase,
-            "active": self._active and not self._paused,
+            "active": self._active and not self._paused and not self.watchdog.is_override_active,
             "monitor_only": self._monitor_only,
             "override_detected": self.watchdog.is_override_active,
             "baseline_only_mode": not self._baseline_ready_for_control,
+            "activation_tier": self._activation_tier,
             "baseline_ready": self.baseline_capture.is_ready,
             "sensor_stale": self._is_sensor_stale(),
             "aux_heat_active": self._is_aux_heat_running(thermo_state),
@@ -3022,11 +3173,15 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "tactical_state": self.tactical.state.value,
             "prediction_error": (
                 self.tactical.error_history[-1][1]
-                if self.tactical.error_history else None
+                if self.tactical.error_history
+                else (
+                    round(self.estimator._innovations[-1][1], 2)
+                    if self.estimator._innovations else None
+                )
             ),
             "predicted_indoor_temp": (
-                round(self.estimator.T_air, 2)
-                if self.estimator._n_obs > 0
+                round(self.estimator._last_predicted_temp, 2)
+                if self.estimator._last_predicted_temp is not None
                 else None
             ),
             "model_accuracy_mae": tactical_mae,
@@ -3042,6 +3197,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
             # Kalman filter / adaptive model
             "kalman_confidence": self.estimator.confidence,
+            "kalman_parameter_confidence": self.estimator.parameter_confidence,
+            "kalman_learning_needs": self.estimator.learning_needs,
+            "kalman_learning_rate": self.estimator.learning_rate,
             "kalman_r_value": self.estimator.R_value,
             "kalman_thermal_mass": self.estimator.thermal_mass,
             "kalman_cooling_capacity": float(self.estimator.x[6]),
@@ -3053,11 +3211,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "using_adaptive_model": (
                 self._use_adaptive
                 and not self._use_greybox
-                and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
+                and self._activation_tier != ACTIVATION_TIER_LEARNING
             ),
             "using_greybox_model": (
                 self._use_greybox
-                and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
+                and self._activation_tier != ACTIVATION_TIER_LEARNING
             ),
             "learning_active": self._is_learning_active(),
             "initialization_mode": self._initialization_mode,
@@ -3070,6 +3228,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "house_thermal_load_btu": self._compute_net_passive_load(),
 
             # Coefficient calibration (slow outer loop)
+            "coefficient_calibration_status": self._get_calibration_status(),
             "coefficient_multipliers": self.coeff_store.multipliers,
             "coefficient_confidence": self.coeff_store.all_confidence,
             "coefficient_proposed": self.coeff_calibrator.proposed_multipliers,
@@ -3234,6 +3393,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 for mode in ("cool_1", "heat_1", "auxiliary_heat_1", "resist")
                 if self.profiler._bins[mode]
             },
+
+            # Temperature profile chart data (per-mode bin coverage + trendlines)
+            "profiler_chart_data": self._build_profiler_chart_data(),
 
             # Calendar occupancy / pre-conditioning
             "occupancy_forecast_source": (

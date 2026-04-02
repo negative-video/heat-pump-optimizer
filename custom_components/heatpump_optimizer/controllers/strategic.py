@@ -215,21 +215,30 @@ class StrategicPlanner:
         max_temp = max(temps)
         min_temp = min(temps)
 
-        # Well above balance point → cooling
-        if avg > self.resist_balance_point + MODE_SWITCH_HYSTERESIS_F:
+        # Sanity-check balance point: if it drifted outside a reasonable
+        # residential range (20-90°F), fall back to a safe default.
+        bp = self.resist_balance_point
+        if bp < 20 or bp > 90:
+            _LOGGER.warning(
+                "Balance point %.1f°F out of range, using default 50°F", bp,
+            )
+            bp = 50.0
+
+        # Well above balance point -> cooling
+        if avg > bp + MODE_SWITCH_HYSTERESIS_F:
             return "cool"
 
-        # Well below balance point → heating
-        if avg < self.resist_balance_point - MODE_SWITCH_HYSTERESIS_F:
+        # Well below balance point -> heating
+        if avg < bp - MODE_SWITCH_HYSTERESIS_F:
             return "heat"
 
-        # Near balance point — use peak/trough to decide
-        if max_temp > self.resist_balance_point + 10:
+        # Near balance point -- use peak/trough to decide
+        if max_temp > bp + 10:
             return "cool"
-        if min_temp < self.resist_balance_point - 10:
+        if min_temp < bp - 10:
             return "heat"
 
-        # Truly mild — HVAC probably not needed
+        # Truly mild -- HVAC probably not needed
         return "off"
 
     def _is_shoulder_day(

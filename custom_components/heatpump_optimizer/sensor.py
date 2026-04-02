@@ -15,6 +15,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from datetime import datetime, timezone
 
+from homeassistant.util import dt as dt_util
+
 from .const import DEFAULT_MODEL_CONFIDENCE_THRESHOLD, DOMAIN, VERSION
 from .coordinator import HeatPumpOptimizerCoordinator
 
@@ -334,10 +336,18 @@ class ModelConfidenceSensor(OptimizerBaseSensor):
     def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
             return {}
-        return {
+        attrs = {
             "using_adaptive_model": self.coordinator.data.get("using_adaptive_model", False),
             "using_greybox_model": self.coordinator.data.get("using_greybox_model", False),
         }
+        param_conf = self.coordinator.data.get("kalman_parameter_confidence")
+        if param_conf:
+            for key, val in param_conf.items():
+                attrs[f"{key}_confidence"] = round(val * 100)
+        needs = self.coordinator.data.get("kalman_learning_needs", [])
+        if needs:
+            attrs["learning_needs"] = needs
+        return attrs
 
 
 class EnvelopeRValueSensor(OptimizerBaseSensor):
@@ -649,11 +659,11 @@ class NetHvacPowerSensor(OptimizerBaseSensor):
 
 
 class _DailyResetMixin:
-    """Mixin providing last_reset at midnight UTC for daily sensors."""
+    """Mixin providing last_reset at local midnight for daily sensors."""
 
     @property
     def last_reset(self) -> datetime:
-        return datetime.now(timezone.utc).replace(
+        return dt_util.now().replace(
             hour=0, minute=0, second=0, microsecond=0
         )
 
@@ -1299,6 +1309,8 @@ class ProfilerStatusSensor(OptimizerBaseSensor):
     """Profiler status with confidence, active state, and observation count as attributes."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    # Exclude large chart_data from recorder to avoid database bloat
+    _unrecorded_attributes = frozenset({"chart_data"})
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "profiler_status", "Profiler")
@@ -1326,6 +1338,12 @@ class ProfilerStatusSensor(OptimizerBaseSensor):
         mode_detail = self.coordinator.data.get("profiler_mode_detail")
         if mode_detail:
             attrs["mode_detail"] = mode_detail
+        # Temperature profile chart data for frontend visualization.
+        # Excluded from the recorder via _unrecorded_attributes to avoid
+        # ~12KB per write to the database.
+        chart_data = self.coordinator.data.get("profiler_chart_data")
+        if chart_data:
+            attrs["chart_data"] = chart_data
         # Override intelligence for panel diagnostics
         attrs["override_count_30d"] = self.coordinator.data.get(
             "override_count_30d", 0
@@ -1355,13 +1373,31 @@ class LearningProgressSensor(OptimizerBaseSensor):
         confidence = self.coordinator.data.get("kalman_confidence")
         conf_pct = round(confidence * 100) if confidence is not None else 0
 
+        learning_rate = self.coordinator.data.get("kalman_learning_rate", "active")
+
+        activation_tier = self.coordinator.data.get("activation_tier", "learning")
+
         if not baseline_only and tier == "calibrated":
             return "Fully calibrated"
         if not baseline_only:
+            if activation_tier == "conservative":
+                return f"Optimizer active (conservative, {conf_pct}% confidence)"
             return f"Optimizer active ({conf_pct}% confidence)"
         if not baseline_ready:
+            if learning_rate == "paused":
+                return (
+                    f"Day {days} of 7: Observing your schedule. "
+                    "No insights gained at stable temps. "
+                    "Progress will resume with fresh, unobserved conditions."
+                )
             return f"Day {days} of 7: Observing your schedule"
-        return f"Baseline captured — model training ({conf_pct}%)"
+        if learning_rate == "paused":
+            return (
+                f"Baseline captured, model training ({conf_pct}%). "
+                "No insights gained at stable temps. "
+                "Progress will resume with fresh, unobserved conditions."
+            )
+        return f"Baseline captured, model training ({conf_pct}%)"
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -1372,6 +1408,7 @@ class LearningProgressSensor(OptimizerBaseSensor):
             "sample_days": self.coordinator.data.get("baseline_sample_days"),
             "model_confidence": self.coordinator.data.get("kalman_confidence"),
             "accuracy_tier": self.coordinator.data.get("savings_accuracy_tier"),
+            "activation_tier": self.coordinator.data.get("activation_tier"),
             "initialization_mode": self.coordinator.data.get("initialization_mode"),
             "history_bootstrap_completed": self.coordinator.data.get(
                 "history_bootstrap_completed"
@@ -1389,6 +1426,12 @@ class LearningProgressSensor(OptimizerBaseSensor):
                 "a baseline. It will not change your thermostat until baseline "
                 "capture is complete (7 days) and model confidence is sufficient."
             )
+        needs = self.coordinator.data.get("kalman_learning_needs", [])
+        if needs:
+            attrs["learning_needs"] = needs
+        learning_rate = self.coordinator.data.get("kalman_learning_rate")
+        if learning_rate:
+            attrs["learning_rate"] = learning_rate
         return attrs
 
 
@@ -1502,8 +1545,7 @@ class AuxHeatKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        val = self.coordinator.data.get("aux_heat_kwh_today", 0.0)
-        return val if val > 0 else None
+        return self.coordinator.data.get("aux_heat_kwh_today", 0.0)
 
 
 class AvoidedAuxHeatKwhSensor(_DailyResetMixin, OptimizerBaseSensor):
@@ -1525,8 +1567,7 @@ class AvoidedAuxHeatKwhSensor(_DailyResetMixin, OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        val = self.coordinator.data.get("avoided_aux_heat_kwh_today", 0.0)
-        return val if val > 0 else None
+        return self.coordinator.data.get("avoided_aux_heat_kwh_today", 0.0)
 
 
 class CrossSensorSpreadSensor(OptimizerBaseSensor):

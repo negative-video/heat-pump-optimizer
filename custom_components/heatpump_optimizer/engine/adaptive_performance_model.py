@@ -137,6 +137,10 @@ class AdaptivePerformanceModel:
 
         Solved from: R_inv * (T_out - T_air) + R_int_inv * (T_mass - T_air) ≈ 0
         When thermal mass is near air temp: T_balance ≈ T_air
+
+        Clamped to 20-90°F: no residential home has a balance point outside
+        this range.  The R_int_inv / R_inv ratio can amplify small T_mass-T_air
+        gaps into absurd values when internal coupling is poorly learned.
         """
         T_air = self.estimator.T_air
         T_mass = self.estimator.T_mass
@@ -148,7 +152,8 @@ class AdaptivePerformanceModel:
 
         # Solve: R_inv * (T_out - T_air) + R_int_inv * (T_mass - T_air) = 0
         # T_out = T_air - (R_int_inv / R_inv) * (T_mass - T_air)
-        return T_air - (R_int_inv / R_inv) * (T_mass - T_air)
+        raw_bp = T_air - (R_int_inv / R_inv) * (T_mass - T_air)
+        return max(20.0, min(90.0, raw_bp))
 
     @property
     def heat_balance_point(self) -> float | None:

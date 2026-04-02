@@ -66,6 +66,7 @@ const PHASE_MAP = {
   coasting: { label: "Coasting", cls: "phase-coast" },
   maintaining: { label: "Maintaining", cls: "phase-maintain" },
   idle: { label: "Idle", cls: "phase-idle" },
+  learning: { label: "Learning", cls: "phase-idle" },
   paused: { label: "Paused", cls: "phase-paused" },
   safe_mode: { label: "Safe Mode", cls: "phase-warn" },
   preconditioning: { label: "Pre-conditioning", cls: "phase-active" },
@@ -118,6 +119,8 @@ function renderAlerts(states) {
   if (learning?.state?.startsWith("Day ") && learning.state.includes("Observing")) {
     alerts.push({ cls: "alert-info", msg: `${learning.state} \u2014 thermostat unchanged` });
   } else if (learning?.state?.startsWith("Baseline captured")) {
+    alerts.push({ cls: "alert-info", msg: `${learning.state}` });
+  } else if (learning?.state?.startsWith("Optimizer active") && learning.state.includes("conservative")) {
     alerts.push({ cls: "alert-info", msg: `${learning.state}` });
   }
 
@@ -485,16 +488,6 @@ function renderHealthCard(states, hass) {
   let diagnosticsSection = "";
   const diagRows = [];
 
-  // Profiler status (useful both during and after learning)
-  if (isAvailable(profiler)) {
-    const profConf = profiler.attributes?.confidence;
-    const profObs = profiler.attributes?.observations;
-    let profLine = profiler.state;
-    if (profConf != null) profLine += ` \u00b7 ${Number(profConf).toFixed(0)}% confident`;
-    if (profObs != null) profLine += ` \u00b7 ${Number(profObs).toLocaleString()} obs`;
-    diagRows.push(`<div class="diag-row"><span>Profiler</span><span>${profLine}</span></div>`);
-  }
-
   // Override intelligence
   if (profiler?.attributes?.override_count_30d > 0) {
     const count = profiler.attributes.override_count_30d;
@@ -574,22 +567,34 @@ function renderHealthCard(states, hass) {
       </details>`;
   }
 
+  // Activation tier badge
+  const activationTier = progress?.attributes?.activation_tier || "learning";
+  const ATIER = {
+    learning:     { label: "Learning",      cls: "atier-learning",      dots: 0, desc: "Observing your home" },
+    conservative: { label: "Conservative",  cls: "atier-conservative",  dots: 1, desc: "Active with wider comfort bands" },
+    standard:     { label: "Active",        cls: "atier-standard",      dots: 2, desc: "Full optimization" },
+    confident:    { label: "Confident",     cls: "atier-confident",     dots: 3, desc: "High-accuracy optimization" },
+  };
+  const at = ATIER[activationTier] || ATIER.learning;
+  const atDots = Array.from({ length: 3 }, (_, i) =>
+    `<span class="atier-dot${i < at.dots ? " filled" : ""}"></span>`
+  ).join("");
+
+  // Learning needs
+  const learningNeeds = confidence?.attributes?.learning_needs || [];
+  const needsHtml = learningNeeds.length
+    ? `<div class="health-needs">${learningNeeds.map(n => `<div class="health-need-item">${n}</div>`).join("")}</div>`
+    : "";
+
   return `
     <div class="card health-card">
       <h2>System Health</h2>
-      <div class="progress-label">
-        <span>${isAvailable(progress) ? progress.state : "Initializing..."}</span>
-        <span>${confPct}% confidence</span>
-      </div>
-      <div class="progress-bar">
-        <div class="progress-fill" style="width:${confPct}%"></div>
+      <div class="atier-header">
+        <span class="atier-badge ${at.cls}"><span class="atier-dots">${atDots}</span> ${at.label}</span>
+        <span class="atier-desc">${at.desc}</span>
       </div>
       ${dayInfo ? `<div class="day-info">${dayInfo}</div>` : ""}
-      ${isAvailable(baselineConf) && learningActive?.state === "on" ? `
-      <div class="stat-row">
-        <span class="label">Baseline captured</span>
-        <span class="value">${fmt(baselineConf, 0)}%</span>
-      </div>` : ""}
+      ${needsHtml}
       <div class="health-row">
         ${isAvailable(sourceHealth) ? `
         <div class="health-item ${healthCls}">
@@ -859,7 +864,7 @@ function renderBuildingCard(states, hass) {
     if (greybox.state === "on" || greybox.state === "true") mt = "Grey-Box LP";
     else if (gba.using_adaptive === true || gba.using_adaptive === "true") mt = "Kalman Filter";
     else mt = "Heuristic";
-    modelTypeLine = `<div class="model-type">${mt}${confPct > 0 ? ` \u00b7 ${confPct.toFixed(0)}% confidence` : ""}</div>`;
+    modelTypeLine = `<div class="model-type">${mt}</div>`;
   }
 
   // ── Parameter uncertainty (power users) ──
@@ -993,7 +998,7 @@ function renderThermalLoadCard(states, _hass) {
     <div class="card thermal-load-card">
       <div class="building-header">
         <h2>House Thermal Load</h2>
-        ${converging ? `<span class="converging-tag">Learning (${Math.round(confidence)}%)</span>` : ""}
+        ${converging ? `<span class="converging-tag">Estimates</span>` : ""}
       </div>
       <div class="tl-headline">
         <span class="tl-headline-value">${fmtBtu(netLoad)} BTU/hr</span>
@@ -1462,13 +1467,37 @@ function renderLearningProgressCards(states) {
   if (hasValue(coolCap)) {
     capLine = `<div class="lp-param"><span class="lp-param-label">Capacity</span><span class="lp-param-val">${(Number(coolCap.state) / 1000).toFixed(1)}k BTU/hr</span></div>`;
   }
+  // Per-parameter confidence from model_confidence attributes
+  const paramAttrs = modelConf?.attributes || {};
+  const PARAM_CONF = [
+    ["envelope_confidence", "Insulation"],
+    ["thermal_mass_confidence", "Thermal Mass"],
+    ["heating_capacity_confidence", "Heating"],
+    ["cooling_capacity_confidence", "Cooling"],
+    ["solar_gain_confidence", "Solar Gain"],
+  ];
+  const paramConfRows = PARAM_CONF.map(([key, label]) => {
+    const val = paramAttrs[key];
+    if (val == null) return "";
+    const cls = val >= 70 ? "quality-good" : val >= 30 ? "quality-medium" : "quality-poor";
+    return `<div class="lp-param"><span class="lp-param-label">${label}</span><span class="lp-param-qual ${cls}">${val}%</span></div>`;
+  }).filter(Boolean).join("");
+
+  // Learning needs
+  const modelNeeds = paramAttrs.learning_needs || [];
+  const needsRows = modelNeeds.length
+    ? `<div class="lp-needs">${modelNeeds.map(n => `<div class="lp-need-item">${n}</div>`).join("")}</div>`
+    : "";
+
   const modelCard = `
     <div class="card lp-card">
       <div class="lp-card-title">Thermal Model</div>
       <div class="lp-bar-track"><div class="lp-bar-fill lp-bar-model" style="width:${confPct}%"></div></div>
       <div class="lp-conf-pct">${confPct.toFixed(0)}% confident</div>
       <div class="lp-params">${rLine}${massLine}${capLine}</div>
-      ${confPct < 20 ? `<div class="lp-ready-note">Refining estimates\u2026</div>` : ""}
+      ${paramConfRows ? `<div class="lp-params" style="margin-top:6px;border-top:1px solid #333;padding-top:6px">${paramConfRows}</div>` : ""}
+      ${needsRows}
+      ${confPct < 20 && !needsRows ? `<div class="lp-ready-note">Refining estimates\u2026</div>` : ""}
     </div>`;
 
   // ── Baseline Schedule card ──
@@ -1499,9 +1528,6 @@ function renderLearningProgressCards(states) {
   const MODE_LABELS = {"resist": "Passive Drift", "heat_1": "Heating", "cool_1": "Cooling", "auxiliary_heat_1": "Aux Heat"};
   const ALL_MODES = ["resist", "heat_1", "cool_1", "auxiliary_heat_1"];
   const MIN_OBS_DISPLAY = 30;
-  const significantModes = ALL_MODES.filter(m => modeDetail[m] && modeDetail[m].observations >= MIN_OBS_DISPLAY);
-  const significantConfs = significantModes.map(m => modeDetail[m].confidence || 0);
-  const bestPct = significantConfs.length ? Math.max(...significantConfs) : 0;
   const modeRows = ALL_MODES.map(mode => {
     const d = modeDetail[mode];
     const label = MODE_LABELS[mode];
@@ -1513,13 +1539,156 @@ function renderLearningProgressCards(states) {
   const profilerCard = `
     <div class="card lp-card">
       <div class="lp-card-title">Performance Data</div>
-      <div class="lp-bar-track"><div class="lp-bar-fill lp-bar-profiler" style="width:${bestPct}%"></div></div>
-      <div class="lp-conf-pct">${bestPct.toFixed(0)}% confident</div>
       <div class="lp-params">${modeRows}</div>
       <div class="lp-obs-note">+1 observation every 5 min</div>
     </div>`;
 
   return `<div class="lp-grid">${modelCard}${baselineCard}${profilerCard}</div>`;
+}
+
+/** [G2] Temperature Profile Chart — observation coverage by outdoor temp. */
+function renderTemperatureProfile(states) {
+  const profiler = findEntity(states, "profiler_status") || findEntity(states, "profiler");
+  const chartData = profiler?.attributes?.chart_data;
+  if (!chartData) return "";
+
+  const MODE_COLORS = {
+    heat_1: "#e8912d",
+    cool_1: "#4fa8d6",
+    auxiliary_heat_1: "#e05555",
+    resist: "#888888",
+  };
+  const MODE_LABELS = {
+    heat_1: "Heating",
+    cool_1: "Cooling",
+    auxiliary_heat_1: "Aux Heat",
+    resist: "Passive Drift",
+  };
+  const DRAW_ORDER = ["resist", "heat_1", "cool_1", "auxiliary_heat_1"];
+
+  // Collect all observed temps across modes to set axis bounds
+  let allTemps = [];
+  let allDeltas = [];
+  for (const mode of DRAW_ORDER) {
+    const md = chartData[mode];
+    if (!md || !md.bins) continue;
+    for (const [t, info] of Object.entries(md.bins)) {
+      allTemps.push(Number(t));
+      allDeltas.push(info.mean_delta);
+    }
+  }
+  if (allTemps.length < 3) return "";
+
+  // Axis bounds — scale to observed range with padding
+  const tMin = Math.min(...allTemps) - 3;
+  const tMax = Math.max(...allTemps) + 3;
+  const dMin = Math.min(...allDeltas, -1);
+  const dMax = Math.max(...allDeltas, 1);
+  const dPad = (dMax - dMin) * 0.15;
+  const yMin = dMin - dPad;
+  const yMax = dMax + dPad;
+
+  // SVG dimensions
+  const W = 540, H = 220, pad = { l: 52, r: 16, t: 12, b: 32 };
+  const plotW = W - pad.l - pad.r;
+  const plotH = H - pad.t - pad.b;
+
+  const xScale = (t) => pad.l + (t - tMin) / (tMax - tMin) * plotW;
+  const yScale = (d) => pad.t + (1 - (d - yMin) / (yMax - yMin)) * plotH;
+
+  // Grid lines + axis labels
+  let gridSvg = "";
+  // Y-axis: zero line + a few ticks
+  const yTicks = [];
+  const yStep = Math.max(0.5, Math.round((yMax - yMin) / 4 * 2) / 2);
+  for (let v = Math.ceil(yMin / yStep) * yStep; v <= yMax; v += yStep) {
+    yTicks.push(v);
+  }
+  for (const v of yTicks) {
+    const y = yScale(v);
+    const isZero = Math.abs(v) < 0.01;
+    gridSvg += `<line x1="${pad.l}" x2="${W - pad.r}" y1="${y}" y2="${y}" stroke="${isZero ? '#666' : '#333'}" stroke-width="${isZero ? 1.5 : 0.5}" ${isZero ? '' : 'stroke-dasharray="4,3"'}/>`;
+    gridSvg += `<text x="${pad.l - 6}" y="${y + 4}" fill="#aaa" font-size="10" text-anchor="end">${v.toFixed(1)}</text>`;
+  }
+  // X-axis ticks
+  const xStep = Math.max(5, Math.round((tMax - tMin) / 6 / 5) * 5);
+  for (let t = Math.ceil(tMin / xStep) * xStep; t <= tMax; t += xStep) {
+    const x = xScale(t);
+    gridSvg += `<line x1="${x}" x2="${x}" y1="${pad.t}" y2="${H - pad.b}" stroke="#333" stroke-width="0.5" stroke-dasharray="4,3"/>`;
+    gridSvg += `<text x="${x}" y="${H - pad.b + 14}" fill="#aaa" font-size="10" text-anchor="middle">${t}\u00b0</text>`;
+  }
+  // Axis labels
+  gridSvg += `<text x="${W / 2}" y="${H - 2}" fill="#777" font-size="10" text-anchor="middle">Outdoor Temperature (\u00b0F)</text>`;
+  gridSvg += `<text x="12" y="${H / 2}" fill="#777" font-size="10" text-anchor="middle" transform="rotate(-90,12,${H / 2})">\u0394T/hr (\u00b0F/hr)</text>`;
+
+  // Plot data points + trendlines per mode
+  let dotsSvg = "";
+  let trendSvg = "";
+  let legendItems = [];
+
+  for (const mode of DRAW_ORDER) {
+    const md = chartData[mode];
+    if (!md || !md.bins) continue;
+    const color = MODE_COLORS[mode];
+    const bins = md.bins;
+    const entries = Object.entries(bins).map(([t, info]) => [Number(t), info]);
+    if (entries.length === 0) continue;
+
+    // Dots — size scaled by observation count
+    for (const [t, info] of entries) {
+      const x = xScale(t);
+      const y = yScale(info.mean_delta);
+      const r = Math.min(5, Math.max(2, Math.sqrt(info.count / 6)));
+      const opacity = info.count >= 6 ? 0.85 : 0.35;
+      dotsSvg += `<circle cx="${x}" cy="${y}" r="${r}" fill="${color}" opacity="${opacity}"/>`;
+    }
+
+    // Trendline — only within observed range
+    if (md.trendline && md.trendline.slope !== 0 && md.temp_range) {
+      const [rMin, rMax] = md.temp_range;
+      const x1 = xScale(rMin);
+      const x2 = xScale(rMax);
+      const y1 = yScale(md.trendline.slope * rMin + md.trendline.intercept);
+      const y2 = yScale(md.trendline.slope * rMax + md.trendline.intercept);
+      trendSvg += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="2" stroke-dasharray="6,3" opacity="0.8"/>`;
+    }
+
+    legendItems.push(`<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color}"></span>${MODE_LABELS[mode]} (${md.total_observations})</span>`);
+  }
+
+  // Balance point markers
+  let bpSvg = "";
+  const bps = chartData.balance_points || {};
+  for (const [mode, bp] of Object.entries(bps)) {
+    if (bp >= tMin && bp <= tMax) {
+      const x = xScale(bp);
+      bpSvg += `<line x1="${x}" x2="${x}" y1="${pad.t}" y2="${H - pad.b}" stroke="${MODE_COLORS[mode] || '#666'}" stroke-width="1" stroke-dasharray="2,4" opacity="0.5"/>`;
+      bpSvg += `<text x="${x}" y="${pad.t - 2}" fill="${MODE_COLORS[mode] || '#666'}" font-size="9" text-anchor="middle">${bp}\u00b0</text>`;
+    }
+  }
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">
+    ${gridSvg}${bpSvg}${dotsSvg}${trendSvg}
+  </svg>`;
+
+  const legend = `<div style="display:flex;flex-wrap:wrap;gap:2px 0;font-size:11px;color:#aaa;padding:4px 0">${legendItems.join("")}</div>`;
+
+  // Gap annotation
+  let gapNote = "";
+  for (const mode of ["heat_1", "cool_1"]) {
+    const md = chartData[mode];
+    if (md && md.total_observations > 0 && md.total_observations < 30) {
+      gapNote = `<div style="font-size:11px;color:#888;padding:2px 0">More ${MODE_LABELS[mode].toLowerCase()} data at varied outdoor temps will improve accuracy</div>`;
+      break;
+    }
+  }
+
+  return `
+    <div class="card">
+      <div class="section-title">Temperature Profile</div>
+      <div style="width:100%">${svg}</div>
+      ${legend}${gapNote}
+    </div>`;
 }
 
 /** [H] Learning Milestones — onboarding progress checklist. */
@@ -1833,6 +2002,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
             : renderRetrospectiveChart(s, this._hass, this._retro);
         })()}
         ${(isLearning || isProjected) ? renderLearningProgressCards(s) : ""}
+        ${renderTemperatureProfile(s)}
         ${isLearning ? renderLearningMilestones(s) : renderDecisionCard(s, this._hass)}
         ${renderBuildingCard(s, this._hass)}
         ${showSavings ? renderSavingsCard(s, this._hass, isProjected) : renderSnapshotCard(s, this._hass)}
@@ -2985,6 +3155,66 @@ const PANEL_CSS = `
     font-style: italic;
   }
   .lp-dim { opacity: 0.45; font-style: italic; }
+
+  /* ── Activation Tier Badge (System Health card) ── */
+  .atier-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+  .atier-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 6px;
+  }
+  .atier-learning { background: color-mix(in srgb, var(--orange) 12%, transparent); color: var(--orange); }
+  .atier-conservative { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+  .atier-standard { background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green); }
+  .atier-confident { background: color-mix(in srgb, var(--green) 18%, transparent); color: var(--green); }
+  .atier-dots { display: inline-flex; gap: 3px; }
+  .atier-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: color-mix(in srgb, currentColor 25%, transparent);
+  }
+  .atier-dot.filled { background: currentColor; }
+  .atier-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  /* ── Learning Needs ── */
+  .health-needs {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .health-need-item {
+    padding: 2px 0;
+  }
+  .health-need-item::before {
+    content: "\\2192  ";
+    color: var(--orange);
+  }
+  .lp-needs {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .lp-need-item {
+    padding: 2px 0;
+  }
+  .lp-need-item::before {
+    content: "\\2192  ";
+    color: var(--orange);
+  }
+
   .day-dots {
     display: flex;
     gap: 4px;

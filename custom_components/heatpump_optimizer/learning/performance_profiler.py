@@ -429,6 +429,24 @@ class PerformanceProfiler:
             "total_observations": sum(acc.count for acc in bins.values()),
         }
 
+    def observed_temp_range(self, mode: str) -> tuple[float, float] | None:
+        """Return (min, max) outdoor temp with qualified observations for a mode.
+
+        Returns None if no qualified bins exist for the mode.
+        Used for condition-matching: the optimizer should only operate in
+        conditions where it has sufficient data.
+        """
+        bins = self._bins.get(mode, {})
+        qualified = [t for t, acc in bins.items() if acc.count >= MIN_SAMPLES_PER_BIN]
+        if not qualified:
+            return None
+        return (min(qualified), max(qualified))
+
+    def mode_observation_count(self, mode: str) -> int:
+        """Total observation count for a specific mode."""
+        bins = self._bins.get(mode, {})
+        return sum(acc.count for acc in bins.values())
+
     # ── Persistence ───────────────────────────────────────────────────
 
     def to_dict(self) -> dict[str, Any]:

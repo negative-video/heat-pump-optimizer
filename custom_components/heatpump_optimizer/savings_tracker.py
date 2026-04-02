@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from typing import Any
 
 from .engine.counterfactual_simulator import CounterfactualSimulator
@@ -383,9 +383,16 @@ class SavingsTracker:
             self._hour_mode,
         )
 
-    def today_report(self) -> DailySavingsReport:
-        """Get savings report for the current calendar day (UTC)."""
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    def today_report(self, tz: tzinfo | None = None) -> DailySavingsReport:
+        """Get savings report for the current calendar day.
+
+        Args:
+            tz: Timezone for determining "today". Defaults to UTC if not provided.
+        """
+        if tz is not None:
+            today_str = datetime.now(tz).strftime("%Y-%m-%d")
+        else:
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         today_hours = [
             r for r in self._hourly_records
             if r.hour.strftime("%Y-%m-%d") == today_str
