@@ -3,9 +3,11 @@
 Models the building as a two-node RC thermal circuit (air + thermal mass)
 and continuously estimates the physical parameters from thermostat readings:
 
-  C_air · dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + Q_solar + Q_internal
+  C_air · dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + (1-f_s)*Q_solar + Q_internal
                         + Q_attic + Q_crawlspace
-  C_mass · dT_mass/dt = (T_air - T_mass)/R_int
+  C_mass · dT_mass/dt = (T_air - T_mass)/R_int + f_s * Q_solar
+
+where f_s = 0.3 (solar mass fraction -- sunlight through windows directly heats thermal mass).
 
 State vector (9 elements):
   [T_air, T_mass, R_inv, R_int_inv, C_inv, C_mass_inv, Q_cool_base, Q_heat_base, solar_gain_btu]
@@ -137,16 +139,23 @@ _Q_HVAC_MAX_CHANGE_FRAC = 0.02
 
 # Maximum fractional change in R_inv per 5-minute EKF cycle.
 # Envelope thermal resistance is a physical property that doesn't change
-# between cycles.  3 % per step ≈ 36 %/hr — fast enough for convergence
-# but prevents the wild swings (R=5 to R=36) seen when HVAC mode changes
-# confound envelope estimation during early learning.
-_R_INV_MAX_CHANGE_FRAC = 0.03
+# between cycles.  1 % per step ≈ 12 %/hr — fast enough for convergence
+# but prevents the R-value crashes (6.06 to 5.63 in 3 hours) seen when
+# solar gain transitions or HVAC mode changes confound envelope estimation.
+_R_INV_MAX_CHANGE_FRAC = 0.01
 
 # Kalman gain attenuation for R_inv and R_int_inv during active HVAC.
 # When HVAC is running, Q_hvac dominates the temperature change, making it
 # hard to observe envelope characteristics separately.  Reducing the gain
 # prevents HVAC-driven temperature changes from corrupting R estimates.
 _R_INV_HVAC_GAIN_FACTOR = 0.2
+
+# Fraction of solar gain that goes directly to thermal mass.
+# In real buildings, sunlight through windows heats floors, interior walls,
+# and furniture (thermal mass) directly, not just the air.  Without this,
+# the EKF attributes evening thermal mass heat release to envelope leakiness,
+# causing R-value to crash after every sunny day.
+_SOLAR_MASS_FRACTION = 0.3
 
 # Physical bounds for parameter clamping
 BOUNDS = {
@@ -228,6 +237,9 @@ class ThermalEstimator:
     # Previous R_inv value for rate limiting (prevents wild swings)
     _prev_r_inv: float | None = None
 
+    # Previous solar gain for solar transition gating (not persisted)
+    _prev_q_solar: float | None = None
+
     # Last computed thermal load components (BTU/hr), populated by _predict_state
     _last_thermal_loads: dict = field(default_factory=dict)
 
@@ -247,6 +259,9 @@ class ThermalEstimator:
     # rate-limit Q_cool/Q_heat drift so the filter respects the prior
     # during early learning.  _has_tonnage_prior is persisted.
     _has_tonnage_prior: bool = False
+
+    # Whether profiler data has been injected as priors (persisted, one-time)
+    _profiler_seeded: bool = False
     _prev_q_cool: float | None = None
     _prev_q_heat: float | None = None
 
@@ -545,6 +560,19 @@ class ThermalEstimator:
             K[IDX_R_INV, :] *= _R_INV_HVAC_GAIN_FACTOR
             K[IDX_R_INT_INV, :] *= _R_INV_HVAC_GAIN_FACTOR
 
+        # R_inv gating during solar transitions.  When solar gain is
+        # changing rapidly (sunrise/sunset), thermal mass absorbs or
+        # releases stored solar energy, creating innovation bias that
+        # the EKF would otherwise attribute to envelope leakiness.
+        current_q_solar = self._last_thermal_loads.get("q_solar", 0.0)
+        if self._prev_q_solar is not None:
+            solar_change_rate = abs(current_q_solar - self._prev_q_solar)
+            if solar_change_rate > 500:  # BTU/hr change per cycle
+                solar_gate = max(0.1, 1.0 - solar_change_rate / 2000.0)
+                K[IDX_R_INV, :] *= solar_gate
+                K[IDX_R_INT_INV, :] *= solar_gate
+        self._prev_q_solar = current_q_solar
+
         # Early learning damping: reduce parameter Kalman gain for the
         # first ~12 hours (144 observations at 5-min intervals).  Wide
         # initial priors cause enormous gains that produce chaotic
@@ -659,6 +687,7 @@ class ThermalEstimator:
         int_gain_pp = cs.effective("internal_gain_per_person", _INTERNAL_GAIN_PER_PERSON_BTU) if cs else _INTERNAL_GAIN_PER_PERSON_BTU
         cal_k_attic = cs.effective("k_attic", _K_ATTIC) if cs else _K_ATTIC
         cal_k_crawl = cs.effective("k_crawlspace", _K_CRAWLSPACE) if cs else _K_CRAWLSPACE
+        solar_mass_frac = cs.effective("solar_mass_fraction", _SOLAR_MASS_FRACTION) if cs else _SOLAR_MASS_FRACTION
 
         # ── Effective outdoor temp (precipitation correction) ────
         effective_outdoor = outdoor_temp
@@ -757,6 +786,12 @@ class ThermalEstimator:
         # Total solar = direct (window/wall) + via attic (roof absorption)
         Q_solar = Q_solar_direct + Q_solar_via_attic
 
+        # Split solar between air and mass nodes.  In real buildings,
+        # sunlight through windows directly heats floors, walls, and
+        # furniture (thermal mass), not just the air.
+        Q_solar_to_air = Q_solar * (1.0 - solar_mass_frac)
+        Q_solar_to_mass = Q_solar * solar_mass_frac
+
         # ── Temperature updates (exponential decay integration) ──
         # Unconditionally stable: avoids oscillation at extreme parameter
         # bounds that forward Euler could produce when λ·dt approaches 2.
@@ -779,7 +814,7 @@ class ThermalEstimator:
         forcing_air = (
             UA * infiltration * effective_outdoor
             + R_int_inv * T_mass
-            + Q_hvac + Q_solar + Q_internal + Q_appliances + Q_aux_resistive
+            + Q_hvac + Q_solar_to_air + Q_internal + Q_appliances + Q_aux_resistive
         )
         # Add boundary zone source terms (conductance × source temp)
         # Only the weather-coupled portion of attic conductance acts as a
@@ -802,13 +837,19 @@ class ThermalEstimator:
             # Very small alpha: fall back to linear (avoids 0/0)
             T_air_new = T_air + C_inv * (forcing_air - lambda_air * T_air) * dt_hours
 
-        # Mass node: dT_mass/dt = C_mass_inv * R_int_inv * (T_air - T_mass)
-        beta = R_int_inv * C_mass_inv * dt_hours
+        # Mass node: dT_mass/dt = C_mass_inv * [R_int_inv * (T_air - T_mass) + Q_solar_to_mass]
+        # Rewritten as: dT_mass/dt = -lambda_mass * T_mass + C_mass_inv * forcing_mass
+        # where lambda_mass = R_int_inv * C_mass_inv
+        # and forcing_mass = R_int_inv * T_air + Q_solar_to_mass
+        lambda_mass = R_int_inv * C_mass_inv
+        beta = lambda_mass * dt_hours
+        forcing_mass = R_int_inv * T_air + Q_solar_to_mass
         if beta > 1e-8:
             exp_neg_beta = math.exp(-beta)
-            T_mass_new = T_mass * exp_neg_beta + T_air * (1.0 - exp_neg_beta)
+            T_eq_mass = forcing_mass / max(1e-10, R_int_inv)
+            T_mass_new = T_mass * exp_neg_beta + T_eq_mass * (1.0 - exp_neg_beta)
         else:
-            T_mass_new = T_mass + C_mass_inv * R_int_inv * (T_air - T_mass) * dt_hours
+            T_mass_new = T_mass + C_mass_inv * (R_int_inv * (T_air - T_mass) + Q_solar_to_mass) * dt_hours
 
         # ── Cache thermal load components for sensor exposure ───────
         attic_contribution = total_attic if attic_temp is not None else 0.0
@@ -885,6 +926,7 @@ class ThermalEstimator:
         cal_k_crawl = cs.effective("k_crawlspace", _K_CRAWLSPACE) if cs else _K_CRAWLSPACE
         alpha_cool = cs.effective("alpha_cool", ALPHA_COOL) if cs else ALPHA_COOL
         alpha_heat = cs.effective("alpha_heat", ALPHA_HEAT) if cs else ALPHA_HEAT
+        solar_mass_frac = cs.effective("solar_mass_fraction", _SOLAR_MASS_FRACTION) if cs else _SOLAR_MASS_FRACTION
 
         # Precipitation correction for effective outdoor temp
         effective_outdoor = outdoor_temp
@@ -947,7 +989,11 @@ class ThermalEstimator:
 
         Q_appliances = getattr(self, "_current_appliance_btu", 0.0)
         Q_aux_resistive = getattr(self, "_current_aux_resistive_btu", 0.0)
-        Q_total = Q_env + Q_int + Q_hvac + Q_solar + Q_internal + Q_boundary + Q_appliances + Q_aux_resistive
+
+        # Solar split: only the air fraction enters the air node forcing
+        Q_solar_to_air = Q_solar * (1.0 - solar_mass_frac)
+        Q_solar_to_mass = Q_solar * solar_mass_frac
+        Q_total_air = Q_env + Q_int + Q_hvac + Q_solar_to_air + Q_internal + Q_boundary + Q_appliances + Q_aux_resistive
 
         F = np.eye(N_STATES)
         dt = dt_hours
@@ -960,7 +1006,7 @@ class ThermalEstimator:
         # dT_air/dR_inv: R_inv appears as UA = R_inv * area, so derivative includes area
         F[IDX_T_AIR, IDX_R_INV] = C_inv * self._envelope_area * infiltration * (effective_outdoor - T_air) * dt
         F[IDX_T_AIR, IDX_R_INT_INV] = C_inv * (T_mass - T_air) * dt
-        F[IDX_T_AIR, IDX_C_INV] = Q_total * dt
+        F[IDX_T_AIR, IDX_C_INV] = Q_total_air * dt
 
         # dT_air / dQ_cool_base and dQ_heat_base
         # Include environmental corrections so Jacobian matches _hvac_output
@@ -1001,16 +1047,22 @@ class ThermalEstimator:
             F[IDX_T_AIR, IDX_Q_HEAT] = C_inv * cop_factor * dt
 
         # dT_air / d(solar_gain_btu): partial of Q_solar_direct w.r.t. solar_gain_btu
+        # Only the air fraction (1 - f_s) enters the air node
         # Q_solar_direct = solar_gain_btu * irradiance_fraction * sin(elevation)
         if sun_elevation is not None and sun_elevation > 0:
             altitude_factor = math.sin(math.radians(max(0, min(90, sun_elevation))))
-            F[IDX_T_AIR, IDX_SOLAR_GAIN] = C_inv * irradiance_fraction * altitude_factor * dt
+            dQ_solar_d_param = irradiance_fraction * altitude_factor
+            F[IDX_T_AIR, IDX_SOLAR_GAIN] = C_inv * (1.0 - solar_mass_frac) * dQ_solar_d_param * dt
 
         # ── dT_mass_new / d(state) ─────────────────────────────
         F[IDX_T_MASS, IDX_T_AIR] = C_mass_inv * R_int_inv * dt
         F[IDX_T_MASS, IDX_T_MASS] = 1.0 - C_mass_inv * R_int_inv * dt
-        F[IDX_T_MASS, IDX_R_INT_INV] = C_mass_inv * (-(T_mass - T_air)) * dt
-        F[IDX_T_MASS, IDX_C_MASS_INV] = (-R_int_inv * (T_mass - T_air)) * dt
+        F[IDX_T_MASS, IDX_R_INT_INV] = C_mass_inv * (T_air - T_mass) * dt
+        F[IDX_T_MASS, IDX_C_MASS_INV] = (R_int_inv * (T_air - T_mass) + Q_solar_to_mass) * dt
+
+        # dT_mass / d(solar_gain_btu): mass fraction of solar goes directly to mass
+        if sun_elevation is not None and sun_elevation > 0:
+            F[IDX_T_MASS, IDX_SOLAR_GAIN] = C_mass_inv * solar_mass_frac * dQ_solar_d_param * dt
 
         # Parameters: F[i,i] = 1.0 (already set by eye)
 
@@ -1523,6 +1575,109 @@ class ThermalEstimator:
         """Return a copy of the conditioned innovation buffer (read-only)."""
         return list(self._conditioned_innovations)
 
+    # ── Profiler Prior Injection ──────────────────────────────────
+
+    def inject_profiler_priors(
+        self,
+        resist_slope: float,
+        resist_intercept: float,
+        cool_delta_at_ref: float | None,
+        heat_delta_at_ref: float | None,
+        resist_delta_at_ref: float,
+    ) -> bool:
+        """One-time injection of profiler-derived priors into EKF parameters.
+
+        Uses the profiler's trendline data to improve EKF parameter estimates
+        when the profiler has reached sufficient confidence but the EKF is
+        still immature.  Only runs once (sets _profiler_seeded flag).
+
+        Args:
+            resist_slope: F/hr per degree outdoor (from resist trendline)
+            resist_intercept: F/hr at 0F outdoor (from resist trendline)
+            cool_delta_at_ref: Net cooling F/hr at T_ref (75F), or None
+            heat_delta_at_ref: Net heating F/hr at T_ref (75F), or None
+            resist_delta_at_ref: Passive drift F/hr at T_ref (75F)
+
+        Returns:
+            True if priors were injected, False if skipped.
+        """
+        if self._profiler_seeded:
+            return False
+
+        self._profiler_seeded = True
+        area = self._envelope_area
+
+        # Extract R_inv * C_inv * area from resist slope
+        # slope_resist ~= C_inv * R_inv * area (the net envelope decay rate)
+        profiler_lambda = resist_slope
+        current_lambda = float(self.x[IDX_R_INV]) * area * float(self.x[IDX_C_INV])
+
+        if abs(profiler_lambda) < 1e-6 or current_lambda < 1e-10:
+            _LOGGER.info("Profiler seeding: skipped (insufficient data)")
+            return False
+
+        # Soft blend: 70% profiler + 30% current EKF
+        BLEND = 0.7
+
+        # Adjust R_inv and C_inv to match profiler's observed decay rate
+        ratio = profiler_lambda / current_lambda
+        adj = abs(ratio) ** 0.5  # split correction via geometric mean
+        new_r_inv = float(self.x[IDX_R_INV]) * (1.0 + BLEND * (adj - 1.0))
+        new_c_inv = float(self.x[IDX_C_INV]) * (1.0 + BLEND * (abs(ratio) / adj - 1.0))
+
+        # Clamp to physical bounds
+        lo_r, hi_r = BOUNDS[IDX_R_INV]
+        lo_c, hi_c = BOUNDS[IDX_C_INV]
+        new_r_inv = max(lo_r, min(hi_r, new_r_inv))
+        new_c_inv = max(lo_c, min(hi_c, new_c_inv))
+
+        old_r = float(self.x[IDX_R_INV])
+        old_c = float(self.x[IDX_C_INV])
+        self.x[IDX_R_INV] = new_r_inv
+        self.x[IDX_C_INV] = new_c_inv
+
+        # Inject HVAC capacity from active-mode deltas
+        if cool_delta_at_ref is not None and new_c_inv > 1e-10:
+            hvac_delta = cool_delta_at_ref - resist_delta_at_ref
+            profiler_q_cool = abs(hvac_delta) / new_c_inv
+            lo_q, hi_q = BOUNDS[IDX_Q_COOL]
+            profiler_q_cool = max(lo_q, min(hi_q, profiler_q_cool))
+            old_q_cool = float(self.x[IDX_Q_COOL])
+            self.x[IDX_Q_COOL] = old_q_cool * (1.0 - BLEND) + profiler_q_cool * BLEND
+            _LOGGER.info(
+                "Profiler seeding Q_cool: %.0f -> %.0f (profiler=%.0f)",
+                old_q_cool, float(self.x[IDX_Q_COOL]), profiler_q_cool,
+            )
+
+        if heat_delta_at_ref is not None and new_c_inv > 1e-10:
+            hvac_delta = heat_delta_at_ref - resist_delta_at_ref
+            profiler_q_heat = abs(hvac_delta) / new_c_inv
+            lo_q, hi_q = BOUNDS[IDX_Q_HEAT]
+            profiler_q_heat = max(lo_q, min(hi_q, profiler_q_heat))
+            old_q_heat = float(self.x[IDX_Q_HEAT])
+            self.x[IDX_Q_HEAT] = old_q_heat * (1.0 - BLEND) + profiler_q_heat * BLEND
+            _LOGGER.info(
+                "Profiler seeding Q_heat: %.0f -> %.0f (profiler=%.0f)",
+                old_q_heat, float(self.x[IDX_Q_HEAT]), profiler_q_heat,
+            )
+
+        # Shrink covariance for seeded parameters (50% reduction)
+        for idx in (IDX_R_INV, IDX_C_INV, IDX_Q_COOL, IDX_Q_HEAT):
+            self.P[idx, idx] *= 0.5
+
+        # Update rate-limit tracking to prevent immediate clamp-back
+        self._prev_r_inv = float(self.x[IDX_R_INV])
+        self._prev_q_cool = float(self.x[IDX_Q_COOL])
+        self._prev_q_heat = float(self.x[IDX_Q_HEAT])
+
+        _LOGGER.info(
+            "Profiler seeding complete: R_inv %.4f->%.4f, C_inv %.6f->%.6f, "
+            "R-value %.1f->%.1f",
+            old_r, new_r_inv, old_c, new_c_inv,
+            1.0 / old_r if old_r > 0 else 0, 1.0 / new_r_inv if new_r_inv > 0 else 0,
+        )
+        return True
+
     # ── Persistence ─────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
@@ -1538,6 +1693,7 @@ class ThermalEstimator:
             "envelope_area": self._envelope_area,
             "confidence_hwm": self._confidence_hwm,
             "has_tonnage_prior": self._has_tonnage_prior,
+            "profiler_seeded": self._profiler_seeded,
         }
 
     @classmethod
@@ -1591,5 +1747,6 @@ class ThermalEstimator:
         est._prev_q_cool = float(est.x[IDX_Q_COOL])
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])
         est._has_tonnage_prior = data.get("has_tonnage_prior", False)
+        est._profiler_seeded = data.get("profiler_seeded", False)
         est._initialized = True
         return est

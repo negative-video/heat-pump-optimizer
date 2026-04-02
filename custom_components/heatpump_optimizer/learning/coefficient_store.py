@@ -36,6 +36,7 @@ TIER_2 = (
     "stack_effect",
     "internal_gain_per_person",
     "precipitation_offset",
+    "solar_mass_fraction",
 )
 ALL_COEFFICIENTS = TIER_1 + TIER_2
 

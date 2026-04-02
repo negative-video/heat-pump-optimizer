@@ -36,6 +36,7 @@ from .data_types import (
 
 if TYPE_CHECKING:
     from ..learning.coefficient_store import CoefficientStore
+    from ..learning.performance_profiler import PerformanceProfiler
     from ..learning.thermal_estimator import ThermalEstimator
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,9 +85,11 @@ class GreyBoxOptimizer:
         self,
         estimator: ThermalEstimator,
         coeff_store: CoefficientStore | None = None,
+        profiler: PerformanceProfiler | None = None,
     ):
         self.estimator = estimator
         self._coeff_store = coeff_store
+        self._profiler = profiler
 
     # ── Calibrated coefficient helpers ──────────────────────────
 
@@ -260,10 +263,10 @@ class GreyBoxOptimizer:
     # ── Thermal Model Construction ──────────────────────────────────
 
     def _extract_params(self) -> dict:
-        """Extract current thermal parameters from estimator."""
+        """Extract current thermal parameters, blending profiler data when superior."""
         x = self.estimator.x
         solar_gain = float(x[_IDX_SOLAR_GAIN]) if len(x) > _IDX_SOLAR_GAIN else _SOLAR_GAIN_BTU_FALLBACK
-        return {
+        params = {
             "R_inv": float(x[_IDX_R_INV]),
             "R_int_inv": float(x[_IDX_R_INT_INV]),
             "C_inv": float(x[_IDX_C_INV]),
@@ -275,6 +278,84 @@ class GreyBoxOptimizer:
             "solar_gain_btu": solar_gain,
             "envelope_area": self.estimator.envelope_area,
         }
+        if self._profiler is not None:
+            self._blend_profiler_params(params)
+        return params
+
+    def _blend_profiler_params(self, params: dict) -> None:
+        """Blend profiler-derived parameters when profiler confidence exceeds EKF.
+
+        The profiler's resist trendline slope gives the combined rate
+        R_inv * C_inv * envelope_area (the net envelope decay constant).
+        Active-mode deltas minus resist deltas give effective HVAC capacity
+        scaled by C_inv.  These are blended into the EKF-derived parameters
+        when the profiler has superior data.
+        """
+        prof = self._profiler
+        ekf_conf = self.estimator.confidence
+
+        resist_conf = prof.confidence("resist")
+        if resist_conf < 0.5:
+            return
+
+        profile = prof.to_profile_data()
+        resist_data = profile["temperature"].get("resist")
+        if resist_data is None:
+            return
+
+        resist_trend = resist_data.get("linear_trendline")
+        if resist_trend is None or abs(resist_trend["slope"]) < 1e-6:
+            return
+
+        # Blend factor: ramp from 0 (pure EKF) to 1 (pure profiler)
+        # based on relative confidence gap
+        blend = max(0.0, min(1.0, (resist_conf - ekf_conf) / 0.5))
+        if blend < 0.01:
+            return
+
+        area = params.get("envelope_area", 2000.0)
+
+        # The profiler's resist slope = dT_air/dT_outdoor (F/hr per F)
+        # In the thermal model: passive drift rate = C_inv * R_inv * area * (T_out - T_air)
+        # So slope ~= C_inv * R_inv * area = the net envelope decay rate
+        profiler_lambda = resist_trend["slope"]  # F/hr per degree outdoor
+        ekf_lambda = params["R_inv"] * area * params["C_inv"]
+
+        if ekf_lambda > 1e-10 and abs(profiler_lambda) > 1e-10:
+            ratio = profiler_lambda / ekf_lambda
+            # Split correction between R_inv and C_inv via geometric mean
+            adj = abs(ratio) ** 0.5
+            params["R_inv"] *= 1.0 + blend * (adj - 1.0)
+            params["C_inv"] *= 1.0 + blend * (abs(ratio) / adj - 1.0)
+
+        # Blend HVAC capacity from active-mode deltas
+        for mode_key, q_key in [("cool_1", "Q_cool_base"), ("heat_1", "Q_heat_base")]:
+            mode_conf = prof.confidence(mode_key)
+            if mode_conf < 0.5:
+                continue
+            mode_data = profile["temperature"].get(mode_key)
+            if mode_data is None:
+                continue
+            mode_trend = mode_data.get("linear_trendline")
+            if mode_trend is None:
+                continue
+            # HVAC delta at T_ref = (active rate - passive rate) at T_ref
+            active_at_ref = mode_trend["slope"] * _T_REF + mode_trend["intercept"]
+            resist_at_ref = resist_trend["slope"] * _T_REF + resist_trend["intercept"]
+            hvac_delta = active_at_ref - resist_at_ref  # F/hr from HVAC
+
+            if params["C_inv"] > 1e-10:
+                profiler_q = abs(hvac_delta) / params["C_inv"]
+                mode_blend = max(0.0, min(1.0, (mode_conf - ekf_conf) / 0.5))
+                if mode_blend > 0.01 and profiler_q > 0:
+                    params[q_key] = params[q_key] * (1.0 - mode_blend) + profiler_q * mode_blend
+
+        _LOGGER.debug(
+            "Grey-box profiler blend (factor=%.2f): R_inv=%.4f, C_inv=%.6f, "
+            "Q_cool=%.0f, Q_heat=%.0f",
+            blend, params["R_inv"], params["C_inv"],
+            params["Q_cool_base"], params["Q_heat_base"],
+        )
 
     def _precompute_thermal_mass(
         self,

@@ -26,6 +26,7 @@ _PRECIPITATION_OFFSET_F = 3.0
 _ALPHA_COOL = 0.012
 _ALPHA_HEAT = 0.015
 _T_REF = 75.0
+_SOLAR_MASS_FRACTION = 0.3
 
 # Names of calibratable coefficients (must match coefficient_store.py)
 COEFFICIENT_NAMES = (
@@ -38,6 +39,7 @@ COEFFICIENT_NAMES = (
     "stack_effect",
     "internal_gain_per_person",
     "precipitation_offset",
+    "solar_mass_fraction",
 )
 
 
@@ -181,5 +183,18 @@ def compute_sensitivities(record: dict) -> dict[str, float]:
         )
     else:
         sensitivities["precipitation_offset"] = 0.0
+
+    # ── solar_mass_fraction ──────────────────────────────────────
+    # Controls how much solar gain goes to thermal mass vs. air.
+    # Increasing f_s means less solar to air (negative T_air sensitivity)
+    # and more to mass (positive T_mass sensitivity, which indirectly
+    # warms air via R_int coupling over time).
+    # Net air sensitivity: ∂T_air/∂f_s = -Q_solar * dt
+    # (immediate air temperature drops when more solar goes to mass)
+    q_solar = record.get("q_solar", 0.0)
+    if q_solar > 0:
+        sensitivities["solar_mass_fraction"] = -q_solar * dt
+    else:
+        sensitivities["solar_mass_fraction"] = 0.0
 
     return sensitivities

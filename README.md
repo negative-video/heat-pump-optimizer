@@ -26,9 +26,15 @@ The integration builds a physics-based thermal model of your home (insulation, t
 
 The Extended Kalman Filter jointly estimates several coupled building parameters (insulation R-value, thermal mass, HVAC capacity, solar gain) from a single observation — your thermostat's temperature reading. Several safeguards prevent these estimates from diverging during low-information conditions:
 
-**Thermal mass and R-value bounds and gating** — Thermal mass is capped at 30,000 BTU/°F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges (R_inv: 0.01 to 1.0, giving R-values from 1 to 100 °F·hr/BTU). When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass - T_air| < 0.5°F`), the filter freezes thermal mass learning entirely. A bell-shaped gain curve peaks at 3.0°F delta (optimal observability) and tapers to zero at both extremes (below 0.5°F = equilibrium, above 8.0°F = likely filter divergence). Per-cycle rate limiting (5% max change for thermal mass, 3% for R-value) provides a final safety net.
+**Thermal mass and R-value bounds and gating** — Thermal mass is capped at 30,000 BTU/°F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges (R_inv: 0.01 to 1.0, giving R-values from 1 to 100 °F·hr/BTU). When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass - T_air| < 0.5°F`), the filter freezes thermal mass learning entirely. A bell-shaped gain curve peaks at 3.0°F delta (optimal observability) and tapers to zero at both extremes (below 0.5°F = equilibrium, above 8.0°F = likely filter divergence). Per-cycle rate limiting (5% max change for thermal mass, 1% for R-value) provides a final safety net.
 
 **R-value stability during HVAC operation** — When the HVAC is actively running, the dominant temperature forcing is from the compressor output, not the building envelope. The filter attenuates R-value and internal coupling Kalman gains by 80% during active HVAC to prevent compressor-driven temperature changes from corrupting insulation estimates.
+
+**Solar-to-mass coupling** — 30% of solar heat gain goes directly to the thermal mass node (floors, walls, furniture heated by sunlight through windows), not just the air. Without this, the EKF's thermal mass state barely moves during sunny days, and when solar gain drops at sunset the model can't explain why the house stays warmer than expected -- it misattributes the thermal mass heat release to a leaky envelope, causing R-value to crash by 5-10% every sunny evening.
+
+**R-value stability during solar transitions** — When solar gain is changing rapidly (sunrise/sunset), the Kalman gain for R-value is attenuated proportionally to the rate of solar change. This prevents the EKF from blaming envelope resistance for temperature changes driven by the solar-to-mass pathway lag during transitions.
+
+**Profiler-to-EKF seeding** — When the performance profiler reaches 70% confidence but the EKF is still below 30%, the profiler's empirically measured trendlines are used to seed EKF parameters (R-value, thermal capacity, HVAC capacity) as a one-time prior injection. This accelerates EKF convergence from weeks to days, especially in single-mode seasons where the EKF lacks heating or cooling observations.
 
 **Early learning damping** — During the first ~12 hours (144 observations), parameter Kalman gains are scaled from 50% to 100%. This prevents the wide initial priors from causing chaotic parameter jumps based on a handful of readings while still allowing meaningful convergence.
 
@@ -440,7 +446,7 @@ The profiler builds lookup tables of observed HVAC performance (°F/hr change vs
 
 Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across modes with at least 30 observations — modes with fewer observations are excluded from the calculation and hidden from the card until they accumulate enough data. This prevents seasonal modes (e.g., aux heat in spring) from permanently dragging confidence to 0%.
 
-The profiler builds coverage from live observations across all HVAC modes and outdoor temperature bins. As more varied weather is experienced, the profiler's confidence grows and its measured reality data eventually supersedes the EKF-derived model for heuristic optimization.
+The profiler builds coverage from live observations across all HVAC modes and outdoor temperature bins. As more varied weather is experienced, the profiler's confidence grows and its measured reality data eventually supersedes the EKF-derived model for heuristic optimization. The profiler also feeds the grey-box LP optimizer (blending empirical deltas with EKF parameters based on relative confidence) and provides one-time prior seeding for the EKF when the profiler reaches confidence before the filter converges.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
@@ -699,11 +705,11 @@ Savings accuracy improves over time:
 
 ### Thermal Model
 
-Two-node RC thermal circuit:
+Two-node RC thermal circuit with direct solar-to-mass coupling:
 
 ```
-C_air  * dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + Q_solar + Q_appliances + Q_aux_resistive
-C_mass * dT_mass/dt = (T_air - T_mass)/R_int
+C_air  * dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + (1-f_s)*Q_solar + Q_appliances + Q_aux_resistive
+C_mass * dT_mass/dt = (T_air - T_mass)/R_int + f_s * Q_solar
 ```
 
 Where:
@@ -713,6 +719,7 @@ Where:
 - `C_mass` — Thermal mass (walls, slab, furniture)
 - `Q_hvac` — HVAC output (temperature-dependent COP)
 - `Q_solar` — Solar heat gain
+- `f_s` — Solar mass fraction (0.3) -- sunlight through windows directly heats floors, walls, and furniture, not just the air
 - `Q_appliances` — Known thermal loads from auxiliary appliances
 - `Q_aux_resistive` — Resistive strip heat output derived from circuit power minus learned HP baseline (injected as exogenous load when aux/emergency heat is active)
 

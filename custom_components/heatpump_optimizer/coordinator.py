@@ -442,13 +442,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.adaptive_model.cool_differential = self.model.cool_differential
         self.adaptive_model.heat_differential = self.model.heat_differential
 
+        # Performance profiler (empirical HVAC deltas, reaches confidence faster
+        # than EKF, used to blend parameters into grey-box optimizer)
+        self.profiler = PerformanceProfiler()
+
         # Coefficient calibrator (slow outer loop for EKF physics coefficients)
         self.coeff_store = CoefficientStore()
         self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
         self.estimator._coeff_store = self.coeff_store
 
         # Grey-box optimizer (LP + Kalman)
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
+        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
 
         # Aux heat activation learner
         self.aux_heat_learner = AuxHeatLearner(
@@ -526,7 +530,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.counterfactual = CounterfactualSimulator(
             deadband=self._thermostat_deadband
         )
-        self.profiler = PerformanceProfiler()
 
         # Coordinator state
         self._phase: str = PHASE_IDLE
@@ -1204,6 +1207,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self._last_profiler_status = "error"
             _LOGGER.warning("Profiler observation failed", exc_info=True)
 
+        # ── Seed EKF from profiler (one-time) ─────────────────────
+        try:
+            self._try_seed_ekf_from_profiler()
+        except Exception:
+            _LOGGER.warning("Profiler EKF seeding failed", exc_info=True)
+
         # ── Update accuracy tier ───────────────────────────────────
 
         try:
@@ -1726,7 +1735,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.adaptive_model.heat_differential = self.model.heat_differential
         except AttributeError:
             pass
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
+        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
         self.strategic.greybox_optimizer = self.greybox_optimizer
 
         # Reset coefficient calibrator (but keep the learned store)
@@ -1922,7 +1931,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
             self.adaptive_model.cool_differential = self.model.cool_differential
             self.adaptive_model.heat_differential = self.model.heat_differential
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
+            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
             self.strategic.greybox_optimizer = self.greybox_optimizer
             _LOGGER.info(
                 "Imported model: %d observations, confidence=%.0f%%",
@@ -2425,6 +2434,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Update the savings accuracy tier based on baseline and model confidence."""
         baseline_conf = self.baseline_capture.confidence
         model_conf = self.estimator.confidence
+        profiler_conf = self.profiler.confidence()
 
         if baseline_conf >= 0.7 and model_conf >= 0.5:
             tier = TIER_CALIBRATED
@@ -2432,7 +2442,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             tier = TIER_SIMULATED
         elif self.baseline_capture.is_ready:
             tier = TIER_ESTIMATED
-        elif model_conf > 0:
+        elif profiler_conf >= 0.5 or model_conf > 0:
             tier = TIER_PROJECTED
         else:
             tier = TIER_LEARNING
@@ -2461,6 +2471,44 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Wire counterfactual simulator into savings tracker when ready
         if tier in (TIER_SIMULATED, TIER_CALIBRATED):
             self.savings_tracker.set_counterfactual(self.counterfactual)
+
+    def _try_seed_ekf_from_profiler(self) -> None:
+        """Seed EKF parameters from profiler data when profiler is confident but EKF is not."""
+        if self.estimator._profiler_seeded:
+            return
+        if self.estimator.confidence >= 0.3:
+            return  # EKF already has reasonable confidence
+        if self.profiler.confidence("resist") < 0.7:
+            return  # profiler not ready
+
+        profile = self.profiler.to_profile_data()
+        resist_data = profile["temperature"].get("resist")
+        if resist_data is None or resist_data.get("linear_trendline") is None:
+            return
+
+        resist_trend = resist_data["linear_trendline"]
+        t_ref = 75.0
+        resist_delta_ref = resist_trend["slope"] * t_ref + resist_trend["intercept"]
+
+        cool_delta_ref = None
+        cool_data = profile["temperature"].get("cool_1")
+        if cool_data and cool_data.get("linear_trendline"):
+            ct = cool_data["linear_trendline"]
+            cool_delta_ref = ct["slope"] * t_ref + ct["intercept"]
+
+        heat_delta_ref = None
+        heat_data = profile["temperature"].get("heat_1")
+        if heat_data and heat_data.get("linear_trendline"):
+            ht = heat_data["linear_trendline"]
+            heat_delta_ref = ht["slope"] * t_ref + ht["intercept"]
+
+        self.estimator.inject_profiler_priors(
+            resist_slope=resist_trend["slope"],
+            resist_intercept=resist_trend["intercept"],
+            cool_delta_at_ref=cool_delta_ref,
+            heat_delta_at_ref=heat_delta_ref,
+            resist_delta_at_ref=resist_delta_ref,
+        )
 
     def _check_model_progress(self) -> None:
         """Create or clear a repair issue if the model seems stuck."""
@@ -2733,7 +2781,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
                 self.estimator._coeff_store = self.coeff_store
                 self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-                self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
+                self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
                 self.strategic.greybox_optimizer = self.greybox_optimizer
                 _LOGGER.info(
                     "Restored Kalman filter (%d observations, confidence=%.0f%%)",
@@ -2863,7 +2911,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Rebuild dependent objects with updated estimator state
             self.estimator._coeff_store = self.coeff_store
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store)
+            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
             self.strategic.greybox_optimizer = self.greybox_optimizer
 
             # Reset profiler tracking so the first live cycle starts clean
