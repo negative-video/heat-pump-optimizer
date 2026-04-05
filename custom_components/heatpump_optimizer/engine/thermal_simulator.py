@@ -58,28 +58,28 @@ class ThermalSimulator:
             if passive_only or entry is None or entry.mode == "off":
                 # No HVAC - passive drift only
                 hvac_running = False
-                rate = self.model.passive_drift(outdoor_temp)
+                rate = self.model.passive_drift(outdoor_temp, indoor_temp)
             elif entry.mode == "cool":
                 hvac_running = self._should_cool(indoor_temp, entry.target_temp)
                 if hvac_running:
                     # Profile deltas represent the OBSERVED indoor temp change
                     # per hour of runtime, which already includes passive drift.
                     # Do NOT add passive_drift on top.
-                    rate = self.model.cooling_delta(outdoor_temp)
+                    rate = self.model.cooling_delta(outdoor_temp, indoor_temp)
                     cumulative_runtime += dt_minutes
                 else:
-                    rate = self.model.passive_drift(outdoor_temp)
+                    rate = self.model.passive_drift(outdoor_temp, indoor_temp)
             elif entry.mode == "heat":
                 hvac_running = self._should_heat(indoor_temp, entry.target_temp)
                 if hvac_running:
                     # Same: Profile heating deltas already include drift.
-                    rate = self.model.heating_delta(outdoor_temp)
+                    rate = self.model.heating_delta(outdoor_temp, indoor_temp)
                     cumulative_runtime += dt_minutes
                 else:
-                    rate = self.model.passive_drift(outdoor_temp)
+                    rate = self.model.passive_drift(outdoor_temp, indoor_temp)
             else:
                 hvac_running = False
-                rate = self.model.passive_drift(outdoor_temp)
+                rate = self.model.passive_drift(outdoor_temp, indoor_temp)
 
             results.append(
                 SimulationPoint(

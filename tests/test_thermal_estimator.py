@@ -301,7 +301,7 @@ class TestAdaptivePerformanceModel:
         # All these should work without error
         drift = model.passive_drift(80.0)
         cool = model.cooling_delta(80.0)
-        heat = model.heating_delta(30.0)
+        heat = model.heating_delta(45.0)
         aux = model.aux_heating_delta(20.0)
         eff = model.relative_efficiency(80.0, "cool")
         rt = model.runtime_needed(80.0, "cool", 3.0)

@@ -229,7 +229,7 @@ class PerformanceModel:
         frac = (outdoor_temp - lower) / (upper - lower)
         return deltas[lower] + frac * (deltas[upper] - deltas[lower])
 
-    def cooling_delta(self, outdoor_temp: float) -> float:
+    def cooling_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of cooling runtime at given outdoor temp.
 
         Returns negative values (cooling lowers indoor temp).
@@ -238,12 +238,16 @@ class PerformanceModel:
         Real data examples:
           75°F outdoor -> -3.36°F/hr
           96°F outdoor -> -0.66°F/hr
+
+        The indoor_temp parameter is accepted for interface compatibility with
+        AdaptivePerformanceModel but ignored here -- empirical lookup tables
+        already bake in thermostat setpoint behavior.
         """
         return self._lookup_delta(
             self._cool_deltas, self._cool_trendline, outdoor_temp
         )
 
-    def heating_delta(self, outdoor_temp: float) -> float:
+    def heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of heating runtime at given outdoor temp.
 
         Returns positive values (heating raises indoor temp).
@@ -252,12 +256,15 @@ class PerformanceModel:
         Real data examples:
           35°F outdoor -> ~0.76°F/hr
           50°F outdoor -> ~1.7°F/hr
+
+        The indoor_temp parameter is accepted for interface compatibility with
+        AdaptivePerformanceModel but ignored here.
         """
         return self._lookup_delta(
             self._heat_deltas, self._heat_trendline, outdoor_temp
         )
 
-    def aux_heating_delta(self, outdoor_temp: float) -> float:
+    def aux_heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of auxiliary (electric resistance) heat runtime."""
         if not self._aux_heat_deltas or not self._aux_heat_trendline:
             return 0.0
@@ -265,21 +272,33 @@ class PerformanceModel:
             self._aux_heat_deltas, self._aux_heat_trendline, outdoor_temp
         )
 
-    def passive_drift(self, outdoor_temp: float) -> float:
+    def passive_drift(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour with HVAC off (passive thermal drift).
 
         This IS the building's thermal model, measured directly.
         Negative below ~50°F (house loses heat), positive above (house gains heat).
 
-        Real data examples:
+        Real data examples (at nominal ~72°F indoor):
           30°F outdoor -> ~-0.7°F/hr (house cooling)
           50°F outdoor -> ~0°F/hr (equilibrium)
           80°F outdoor -> ~+1.0°F/hr (house warming)
           96°F outdoor -> ~+1.93°F/hr (rapid warming)
+
+        When indoor_temp is provided, the drift is adjusted for the difference
+        between the actual indoor temp and the nominal ~72°F assumed by the
+        empirical lookup tables.  This prevents the simulation from diverging
+        when the simulated indoor temp moves away from the nominal.
         """
-        return self._lookup_delta(
+        base = self._lookup_delta(
             self._resist_deltas, self._resist_trendline, outdoor_temp
         )
+        if indoor_temp is None:
+            return base
+        # The trendline slope represents dT_drift / dT_outdoor.  The same
+        # slope applies to the indoor-outdoor delta: a warmer house loses
+        # heat faster (less positive drift), a cooler house retains more.
+        slope = self._resist_trendline["slope"] if self._resist_trendline else 0.03
+        return base - slope * (indoor_temp - 72.0)
 
     # ── Derived metrics ────────────────────────────────────────────
 

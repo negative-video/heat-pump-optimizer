@@ -220,7 +220,7 @@ class PreconditionPlanner:
             # Get outdoor temp for this time
             hour_key = int(t.timestamp()) // 3600
             outdoor = temp_lookup.get(hour_key, 75.0)
-            drift_per_hour = self.model.passive_drift(outdoor)
+            drift_per_hour = self.model.passive_drift(outdoor, current)
             current += drift_per_hour * (dt_minutes / 60.0)
             t += timedelta(minutes=dt_minutes)
 

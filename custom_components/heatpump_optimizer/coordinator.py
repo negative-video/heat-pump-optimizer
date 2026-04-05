@@ -2818,6 +2818,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if "performance_profiler" in stored:
             try:
                 self.profiler = PerformanceProfiler.from_dict(stored["performance_profiler"])
+                # Update greybox optimizer's profiler reference (it was constructed
+                # with the original empty profiler before restoration)
+                self.greybox_optimizer._profiler = self.profiler
                 _LOGGER.debug(
                     "Restored performance profiler (%d observations, confidence=%.0f%%)",
                     self.profiler.total_observations,

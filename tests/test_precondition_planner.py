@@ -81,7 +81,7 @@ class MockPerformanceModel:
         self._drift_per_hour = drift_per_hour  # °F/hr passive warming
         self._runtime_per_degree = runtime_per_degree  # minutes per °F
 
-    def passive_drift(self, outdoor_temp: float) -> float:
+    def passive_drift(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         return self._drift_per_hour
 
     def runtime_needed(self, outdoor_temp: float, mode: str, gap: float) -> float:

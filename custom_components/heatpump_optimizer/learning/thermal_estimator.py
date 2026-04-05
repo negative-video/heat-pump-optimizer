@@ -126,6 +126,14 @@ _MAX_MASS_AIR_DELTA_F = 8.0
 # ever be validated against observed data.
 _MAX_TAU_HOURS = 72.0
 
+# Initial thermal mass time constant for cold start (hours).
+# Must be short enough for T_mass to track daily temperature cycles;
+# otherwise the mass acts as a phantom heat source/sink that confounds
+# R_inv estimation.  24 hr means T_mass substantially tracks the diurnal
+# cycle within one day instead of taking 3+ days at the old 72 hr value.
+# The filter can learn a longer tau if the building warrants it.
+_INITIAL_TAU_HOURS = 24.0
+
 # Maximum fractional change in C_mass_inv per 5-minute EKF cycle.
 # Physical thermal mass doesn't change between cycles; large jumps indicate
 # the filter is fitting noise.  5 % per step ≈ 60 %/hr — fast enough for
@@ -237,6 +245,11 @@ class ThermalEstimator:
     # Previous R_inv value for rate limiting (prevents wild swings)
     _prev_r_inv: float | None = None
 
+    # Rolling R_inv min/max over the last 24h (288 obs at 5-min).
+    # When the range exceeds 20%, R_inv is oscillating and the rate
+    # limit is tightened further to dampen diurnal aliasing.
+    _r_inv_recent: list[float] = field(default_factory=list)
+
     # Previous solar gain for solar transition gating (not persisted)
     _prev_q_solar: float | None = None
 
@@ -340,7 +353,7 @@ class ThermalEstimator:
             0.10,         # R_inv → R ≈ 10 °F·hr/BTU (moderate insulation)
             50.0,         # R_int_inv → R_int ≈ 0.02 (mass τ ≈ 72 hr at default C_mass)
             c_inv,        # C_inv
-            1.0 / (_MAX_TAU_HOURS * 50.0),  # C_mass_inv → τ = 72 hr at R_int_inv=50
+            1.0 / (_INITIAL_TAU_HOURS * 50.0),  # C_mass_inv → τ = 24 hr at R_int_inv=50
             q_cool,       # Q_cool_base
             q_heat,       # Q_heat_base
             DEFAULT_SOLAR_GAIN_BTU,  # solar_gain_btu ≈ 3000 BTU/hr
@@ -565,6 +578,7 @@ class ThermalEstimator:
         # releases stored solar energy, creating innovation bias that
         # the EKF would otherwise attribute to envelope leakiness.
         current_q_solar = self._last_thermal_loads.get("q_solar", 0.0)
+        solar_change_rate = 0.0  # saved for bias correction gating below
         if self._prev_q_solar is not None:
             solar_change_rate = abs(current_q_solar - self._prev_q_solar)
             if solar_change_rate > 500:  # BTU/hr change per cycle
@@ -586,6 +600,12 @@ class ThermalEstimator:
         # steps / 1 hour), boost parameter Kalman gains to accelerate
         # correction.  Without this, the EKF can overpredict or
         # underpredict for 12+ hours without meaningful self-correction.
+        #
+        # However, exclude R_inv and R_int_inv from the boost when
+        # HVAC is running or solar gain is changing rapidly.  In those
+        # conditions the bias is likely from Q_hvac or Q_solar model
+        # error, not envelope estimation — boosting R_inv would amplify
+        # the diurnal R-value oscillation instead of fixing the bias.
         if len(self._innovations) >= 12:
             recent_innovations = [v for _, v in self._innovations[-12:]]
             mean_inn = sum(recent_innovations) / len(recent_innovations)
@@ -593,6 +613,11 @@ class ThermalEstimator:
                 # Boost parameter gains by up to 3x (scaled by bias magnitude)
                 boost = min(3.0, 1.0 + abs(mean_inn) / 1.5)
                 K[_IDX_FIRST_PARAM:, :] *= boost
+                # Undo the boost for R_inv/R_int_inv when the bias is
+                # likely from HVAC or solar, not envelope properties.
+                if hvac_running or solar_change_rate > 500:
+                    K[IDX_R_INV, :] /= boost
+                    K[IDX_R_INT_INV, :] /= boost
 
         # Quantization pause: when thermostat reports same integer as last
         # time, freeze parameter learning. The zero innovation carries no
@@ -1493,10 +1518,40 @@ class ThermalEstimator:
 
     def _clamp_parameters(self):
         """Enforce physical bounds and rate limits on estimated parameters."""
-        # Rate-limit R_inv: cap change to ±_R_INV_MAX_CHANGE_FRAC per cycle.
+        # Rate-limit R_inv: cap change to ±frac per cycle.
+        # During early learning (first ~2 weeks / 4032 obs), use a tighter
+        # limit to prevent the diurnal R_inv oscillations seen when solar
+        # gain lag and thermal mass coupling confound envelope estimation.
+        # Ramps from 30% to 100% of the base rate limit.
+        _EARLY_LEARNING_OBS = 4032  # ~2 weeks at 5-min intervals
+        if self._n_obs < _EARLY_LEARNING_OBS:
+            progress = self._n_obs / _EARLY_LEARNING_OBS
+            frac = _R_INV_MAX_CHANGE_FRAC * (0.3 + 0.7 * progress)
+        else:
+            frac = _R_INV_MAX_CHANGE_FRAC
+
+        # Diurnal oscillation damping: if R_inv has swung > 20% over the
+        # last 24h, tighten the rate limit proportionally.  This catches
+        # parameter aliasing where R_inv absorbs solar/HVAC model errors
+        # and oscillates with the day/night cycle.
+        _R_INV_HISTORY_LEN = 288  # 24h at 5-min intervals
+        r_inv_now = float(self.x[IDX_R_INV])
+        self._r_inv_recent.append(r_inv_now)
+        if len(self._r_inv_recent) > _R_INV_HISTORY_LEN:
+            self._r_inv_recent = self._r_inv_recent[-_R_INV_HISTORY_LEN:]
+        if len(self._r_inv_recent) >= 36:  # need at least 3 hours of data
+            r_min = min(self._r_inv_recent)
+            r_max = max(self._r_inv_recent)
+            if r_min > 0:
+                swing_pct = (r_max - r_min) / r_min
+                if swing_pct > 0.20:
+                    # Scale down: 20% swing = 1.0x, 50% swing = 0.1x
+                    damper = max(0.1, 1.0 - (swing_pct - 0.20) / 0.30)
+                    frac *= damper
+
         if self._prev_r_inv is not None and self._prev_r_inv > 0:
             prev = self._prev_r_inv
-            max_delta = _R_INV_MAX_CHANGE_FRAC * prev
+            max_delta = frac * prev
             self.x[IDX_R_INV] = np.clip(
                 self.x[IDX_R_INV], prev - max_delta, prev + max_delta,
             )

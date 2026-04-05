@@ -25,51 +25,56 @@ class AdaptivePerformanceModel:
 
     # ── Delta lookups (same interface as PerformanceModel) ──────────
 
-    def passive_drift(self, outdoor_temp: float) -> float:
+    def passive_drift(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour with HVAC off.
 
         Computed from learned R (envelope resistance) and C (air capacitance),
         including the effect of thermal mass coupling.
 
         Positive = house warming, negative = house cooling.
+
+        When indoor_temp is provided (e.g. from the thermal simulator), it
+        overrides the EKF's real-time T_air so that the simulation correctly
+        feeds back the evolving indoor temperature at each step.
         """
         R_inv = self.estimator.R_inv
         R_int_inv = self.estimator.R_int_inv
         C_inv = self.estimator.C_inv
-        T_air = self.estimator.T_air
+        T_air = indoor_temp if indoor_temp is not None else self.estimator.T_air
         T_mass = self.estimator.T_mass
+        area = self.estimator.envelope_area
 
-        Q_env = R_inv * (outdoor_temp - T_air)
+        Q_env = R_inv * area * (outdoor_temp - T_air)
         Q_int = R_int_inv * (T_mass - T_air)
         return C_inv * (Q_env + Q_int)
 
-    def cooling_delta(self, outdoor_temp: float) -> float:
+    def cooling_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour during cooling (negative = cooling).
 
         Net rate = passive drift - cooling capacity / C_air.
         This is what PerformanceModel.cooling_delta returns: the observed
         net change including both HVAC effect and envelope drift.
         """
-        drift = self.passive_drift(outdoor_temp)
+        drift = self.passive_drift(outdoor_temp, indoor_temp)
         Q_cool = self.estimator.cooling_capacity(outdoor_temp)
         return drift - self.estimator.C_inv * Q_cool
 
-    def heating_delta(self, outdoor_temp: float) -> float:
+    def heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour during heating (positive = heating).
 
         Net rate = passive drift + heating capacity / C_air.
         """
-        drift = self.passive_drift(outdoor_temp)
+        drift = self.passive_drift(outdoor_temp, indoor_temp)
         Q_heat = self.estimator.heating_capacity(outdoor_temp)
         return drift + self.estimator.C_inv * Q_heat
 
-    def aux_heating_delta(self, outdoor_temp: float) -> float:
+    def aux_heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour during auxiliary heat.
 
         Not separately modeled by the Kalman filter — returns the standard
         heating delta as a conservative estimate.
         """
-        return self.heating_delta(outdoor_temp)
+        return self.heating_delta(outdoor_temp, indoor_temp)
 
     # ── Derived metrics (same interface as PerformanceModel) ────────
 
