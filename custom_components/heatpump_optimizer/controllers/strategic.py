@@ -203,14 +203,22 @@ class StrategicPlanner:
         return schedule
 
     def detect_mode(self, forecast: list[ForecastPoint]) -> str:
-        """Determine HVAC mode from forecast temperatures.
+        """Determine HVAC mode from near-term forecast temperatures.
 
         Returns "cool", "heat", or "off" (near balance point).
+
+        Uses only the first 8 hours of the forecast for mode determination.
+        The optimizer re-runs every 1-4 hours, so it only needs to pick the
+        right mode for the immediate future.  Using the full 24-hour peak
+        caused "cool" selection on shoulder mornings that need heat because
+        a warm afternoon peak exceeded the balance point threshold.
         """
         if not forecast:
             return "off"
 
-        temps = [pt.outdoor_temp for pt in forecast]
+        # Near-term focus: commit to a mode for the next few hours only.
+        near_term = forecast[:8] if len(forecast) > 8 else forecast
+        temps = [pt.outdoor_temp for pt in near_term]
         avg = sum(temps) / len(temps)
         max_temp = max(temps)
         min_temp = min(temps)

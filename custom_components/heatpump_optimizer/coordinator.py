@@ -1368,7 +1368,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # can produce absurd values (1000°F+) when R_int_inv is poorly learned.
         if active_model is self.adaptive_model or use_greybox_now:
             param_conf = self.estimator.parameter_confidence
-            if param_conf.get("internal_coupling", 0) >= 0.3:
+            if param_conf.get("internal_coupling", 0) >= 0.1:
                 bp = self.adaptive_model.resist_balance_point
                 if bp is not None:
                     self.strategic.resist_balance_point = bp

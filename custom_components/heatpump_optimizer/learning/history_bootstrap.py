@@ -189,7 +189,7 @@ async def async_bootstrap_from_history(
         return BootstrapResult(success=False, reason="insufficient_history")
 
     # 3. Build timelines and align to grid
-    indoor_sensor_states = _collect_indoor_temp_states(
+    indoor_sensor_timelines = _collect_indoor_temp_timelines(
         states, indoor_temp_entities or [],
     )
     data_points = _build_aligned_timeline(
@@ -197,7 +197,7 @@ async def async_bootstrap_from_history(
         outdoor_states=_collect_outdoor_states(
             states, outdoor_temp_entities, weather_entity_ids
         ),
-        indoor_sensor_states=indoor_sensor_states,
+        indoor_sensor_timelines=indoor_sensor_timelines,
         humidity_states=_collect_sensor_states(states, humidity_entities),
         wind_states=_collect_sensor_states(
             states, [wind_speed_entity] if wind_speed_entity else []
@@ -251,7 +251,7 @@ async def async_bootstrap_from_history(
 def _build_aligned_timeline(
     climate_states: list,
     outdoor_states: list[tuple[datetime, float]],
-    indoor_sensor_states: list[tuple[datetime, float]],
+    indoor_sensor_timelines: list[list[tuple[datetime, float]]],
     humidity_states: list[tuple[datetime, float]],
     wind_states: list[tuple[datetime, float]],
     start_time: datetime,
@@ -341,18 +341,6 @@ def _build_aligned_timeline(
             except (ValueError, TypeError):
                 pass
 
-    # Supplement indoor timeline with dedicated temperature sensor entities.
-    # The climate entity's current_temperature attribute is only updated on
-    # significant state changes in some HA versions, leaving large gaps.
-    # Standalone sensors (e.g. sensor.my_ecobee_current_temperature) report
-    # via their state column and have much better coverage.
-    if indoor_sensor_states:
-        climate_ts = {ts for ts, _ in indoor_timeline}
-        for ts, val in indoor_sensor_states:
-            if ts not in climate_ts:
-                indoor_timeline.append((ts, val))
-        indoor_timeline.sort(key=lambda x: x[0])
-
     # Generate 5-minute grid
     grid_times = []
     t = start_time
@@ -364,8 +352,24 @@ def _build_aligned_timeline(
     data_points: list[HistoryDataPoint] = []
 
     for grid_time in grid_times:
-        indoor_temp = _interpolate_numeric(
+        # Average all available indoor temp sensors at this grid point,
+        # matching the live SensorHub's multi-sensor averaging behavior.
+        indoor_readings: list[float] = []
+
+        climate_temp = _interpolate_numeric(
             indoor_timeline, grid_time, MAX_TEMP_GAP_MINUTES
+        )
+        if climate_temp is not None:
+            indoor_readings.append(climate_temp)
+
+        for sensor_tl in indoor_sensor_timelines:
+            val = _interpolate_numeric(sensor_tl, grid_time, MAX_TEMP_GAP_MINUTES)
+            if val is not None:
+                indoor_readings.append(val)
+
+        indoor_temp = (
+            sum(indoor_readings) / len(indoor_readings)
+            if indoor_readings else None
         )
         outdoor_temp = _interpolate_numeric(
             outdoor_states, grid_time, MAX_OUTDOOR_GAP_MINUTES
@@ -435,18 +439,19 @@ def _collect_outdoor_states(
     return timeline
 
 
-def _collect_indoor_temp_states(
+def _collect_indoor_temp_timelines(
     states: dict[str, list],
     entity_ids: list[str],
-) -> list[tuple[datetime, float]]:
-    """Collect indoor temperature readings from dedicated sensor entities.
+) -> list[list[tuple[datetime, float]]]:
+    """Collect per-entity indoor temperature timelines for multi-sensor averaging.
 
-    These supplement the climate entity's current_temperature attribute,
-    which can be stale in HA 2025.x when only attributes (not the main
-    state) change between recorder entries.
+    Returns one timeline per entity so the bootstrap can interpolate each
+    sensor independently at each grid point and average the results --
+    matching the live SensorHub's multi-sensor averaging behavior.
     """
-    timeline: list[tuple[datetime, float]] = []
+    timelines: list[list[tuple[datetime, float]]] = []
     for entity_id in entity_ids:
+        timeline: list[tuple[datetime, float]] = []
         for state in states.get(entity_id, []):
             ts = _state_timestamp(state)
             val = _state_value(state)
@@ -457,8 +462,10 @@ def _collect_indoor_temp_states(
                     timeline.append((ts, temp_f))
                 except (ValueError, TypeError):
                     pass
-    timeline.sort(key=lambda x: x[0])
-    return timeline
+        if timeline:
+            timeline.sort(key=lambda x: x[0])
+            timelines.append(timeline)
+    return timelines
 
 
 def _collect_sensor_states(
