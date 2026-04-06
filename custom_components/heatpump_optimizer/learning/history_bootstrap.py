@@ -87,6 +87,7 @@ async def async_bootstrap_from_history(
     baseline_capture: BaselineCapture,
     profiler: PerformanceProfiler,
     max_days: int = 10,
+    indoor_temp_entities: list[str] | None = None,
 ) -> BootstrapResult:
     """Bootstrap learning subsystems from Home Assistant recorder history.
 
@@ -121,6 +122,8 @@ async def async_bootstrap_from_history(
     entity_ids.extend(humidity_entities)
     if wind_speed_entity:
         entity_ids.append(wind_speed_entity)
+    if indoor_temp_entities:
+        entity_ids.extend(indoor_temp_entities)
 
     # De-duplicate
     entity_ids = list(dict.fromkeys(entity_ids))
@@ -186,11 +189,15 @@ async def async_bootstrap_from_history(
         return BootstrapResult(success=False, reason="insufficient_history")
 
     # 3. Build timelines and align to grid
+    indoor_sensor_states = _collect_indoor_temp_states(
+        states, indoor_temp_entities or [],
+    )
     data_points = _build_aligned_timeline(
         climate_states=climate_states,
         outdoor_states=_collect_outdoor_states(
             states, outdoor_temp_entities, weather_entity_ids
         ),
+        indoor_sensor_states=indoor_sensor_states,
         humidity_states=_collect_sensor_states(states, humidity_entities),
         wind_states=_collect_sensor_states(
             states, [wind_speed_entity] if wind_speed_entity else []
@@ -244,6 +251,7 @@ async def async_bootstrap_from_history(
 def _build_aligned_timeline(
     climate_states: list,
     outdoor_states: list[tuple[datetime, float]],
+    indoor_sensor_states: list[tuple[datetime, float]],
     humidity_states: list[tuple[datetime, float]],
     wind_states: list[tuple[datetime, float]],
     start_time: datetime,
@@ -333,6 +341,18 @@ def _build_aligned_timeline(
             except (ValueError, TypeError):
                 pass
 
+    # Supplement indoor timeline with dedicated temperature sensor entities.
+    # The climate entity's current_temperature attribute is only updated on
+    # significant state changes in some HA versions, leaving large gaps.
+    # Standalone sensors (e.g. sensor.my_ecobee_current_temperature) report
+    # via their state column and have much better coverage.
+    if indoor_sensor_states:
+        climate_ts = {ts for ts, _ in indoor_timeline}
+        for ts, val in indoor_sensor_states:
+            if ts not in climate_ts:
+                indoor_timeline.append((ts, val))
+        indoor_timeline.sort(key=lambda x: x[0])
+
     # Generate 5-minute grid
     grid_times = []
     t = start_time
@@ -411,6 +431,32 @@ def _collect_outdoor_states(
                     except (ValueError, TypeError):
                         pass
 
+    timeline.sort(key=lambda x: x[0])
+    return timeline
+
+
+def _collect_indoor_temp_states(
+    states: dict[str, list],
+    entity_ids: list[str],
+) -> list[tuple[datetime, float]]:
+    """Collect indoor temperature readings from dedicated sensor entities.
+
+    These supplement the climate entity's current_temperature attribute,
+    which can be stale in HA 2025.x when only attributes (not the main
+    state) change between recorder entries.
+    """
+    timeline: list[tuple[datetime, float]] = []
+    for entity_id in entity_ids:
+        for state in states.get(entity_id, []):
+            ts = _state_timestamp(state)
+            val = _state_value(state)
+            if ts is not None and val is not None:
+                try:
+                    attrs = _state_attributes(state)
+                    temp_f = _to_fahrenheit(float(val), attrs)
+                    timeline.append((ts, temp_f))
+                except (ValueError, TypeError):
+                    pass
     timeline.sort(key=lambda x: x[0])
     return timeline
 

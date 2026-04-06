@@ -2906,6 +2906,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             baseline_capture=self.baseline_capture,
             profiler=self.profiler,
             max_days=DEFAULT_HISTORY_BOOTSTRAP_DAYS,
+            indoor_temp_entities=self.sensor_hub._indoor_temp_entities,
         )
 
         self._history_bootstrap_result = result.reason if not result.success else "ok"

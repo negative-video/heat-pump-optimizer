@@ -231,6 +231,7 @@ class TestBuildAlignedTimeline:
         points = _build_aligned_timeline(
             climate_states=climate_states,
             outdoor_states=outdoor_states,
+            indoor_sensor_states=[],
             humidity_states=[],
             wind_states=[],
             start_time=start,
@@ -258,6 +259,7 @@ class TestBuildAlignedTimeline:
         points = _build_aligned_timeline(
             climate_states=climate_states,
             outdoor_states=[],
+            indoor_sensor_states=[],
             humidity_states=[],
             wind_states=[],
             start_time=start,
@@ -279,6 +281,7 @@ class TestBuildAlignedTimeline:
         points = _build_aligned_timeline(
             climate_states=climate_states,
             outdoor_states=outdoor_states,
+            indoor_sensor_states=[],
             humidity_states=[],
             wind_states=[],
             start_time=start,
