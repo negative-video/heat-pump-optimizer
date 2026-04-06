@@ -120,6 +120,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         if coordinator:
             _LOGGER.info("Service call: rebootstrap from recorder history")
             coordinator._history_bootstrap_completed = False
+            coordinator._bootstrap_retry_count = 0
             await coordinator._try_history_bootstrap()
             await coordinator.async_request_refresh()
 
