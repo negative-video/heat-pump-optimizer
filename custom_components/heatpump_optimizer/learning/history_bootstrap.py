@@ -278,14 +278,33 @@ def _build_aligned_timeline(
         if state_value in ("cool", "heat", "heat_cool", "off", "auto", "dry", "fan_only"):
             mode = state_value
             if mode in ("heat_cool", "auto"):
-                # Map dual-mode to the active action if available
+                # Map dual-mode to the active action if available.
+                # When idle, derive mode from temperature context so the
+                # profiler records passive drift as "resist" observations
+                # instead of skipping them as "off".
                 action = attrs.get("hvac_action", "idle")
                 if action == "cooling":
                     mode = "cool"
                 elif action == "heating":
                     mode = "heat"
                 else:
-                    mode = "off"
+                    # System is idle but thermostat is armed (heat_cool/auto).
+                    # Use indoor vs outdoor temp to pick a season-appropriate
+                    # mode so the profiler doesn't skip these as "off".
+                    indoor = attrs.get("current_temperature")
+                    outdoor = None
+                    for ots, oval in outdoor_states:
+                        if ots <= ts:
+                            outdoor = oval
+                        else:
+                            break
+                    if indoor is not None and outdoor is not None:
+                        try:
+                            mode = "cool" if float(outdoor) > float(indoor) else "heat"
+                        except (ValueError, TypeError):
+                            mode = "heat"
+                    else:
+                        mode = "heat"
             elif mode in ("dry", "fan_only"):
                 mode = "off"
             mode_timeline.append((ts, mode))
