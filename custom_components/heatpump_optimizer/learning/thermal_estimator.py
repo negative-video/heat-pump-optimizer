@@ -134,6 +134,14 @@ _MAX_TAU_HOURS = 72.0
 # The filter can learn a longer tau if the building warrants it.
 _INITIAL_TAU_HOURS = 24.0
 
+# Maximum fractional change in C_inv per 5-minute EKF cycle.
+# Air thermal capacitance is a physical property that doesn't change between
+# cycles.  During idle periods, C_inv and R_inv are confounded (both explain
+# the same decay rate = C_inv * R_inv * area), causing C_inv to oscillate
+# wildly.  5 % per step ≈ 60 %/hr — fast enough for legitimate convergence
+# with HVAC cycling data, slow enough to prevent idle-mode runaway.
+_C_INV_MAX_CHANGE_FRAC = 0.05
+
 # Maximum fractional change in C_mass_inv per 5-minute EKF cycle.
 # Physical thermal mass doesn't change between cycles; large jumps indicate
 # the filter is fitting noise.  5 % per step ≈ 60 %/hr — fast enough for
@@ -169,7 +177,7 @@ _SOLAR_MASS_FRACTION = 0.3
 BOUNDS = {
     IDX_R_INV: (0.01, 1.0),       # R: 1.0 to 100 °F·hr/BTU
     IDX_R_INT_INV: (0.5, 500.0),  # R_int: 0.002 to 2 — allows mass τ from ~20 hr to ~20,000 hr
-    IDX_C_INV: (1e-5, 0.01),      # C_air: 100 to 100,000 BTU/°F
+    IDX_C_INV: (1e-4, 0.005),      # C_air: 200 to 10,000 BTU/°F
     IDX_C_MASS_INV: (3.3e-5, 0.001),  # C_mass: 1,000 to 30,000 BTU/°F
     IDX_Q_COOL: (5000, 80000),    # 5k to 80k BTU/hr
     IDX_Q_HEAT: (5000, 80000),
@@ -264,6 +272,11 @@ class ThermalEstimator:
     # Optional coefficient store — when set, the EKF reads calibrated
     # multipliers instead of raw module-level constants.
     _coeff_store: CoefficientStore | None = None
+
+    # Previous C_inv for per-cycle rate limiting (not persisted).
+    # During idle, C_inv and R_inv are confounded — both explain the same
+    # decay rate — so without rate limiting C_inv oscillates wildly.
+    _prev_c_inv: float | None = None
 
     # Previous C_mass_inv for per-cycle rate limiting (not persisted)
     _prev_c_mass_inv: float | None = None
@@ -371,6 +384,7 @@ class ThermalEstimator:
         ])
         est._P_initial = est.P.copy()
         est._prev_r_inv = float(est.x[IDX_R_INV])
+        est._prev_c_inv = float(est.x[IDX_C_INV])
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._prev_q_cool = float(est.x[IDX_Q_COOL])
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])
@@ -483,6 +497,15 @@ class ThermalEstimator:
         if not (hvac_running and hvac_mode == "heat"):
             Q_effective[IDX_Q_HEAT, IDX_Q_HEAT] = 0.0
 
+        # Gate C_inv process noise when HVAC is idle.
+        # During idle, C_inv and R_inv are confounded: the observed decay rate
+        # = C_inv * R_inv * area, so either parameter can absorb prediction
+        # errors.  Freezing C_inv process noise during idle prevents covariance
+        # growth that causes wild oscillations (100,000+ BTU/F) and R_inv
+        # contamination through off-diagonal coupling.
+        if not hvac_running:
+            Q_effective[IDX_C_INV, IDX_C_INV] = 0.0
+
         # Gate thermal-mass process noise when |T_mass − T_air| is small.
         # The Jacobian entry for C_mass_inv ≈ −R_int_inv·(T_mass−T_air)·dt
         # vanishes near equilibrium, so the observation carries no information
@@ -503,6 +526,14 @@ class ThermalEstimator:
             P_pred[IDX_Q_HEAT, :] = 0.0
             P_pred[:, IDX_Q_HEAT] = 0.0
             P_pred[IDX_Q_HEAT, IDX_Q_HEAT] = self.P[IDX_Q_HEAT, IDX_Q_HEAT]
+
+        # Same pattern for C_inv: zero cross-correlations when HVAC is
+        # idle.  Only active HVAC provides an independent signal to pin
+        # C_inv (the known heat input breaks the C_inv/R_inv degeneracy).
+        if not hvac_running:
+            P_pred[IDX_C_INV, :] = 0.0
+            P_pred[:, IDX_C_INV] = 0.0
+            P_pred[IDX_C_INV, IDX_C_INV] = self.P[IDX_C_INV, IDX_C_INV]
 
         # Same pattern for C_mass_inv: zero cross-correlations when
         # thermal-mass observability is poor.
@@ -1557,6 +1588,19 @@ class ThermalEstimator:
             )
         self._prev_r_inv = float(self.x[IDX_R_INV])
 
+        # Rate-limit C_inv: cap change to ±_C_INV_MAX_CHANGE_FRAC per cycle.
+        # During idle, C_inv and R_inv are confounded (both explain the same
+        # observed decay rate).  Without rate-limiting, C_inv swings from
+        # 1/1200 to 1/100000 in a single cycle, contaminating R_inv via
+        # off-diagonal covariance.
+        if self._prev_c_inv is not None and self._prev_c_inv > 0:
+            prev = self._prev_c_inv
+            max_delta = _C_INV_MAX_CHANGE_FRAC * prev
+            self.x[IDX_C_INV] = np.clip(
+                self.x[IDX_C_INV], prev - max_delta, prev + max_delta,
+            )
+        self._prev_c_inv = float(self.x[IDX_C_INV])
+
         # Rate-limit C_mass_inv: cap change to ±_C_MASS_MAX_CHANGE_FRAC per cycle.
         if self._prev_c_mass_inv is not None and self._prev_c_mass_inv > 0:
             prev = self._prev_c_mass_inv
@@ -1722,6 +1766,7 @@ class ThermalEstimator:
 
         # Update rate-limit tracking to prevent immediate clamp-back
         self._prev_r_inv = float(self.x[IDX_R_INV])
+        self._prev_c_inv = float(self.x[IDX_C_INV])
         self._prev_q_cool = float(self.x[IDX_Q_COOL])
         self._prev_q_heat = float(self.x[IDX_Q_HEAT])
 
@@ -1798,6 +1843,7 @@ class ThermalEstimator:
             est.Q = _expand_matrix(est.Q, 1e-4)
 
         est._prev_r_inv = float(est.x[IDX_R_INV])
+        est._prev_c_inv = float(est.x[IDX_C_INV])
         est._prev_c_mass_inv = float(est.x[IDX_C_MASS_INV])
         est._prev_q_cool = float(est.x[IDX_Q_COOL])
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])

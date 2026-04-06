@@ -140,7 +140,7 @@ async def async_bootstrap_from_history(
             None,  # filters
             True,  # include_start_time_state
             False,  # significant_changes_only
-            True,  # minimal_response — we'll access attributes directly
+            False,  # minimal_response — must be False to get attributes on non-significant changes
             False,  # no_attributes — must be False to get current_temperature etc.
         )
     except TypeError:
@@ -378,8 +378,8 @@ def _collect_outdoor_states(
                 except (ValueError, TypeError):
                     pass
 
-    # Fall back to weather entity temperature attribute
-    if not timeline:
+    # Supplement with weather entity temperature if primary sensors are sparse
+    if len(timeline) < MIN_VALID_POINTS:
         for entity_id in weather_entity_ids:
             for state in states.get(entity_id, []):
                 ts = _state_timestamp(state)
