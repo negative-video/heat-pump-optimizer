@@ -3091,9 +3091,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             bounds = comfort_bounds.get(hour_key)
             entry: dict = {
                 "time": pt.time.isoformat(),
-                "indoor": round(pt.indoor_temp, 1),
-                "outdoor": round(pt.outdoor_temp, 1),
-                "hvac": pt.hvac_running,
+                "indoor": float(round(pt.indoor_temp, 1)),
+                "outdoor": float(round(pt.outdoor_temp, 1)),
+                "hvac": bool(pt.hvac_running),
             }
             if bounds:
                 entry["comfort_min"] = bounds[0]
