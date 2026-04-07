@@ -285,6 +285,8 @@ class ThermalEstimator:
     # rate-limit Q_cool/Q_heat drift so the filter respects the prior
     # during early learning.  _has_tonnage_prior is persisted.
     _has_tonnage_prior: bool = False
+    _rated_q_cool: float | None = None  # rated cooling BTU/hr (tonnage*12000)
+    _rated_q_heat: float | None = None  # rated heating BTU/hr
 
     # Whether profiler data has been injected as priors (persisted, one-time)
     _profiler_seeded: bool = False
@@ -395,6 +397,8 @@ class ThermalEstimator:
         # so the filter respects the user-provided rating during early learning.
         if tonnage is not None:
             est._has_tonnage_prior = True
+            est._rated_q_cool = q_cool
+            est._rated_q_heat = q_heat
             est.Q[IDX_Q_COOL, IDX_Q_COOL] = 0.01
             est.Q[IDX_Q_HEAT, IDX_Q_HEAT] = 0.01
 
@@ -1549,6 +1553,11 @@ class ThermalEstimator:
 
     def _clamp_parameters(self):
         """Enforce physical bounds and rate limits on estimated parameters."""
+        # Snapshot pre-clamp values for joint product constraint (applied later).
+        prev_c_saved = self._prev_c_inv or float(self.x[IDX_C_INV])
+        prev_q_cool_saved = self._prev_q_cool or float(self.x[IDX_Q_COOL])
+        prev_q_heat_saved = self._prev_q_heat or float(self.x[IDX_Q_HEAT])
+
         # Rate-limit R_inv: cap change to ±frac per cycle.
         # During early learning (first ~2 weeks / 4032 obs), use a tighter
         # limit to prevent the diurnal R_inv oscillations seen when solar
@@ -1625,6 +1634,40 @@ class ThermalEstimator:
         self._prev_q_cool = float(self.x[IDX_Q_COOL])
         self._prev_q_heat = float(self.x[IDX_Q_HEAT])
 
+        # Joint product constraint: C_inv * Q_cool and C_inv * Q_heat.
+        # These products represent the effective cooling/heating rate (F/hr)
+        # and are the actual observable quantity.  The EKF can trade C_inv
+        # against Q_hvac while keeping the product roughly constant, causing
+        # both parameters to drift to their bounds.  Constraining the product
+        # directly prevents this correlated divergence.
+        _PRODUCT_MAX_CHANGE_FRAC = 0.03  # 3% per cycle
+        prev_c = prev_c_saved  # C_inv before this cycle's clamping
+        curr_c = float(self.x[IDX_C_INV])
+        for idx, prev_q_attr in (
+            (IDX_Q_COOL, prev_q_cool_saved),
+            (IDX_Q_HEAT, prev_q_heat_saved),
+        ):
+            prev_q = prev_q_attr
+            curr_q = float(self.x[idx])
+            if prev_c > 0 and prev_q > 0:
+                prev_product = prev_c * prev_q
+                curr_product = curr_c * curr_q
+                if prev_product > 0:
+                    change = abs(curr_product - prev_product) / prev_product
+                    if change > _PRODUCT_MAX_CHANGE_FRAC:
+                        # Pull both parameters back toward their previous values
+                        # proportionally so the product stays within the limit.
+                        target_product = prev_product * (
+                            1.0 + _PRODUCT_MAX_CHANGE_FRAC * np.sign(curr_product - prev_product)
+                        )
+                        # Split the correction: adjust Q_hvac (more observable)
+                        # while keeping C_inv at its current value.
+                        corrected_q = target_product / max(curr_c, 1e-10)
+                        self.x[idx] = corrected_q
+        # Update tracking after joint constraint
+        self._prev_q_cool = float(self.x[IDX_Q_COOL])
+        self._prev_q_heat = float(self.x[IDX_Q_HEAT])
+
         # Constrain T_mass to physical proximity of T_air.
         # Residential thermal mass (walls, slab, furniture) equilibrates
         # with air within a few degrees.  Larger gaps indicate filter
@@ -1646,6 +1689,17 @@ class ThermalEstimator:
         if tau > _MAX_TAU_HOURS:
             max_c_mass = _MAX_TAU_HOURS * r_int_inv
             self.x[IDX_C_MASS_INV] = 1.0 / max_c_mass
+
+        # Tonnage-aware capacity bounds: when the user provided a rated tonnage,
+        # clamp Q_cool to 150% and Q_heat to 180% of rated capacity.
+        # This is tighter than the global BOUNDS (which allow up to 80k BTU/hr)
+        # and prevents the EKF from drifting to physically implausible values.
+        if self._has_tonnage_prior and self._rated_q_cool:
+            hi_cool = self._rated_q_cool * 1.5
+            self.x[IDX_Q_COOL] = min(float(self.x[IDX_Q_COOL]), hi_cool)
+        if self._has_tonnage_prior and self._rated_q_heat:
+            hi_heat = self._rated_q_heat * 1.8
+            self.x[IDX_Q_HEAT] = min(float(self.x[IDX_Q_HEAT]), hi_heat)
 
         # Standard bounds clamping
         for idx, (lo, hi) in BOUNDS.items():
@@ -1793,6 +1847,8 @@ class ThermalEstimator:
             "envelope_area": self._envelope_area,
             "confidence_hwm": self._confidence_hwm,
             "has_tonnage_prior": self._has_tonnage_prior,
+            "rated_q_cool": self._rated_q_cool,
+            "rated_q_heat": self._rated_q_heat,
             "profiler_seeded": self._profiler_seeded,
         }
 
@@ -1848,6 +1904,8 @@ class ThermalEstimator:
         est._prev_q_cool = float(est.x[IDX_Q_COOL])
         est._prev_q_heat = float(est.x[IDX_Q_HEAT])
         est._has_tonnage_prior = data.get("has_tonnage_prior", False)
+        est._rated_q_cool = data.get("rated_q_cool")
+        est._rated_q_heat = data.get("rated_q_heat")
         est._profiler_seeded = data.get("profiler_seeded", False)
         est._initialized = True
         return est

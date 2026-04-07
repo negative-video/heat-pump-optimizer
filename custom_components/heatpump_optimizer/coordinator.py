@@ -1362,11 +1362,15 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         active_model = self._get_active_model()
         use_greybox_now = self._should_use_greybox()
 
-        # Update balance point if using adaptive or grey-box model, but only
-        # when internal coupling is confident enough.  The adaptive balance
-        # point formula amplifies T_mass-T_air gaps by R_int_inv/R_inv, which
-        # can produce absurd values (1000°F+) when R_int_inv is poorly learned.
-        if active_model is self.adaptive_model or use_greybox_now:
+        # Update balance point.  Prefer the profiler's measured value (derived
+        # from a trendline fit to real observations) over the adaptive model's
+        # EKF formula, which amplifies small T_mass-T_air gaps by R_int_inv/R_inv
+        # and regularly produces absurd values (1000 F+) when poorly converged.
+        profiler_data = self.profiler.to_profile_data()
+        profiler_bp = profiler_data.get("balance_point", {}).get("resist")
+        if profiler_bp is not None:
+            self.strategic.resist_balance_point = profiler_bp
+        elif active_model is self.adaptive_model or use_greybox_now:
             param_conf = self.estimator.parameter_confidence
             if param_conf.get("internal_coupling", 0) >= 0.1:
                 bp = self.adaptive_model.resist_balance_point
@@ -1722,6 +1726,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         except Exception:
             init_indoor = 72.0
 
+        # Reset static performance model to conservative defaults
+        self.model = PerformanceModel.from_defaults()
+
         # Reset EKF thermal estimator
         self.estimator = ThermalEstimator.cold_start(
             indoor_temp=init_indoor,
@@ -1737,6 +1744,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             pass
         self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
         self.strategic.greybox_optimizer = self.greybox_optimizer
+
+        # Update downstream model references
+        self.simulator.model = self.model
+        self.optimizer.model = self.model
+        self.precondition_planner = PreconditionPlanner(self.model)
+        self.strategic.resist_balance_point = self.model.resist_balance_point or 50.0
 
         # Reset coefficient calibrator (but keep the learned store)
         self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
@@ -2245,6 +2258,19 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         optimizer otherwise.
         """
         if not self._use_greybox:
+            return False
+
+        # Grey-box uses EKF parameters directly.  The activation tier can
+        # reach CONFIDENT from profiler confidence alone, but the profiler
+        # doesn't tell us whether the EKF's R, C, and Q_hvac values are
+        # reliable.  Require minimum EKF confidence before trusting greybox.
+        if self.estimator.confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
+            _LOGGER.debug(
+                "Grey-box: EKF confidence %.0f%% < %.0f%% threshold "
+                "-- using heuristic optimizer",
+                self.estimator.confidence * 100,
+                DEFAULT_MODEL_CONFIDENCE_THRESHOLD * 100,
+            )
             return False
 
         # Standard or confident tier: use greybox
