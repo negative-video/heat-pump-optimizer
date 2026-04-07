@@ -381,6 +381,12 @@ class ScheduleOptimizer:
         n = len(ranked)
         score_percentiles = {hs.hour: i / max(n - 1, 1) for i, hs in enumerate(ranked)}
 
+        # Balance point for per-hour suppression: don't schedule heating
+        # when passive drift is positive (outdoor above balance point), or
+        # cooling when passive drift is negative (outdoor below balance point).
+        bp = getattr(self.model, "resist_balance_point", None) or 50.0
+        _BP_MARGIN = 2.0  # avoid flip-flopping right at the balance point
+
         entries = []
         for hs in hour_scores:
             pct = score_percentiles[hs.hour]
@@ -392,21 +398,31 @@ class ScheduleOptimizer:
                 h_min, h_max = comfort_min, comfort_max
             h_band = h_max - h_min
 
-            if mode == "cool":
+            # Per-hour suppression: when outdoor temp is on the wrong side
+            # of the balance point, the house is drifting in the direction
+            # that HVAC would push it -- scheduling HVAC is counterproductive.
+            suppress = False
+            if mode == "heat" and hs.outdoor_temp > bp + _BP_MARGIN:
+                suppress = True  # house warming passively, don't heat
+            elif mode == "cool" and hs.outdoor_temp < bp - _BP_MARGIN:
+                suppress = True  # house cooling passively, don't cool
+
+            if suppress:
+                target = h_min if mode == "heat" else h_max
+                target = round(target * 2) / 2
+                action = "coasting"
+            elif mode == "cool":
                 target = h_min + pct * h_band
+                target = round(target * 2) / 2
+                action = "pre-cooling" if pct < 0.33 else ("maintaining" if pct < 0.67 else "coasting")
             elif mode == "heat":
                 target = h_max - pct * h_band
+                target = round(target * 2) / 2
+                action = "pre-heating" if pct < 0.33 else ("maintaining" if pct < 0.67 else "coasting")
             else:
                 target = (h_min + h_max) / 2
-
-            target = round(target * 2) / 2  # 0.5°F thermostat resolution
-
-            if pct < 0.33:
-                action = "pre-cooling" if mode == "cool" else "pre-heating"
-            elif pct < 0.67:
+                target = round(target * 2) / 2
                 action = "maintaining"
-            else:
-                action = "coasting"
 
             entries.append(
                 ScheduleEntry(

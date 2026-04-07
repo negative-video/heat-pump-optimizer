@@ -52,6 +52,11 @@ class PerformanceModel:
         self.cool_setpoint = profile_data.get("setpoint", {}).get("cool", 72.6)
         self.heat_setpoint = profile_data.get("setpoint", {}).get("heat", 60.9)
 
+        # Solar-condition-specific resist trendlines (optional, from profiler)
+        # Keys: "sunny", "cloudy", "night" -> {"slope": float, "intercept": float}
+        self._solar_resist_trendlines: dict[str, dict[str, float]] = {}
+        self._solar_resist_balance_points: dict[str, float] = {}
+
     @classmethod
     def from_defaults(cls) -> PerformanceModel:
         """Create a conservative default model for cold-start learning mode.
@@ -272,32 +277,43 @@ class PerformanceModel:
             self._aux_heat_deltas, self._aux_heat_trendline, outdoor_temp
         )
 
-    def passive_drift(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
-        """Indoor °F change per hour with HVAC off (passive thermal drift).
+    def passive_drift(
+        self,
+        outdoor_temp: float,
+        indoor_temp: float | None = None,
+        solar_condition: str | None = None,
+    ) -> float:
+        """Indoor F change per hour with HVAC off (passive thermal drift).
 
         This IS the building's thermal model, measured directly.
-        Negative below ~50°F (house loses heat), positive above (house gains heat).
+        Negative below ~50F (house loses heat), positive above (house gains heat).
 
-        Real data examples (at nominal ~72°F indoor):
-          30°F outdoor -> ~-0.7°F/hr (house cooling)
-          50°F outdoor -> ~0°F/hr (equilibrium)
-          80°F outdoor -> ~+1.0°F/hr (house warming)
-          96°F outdoor -> ~+1.93°F/hr (rapid warming)
+        When solar_condition is provided ("sunny", "cloudy", or "night") and
+        solar-specific trendlines are available, uses the condition-specific
+        trendline for a more accurate prediction.  Falls back to the aggregate
+        trendline if the condition has insufficient data.
 
         When indoor_temp is provided, the drift is adjusted for the difference
-        between the actual indoor temp and the nominal ~72°F assumed by the
-        empirical lookup tables.  This prevents the simulation from diverging
-        when the simulated indoor temp moves away from the nominal.
+        between the actual indoor temp and the nominal ~72F assumed by the
+        empirical lookup tables.
         """
-        base = self._lookup_delta(
-            self._resist_deltas, self._resist_trendline, outdoor_temp
-        )
+        # Select trendline: solar-specific if available, else aggregate
+        trendline = self._resist_trendline
+        if solar_condition and solar_condition in self._solar_resist_trendlines:
+            trendline = self._solar_resist_trendlines[solar_condition]
+
+        # Use trendline directly (not bin lookup) for solar-specific predictions,
+        # since solar bins may not have the same bin coverage as the aggregate.
+        if solar_condition and solar_condition in self._solar_resist_trendlines:
+            base = trendline["slope"] * outdoor_temp + trendline["intercept"]
+        else:
+            base = self._lookup_delta(
+                self._resist_deltas, self._resist_trendline, outdoor_temp
+            )
+
         if indoor_temp is None:
             return base
-        # The trendline slope represents dT_drift / dT_outdoor.  The same
-        # slope applies to the indoor-outdoor delta: a warmer house loses
-        # heat faster (less positive drift), a cooler house retains more.
-        slope = self._resist_trendline["slope"] if self._resist_trendline else 0.03
+        slope = trendline["slope"] if trendline else 0.03
         return base - slope * (indoor_temp - 72.0)
 
     # ── Derived metrics ────────────────────────────────────────────

@@ -56,6 +56,8 @@ class HistoryDataPoint:
     setpoint: float | None  # °F
     humidity: float | None
     wind_speed_mph: float | None
+    attic_temp: float | None = None  # °F, for solar-aware profiler binning
+    sun_elevation: float | None = None  # degrees above horizon
 
     @property
     def valid(self) -> bool:
@@ -88,6 +90,7 @@ async def async_bootstrap_from_history(
     profiler: PerformanceProfiler,
     max_days: int = 10,
     indoor_temp_entities: list[str] | None = None,
+    attic_temp_entity: str | None = None,
 ) -> BootstrapResult:
     """Bootstrap learning subsystems from Home Assistant recorder history.
 
@@ -124,6 +127,8 @@ async def async_bootstrap_from_history(
         entity_ids.append(wind_speed_entity)
     if indoor_temp_entities:
         entity_ids.extend(indoor_temp_entities)
+    if attic_temp_entity:
+        entity_ids.append(attic_temp_entity)
 
     # De-duplicate
     entity_ids = list(dict.fromkeys(entity_ids))
@@ -204,6 +209,11 @@ async def async_bootstrap_from_history(
         ),
         start_time=start_time,
         end_time=end_time,
+        attic_states=_collect_sensor_states(
+            states, [attic_temp_entity] if attic_temp_entity else []
+        ) or None,
+        latitude=hass.config.latitude if hasattr(hass.config, "latitude") else None,
+        longitude=hass.config.longitude if hasattr(hass.config, "longitude") else None,
     )
 
     valid_points = [p for p in data_points if p.valid]
@@ -256,6 +266,9 @@ def _build_aligned_timeline(
     wind_states: list[tuple[datetime, float]],
     start_time: datetime,
     end_time: datetime,
+    attic_states: list[tuple[datetime, float]] | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
 ) -> list[HistoryDataPoint]:
     """Build a 5-minute aligned timeline from raw recorder states."""
 
@@ -380,6 +393,16 @@ def _build_aligned_timeline(
         humidity = _forward_fill_numeric(humidity_states, grid_time)
         wind = _forward_fill_numeric(wind_states, grid_time)
 
+        # Attic temp and sun elevation for solar-aware profiler binning
+        attic = (
+            _interpolate_numeric(attic_states, grid_time, MAX_OUTDOOR_GAP_MINUTES)
+            if attic_states else None
+        )
+        sun_elev = None
+        if latitude is not None and longitude is not None:
+            from ..adapters.forecast import estimate_solar_elevation
+            sun_elev = estimate_solar_elevation(latitude, longitude, grid_time)
+
         # Derive hvac_running from action
         hvac_running = hvac_action in ("cooling", "heating")
 
@@ -394,6 +417,8 @@ def _build_aligned_timeline(
                 setpoint=setpoint,
                 humidity=humidity,
                 wind_speed_mph=wind,
+                attic_temp=attic,
+                sun_elevation=sun_elev,
             )
         )
 
@@ -597,6 +622,8 @@ def _bootstrap_profiler(
             aux_heat_active=False,
             solar_irradiance=None,
             now=point.timestamp,
+            attic_temp=point.attic_temp,
+            sun_elevation=point.sun_elevation,
         )
         count += 1
 

@@ -55,10 +55,13 @@ class ThermalSimulator:
             outdoor_temp = self._interpolate_forecast(current_time, forecast)
             entry = self._get_schedule_entry(current_time, schedule)
 
+            # Solar condition for this time step (from forecast cloud cover)
+            solar_cond = self._interpolate_solar_condition(current_time, forecast)
+
             if passive_only or entry is None or entry.mode == "off":
                 # No HVAC - passive drift only
                 hvac_running = False
-                rate = self.model.passive_drift(outdoor_temp, indoor_temp)
+                rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
             elif entry.mode == "cool":
                 hvac_running = self._should_cool(indoor_temp, entry.target_temp)
                 if hvac_running:
@@ -68,7 +71,7 @@ class ThermalSimulator:
                     rate = self.model.cooling_delta(outdoor_temp, indoor_temp)
                     cumulative_runtime += dt_minutes
                 else:
-                    rate = self.model.passive_drift(outdoor_temp, indoor_temp)
+                    rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
             elif entry.mode == "heat":
                 hvac_running = self._should_heat(indoor_temp, entry.target_temp)
                 if hvac_running:
@@ -76,10 +79,10 @@ class ThermalSimulator:
                     rate = self.model.heating_delta(outdoor_temp, indoor_temp)
                     cumulative_runtime += dt_minutes
                 else:
-                    rate = self.model.passive_drift(outdoor_temp, indoor_temp)
+                    rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
             else:
                 hvac_running = False
-                rate = self.model.passive_drift(outdoor_temp, indoor_temp)
+                rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
 
             results.append(
                 SimulationPoint(
@@ -150,6 +153,35 @@ class ThermalSimulator:
         # Check if time equals the last entry's end_time
         if schedule and time == schedule[-1].end_time:
             return schedule[-1]
+        return None
+
+    @staticmethod
+    def _interpolate_solar_condition(
+        time: datetime, forecast: list[ForecastPoint],
+    ) -> str | None:
+        """Determine solar condition from the nearest forecast point's cloud cover.
+
+        Uses the profiler's forecast classification: cloud_cover < 0.3 = sunny,
+        > 0.7 = cloudy, night if sun_elevation <= 0.  Returns None if no data.
+        """
+        if not forecast:
+            return None
+
+        # Find the closest forecast point
+        closest = min(forecast, key=lambda pt: abs((pt.time - time).total_seconds()))
+        if abs((closest.time - time).total_seconds()) > 7200:
+            return None  # too far from any forecast point
+
+        sun_elev = closest.sun_elevation
+        if sun_elev is not None and sun_elev <= 0:
+            return "night"
+
+        cloud = closest.cloud_cover
+        if cloud is not None:
+            if cloud < 0.3:
+                return "sunny"
+            return "cloudy"
+
         return None
 
     # ── Convenience methods ────────────────────────────────────────

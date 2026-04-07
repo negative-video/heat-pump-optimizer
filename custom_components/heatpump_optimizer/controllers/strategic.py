@@ -255,7 +255,13 @@ class StrategicPlanner:
         comfort_cool: tuple[float, float],
         comfort_heat: tuple[float, float],
     ) -> bool:
-        """Detect a shoulder day that might need both heating and cooling."""
+        """Detect a shoulder day that might need both heating and cooling.
+
+        Also triggers on days where outdoor temps cross the balance point
+        significantly (cold morning + warm afternoon), even if the
+        afternoon isn't hot enough to need active cooling.  These days
+        need conservative scheduling to avoid pre-heating during warm hours.
+        """
         temps = [pt.outdoor_temp for pt in forecast]
         if not temps:
             return False
@@ -266,7 +272,14 @@ class StrategicPlanner:
         needs_cool = max_temp > comfort_cool[1] + SHOULDER_MARGIN_F
         needs_heat = min_temp < comfort_heat[0] - SHOULDER_MARGIN_F
 
-        return needs_cool and needs_heat
+        if needs_cool and needs_heat:
+            return True
+
+        # Balance-point crossing: cold morning + warm afternoon where
+        # passive drift reverses direction during the day.
+        bp = self.resist_balance_point
+        crosses_balance = min_temp < bp - 5 and max_temp > bp + 5
+        return crosses_balance
 
     @staticmethod
     def _apply_humidity_correction(

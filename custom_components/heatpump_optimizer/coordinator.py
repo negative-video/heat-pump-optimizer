@@ -531,6 +531,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             deadband=self._thermostat_deadband
         )
 
+        # Set rated HVAC capacity from user's tonnage config
+        if self._hvac_tonnage:
+            self.counterfactual.set_rated_capacity(
+                q_cool=self._hvac_tonnage * 12000.0,
+                q_heat=self._hvac_tonnage * 12000.0 * 1.1,
+            )
+
         # Coordinator state
         self._phase: str = PHASE_IDLE
         self._active: bool = True
@@ -944,7 +951,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self._last_tactical_correction = tactical_result.setpoint_correction
 
             # Classify phase
-            self._phase = self._classify_phase(current_entry)
+            self._phase = self._classify_phase(current_entry, thermo_state.indoor_temp)
 
             # Apply tactical correction or write scheduled setpoint
             if tactical_result.state == TacticalState.DISTURBED:
@@ -1124,53 +1131,53 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("Baseline capture failed", exc_info=True)
 
         # ── Counterfactual simulation step ─────────────────────────
+        # The counterfactual models a dual-setpoint (heat_cool) thermostat
+        # running at the user's configured comfort midpoints, adjusted by
+        # current occupancy.  No 7-day baseline capture needed.
 
         try:
-            if self.baseline_capture.template is not None and outdoor_temp is not None:
-                baseline_setpoint = self.baseline_capture.get_baseline_setpoint(now)
-                stored_mode = self.baseline_capture.get_baseline_mode(now)
-                # Re-derive mode from current weather to avoid cross-season
-                # mismatch (e.g. summer-captured "cool" used in winter).
-                if stored_mode == "off":
-                    baseline_mode = "off"
-                elif stored_mode is not None:
-                    baseline_mode = self.strategic.detect_mode(
-                        self.strategic.forecast_snapshot or []
-                    )
-                    if baseline_mode == "off":
-                        # Near balance point — stored mode is a better guess
-                        baseline_mode = stored_mode
-                else:
-                    baseline_mode = None
-                if baseline_setpoint is not None and baseline_mode is not None:
-                    cloud_cover = None
-                    sun_elevation = None
-                    if new_forecast:
-                        cloud_cover = new_forecast[0].cloud_cover
-                        sun_elevation = new_forecast[0].sun_elevation
+            if outdoor_temp is not None:
+                # Construct baseline setpoints from user's comfort config
+                effective_mode = self.occupancy.get_effective_mode(
+                    self._occupancy_timeline or None
+                )
+                from .adapters.occupancy import OccupancyAdapter, OccupancyMode
+                adj_cool = OccupancyAdapter.adjust_comfort_for_mode(
+                    self.comfort_cool, "cool", effective_mode,
+                )
+                adj_heat = OccupancyAdapter.adjust_comfort_for_mode(
+                    self.comfort_heat, "heat", effective_mode,
+                )
+                # Baseline setpoints: midpoints of the occupancy-adjusted comfort ranges
+                baseline_sp_low = (adj_heat[0] + adj_heat[1]) / 2
+                baseline_sp_high = (adj_cool[0] + adj_cool[1]) / 2
 
-                    is_precip = new_forecast[0].precipitation if new_forecast else False
+                cloud_cover = None
+                sun_elevation = None
+                if new_forecast:
+                    cloud_cover = new_forecast[0].cloud_cover
+                    sun_elevation = new_forecast[0].sun_elevation
 
-                    self.counterfactual.step(
-                        now=now,
-                        outdoor_temp=outdoor_temp,
-                        baseline_setpoint=baseline_setpoint,
-                        baseline_mode=baseline_mode,
-                        estimator=self.estimator,
-                        dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
-                        cloud_cover=cloud_cover,
-                        sun_elevation=sun_elevation,
-                        carbon_intensity=co2_intensity,
-                        electricity_rate=elec_rate,
-                        real_indoor_temp=thermo_state.indoor_temp,
-                        people_home_count=self.occupancy.get_people_home_count(),
-                        precipitation=is_precip,
-                        indoor_humidity=self._current_indoor_humidity,
-                        aux_threshold_f=(
-                            self.aux_heat_learner.threshold_f
-                            if self.aux_heat_learner.is_learned else None
-                        ),
-                    )
+                # Use profiler model for counterfactual physics
+                active_model = self._get_active_model()
+
+                self.counterfactual.step(
+                    now=now,
+                    outdoor_temp=outdoor_temp,
+                    setpoint_low=baseline_sp_low,
+                    setpoint_high=baseline_sp_high,
+                    model=active_model,
+                    dt_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                    cloud_cover=cloud_cover,
+                    sun_elevation=sun_elevation,
+                    carbon_intensity=co2_intensity,
+                    electricity_rate=elec_rate,
+                    real_indoor_temp=thermo_state.indoor_temp,
+                    aux_threshold_f=(
+                        self.aux_heat_learner.threshold_f
+                        if self.aux_heat_learner.is_learned else None
+                    ),
+                )
         except Exception:
             _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
 
@@ -1178,6 +1185,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # The profiler handles hvac_mode="off" internally (sets _previous_*
         # for interval tracking but doesn't record a delta). We must call it
         # even when off so that the next non-off observation has valid timing.
+
+        # Read attic temp and sun elevation for solar-aware profiler binning.
+        # These are also read later for the EKF; the sensor hub caches readings
+        # so the second read is free.
+        _profiler_attic = self.sensor_hub.read_attic_temp()
+        _profiler_sun_elev = self.sensor_hub.read_sun_elevation()
 
         try:
             if (
@@ -1196,6 +1209,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     now=now,
                     appliance_btu=self.appliance_manager.total_thermal_impact_btu(),
                     c_air=c_air,
+                    attic_temp=_profiler_attic.value if _profiler_attic else None,
+                    sun_elevation=_profiler_sun_elev,
                 )
             else:
                 self._last_profiler_status = "skipped_no_temps"
@@ -1764,6 +1779,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.counterfactual = CounterfactualSimulator(
             deadband=self._thermostat_deadband
         )
+        self._set_counterfactual_capacity()
 
         # Reset learning flags
         self._confidence_threshold_reached = False
@@ -1791,6 +1807,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         await self.async_request_refresh()
 
         _LOGGER.info("Model reset complete — learning from scratch with fresh EKF")
+
+    def _set_counterfactual_capacity(self) -> None:
+        """Set rated HVAC capacity on the counterfactual from tonnage config."""
+        if self._hvac_tonnage:
+            self.counterfactual.set_rated_capacity(
+                q_cool=self._hvac_tonnage * 12000.0,
+                q_heat=self._hvac_tonnage * 12000.0 * 1.1,
+            )
 
     async def async_force_reoptimize(self) -> None:
         """Force immediate re-optimization (service call)."""
@@ -2222,70 +2246,32 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             )
 
     def _get_active_model(self):
-        """Get the performance model for heuristic optimization.
+        """Get the performance model for optimization.
 
-        Priority:
-        1. PerformanceProfiler (measured reality) — if confidence >= 0.7
-        2. Adaptive model (EKF-derived) — if confidence above threshold
-        3. Static default model — fallback
-        (Not used when grey-box LP optimizer is active.)
+        Profiler-primary: always prefer the profiler's measured model.
+        Only fall back to EKF-adaptive or static defaults when the
+        profiler has insufficient data.
         """
-        # Profiler: measured performance trumps EKF-derived estimates
-        if self.profiler.confidence() >= 0.7:
-            profiler_model = self.profiler.to_performance_model()
-            if profiler_model is not None:
-                return profiler_model
+        # Profiler: measured performance from direct observation
+        profiler_model = self.profiler.to_performance_model()
+        if profiler_model is not None:
+            return profiler_model
 
-        if not self._use_adaptive and not self._use_greybox:
-            return self.model
-
-        # Use adaptive model when activation tier permits it
-        tier = self._activation_tier
-        if tier != ACTIVATION_TIER_LEARNING:
+        # Fallback: adaptive model (EKF-derived) if available and not learning
+        if (self._use_adaptive or self._use_greybox) and self._activation_tier != ACTIVATION_TIER_LEARNING:
             return self.adaptive_model
-        else:
-            _LOGGER.debug(
-                "Adaptive model: activation tier '%s' — using static fallback",
-                tier,
-            )
-            return self.model
+
+        # Last resort: conservative static defaults
+        return self.model
 
     def _should_use_greybox(self) -> bool:
         """Determine whether to use the grey-box LP optimizer.
 
-        Grey-box requires the Kalman filter to have reached minimum
-        confidence (global or mode-specific). Falls back to the heuristic
-        optimizer otherwise.
+        Deprecated: the heuristic optimizer with profiler-measured data
+        produces more accurate results than the LP with EKF-derived
+        parameters.  Always returns False.  The greybox code is retained
+        for potential future use with validated physics models.
         """
-        if not self._use_greybox:
-            return False
-
-        # Grey-box uses EKF parameters directly.  The activation tier can
-        # reach CONFIDENT from profiler confidence alone, but the profiler
-        # doesn't tell us whether the EKF's R, C, and Q_hvac values are
-        # reliable.  Require minimum EKF confidence before trusting greybox.
-        if self.estimator.confidence < DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
-            _LOGGER.debug(
-                "Grey-box: EKF confidence %.0f%% < %.0f%% threshold "
-                "-- using heuristic optimizer",
-                self.estimator.confidence * 100,
-                DEFAULT_MODEL_CONFIDENCE_THRESHOLD * 100,
-            )
-            return False
-
-        # Standard or confident tier: use greybox
-        tier = self._activation_tier
-        if tier in (ACTIVATION_TIER_STANDARD, ACTIVATION_TIER_CONFIDENT):
-            return True
-
-        # Conservative tier: use greybox but with wider comfort bands
-        # (handled by _active_comfort_range)
-        if tier == ACTIVATION_TIER_CONSERVATIVE:
-            return True
-
-        _LOGGER.debug(
-            "Grey-box: activation tier '%s' — using heuristic optimizer", tier,
-        )
         return False
 
     # ── Helpers ─────────────────────────────────────────────────────
@@ -2376,34 +2362,35 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         return tier
 
     def _compute_activation_tier(self) -> str:
-        """Compute the activation tier (called once per cycle, cached by property)."""
-        if not self.baseline_capture.is_ready:
-            return ACTIVATION_TIER_LEARNING
+        """Compute the activation tier (called once per cycle, cached by property).
 
-        global_conf = self.estimator.confidence
+        Profiler-primary: the profiler is the main confidence signal.
+        The EKF confidence is checked only as a secondary gate for greybox.
+        Baseline capture is no longer required -- the profiler bootstraps
+        from recorder history and can produce a model within minutes.
+        """
+        profiler_conf = self.profiler.confidence()
 
-        # Confident: strong global confidence or strong profiler mode data
-        if global_conf >= 0.7 or self.profiler.confidence() >= 0.7:
+        # Confident: profiler has broad coverage or strong EKF
+        if profiler_conf >= 0.7 or self.estimator.confidence >= 0.7:
             return ACTIVATION_TIER_CONFIDENT
 
-        # Standard: global threshold met, OR mode-specific EKF confidence
-        # combined with profiler validation
-        if global_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
-            return ACTIVATION_TIER_STANDARD
-
-        # Check mode-specific readiness
+        # Standard: profiler has moderate coverage or mode-specific readiness
         current_mode = self.thermostat.get_active_mode()
         profiler_mode = "heat_1" if current_mode == "heat" else "cool_1"
-        mode_conf = self.estimator.mode_confidence(current_mode)
         profiler_mode_conf = self.profiler.confidence(profiler_mode)
-        if mode_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD or profiler_mode_conf >= 0.5:
+        if profiler_conf >= 0.5 or profiler_mode_conf >= 0.5:
             return ACTIVATION_TIER_STANDARD
 
-        # Conservative: baseline captured + good passive drift + minimum HVAC obs
+        # Conservative: good passive drift data + some active mode observations
         drift_conf = self.profiler.confidence("resist")
         mode_obs = self.profiler.mode_observation_count(profiler_mode)
         if drift_conf >= CONSERVATIVE_DRIFT_CONFIDENCE and mode_obs >= CONSERVATIVE_MIN_MODE_OBS:
             return ACTIVATION_TIER_CONSERVATIVE
+
+        # Fallback: check if baseline is captured (legacy path)
+        if self.baseline_capture.is_ready and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
+            return ACTIVATION_TIER_STANDARD
 
         return ACTIVATION_TIER_LEARNING
 
@@ -2595,10 +2582,21 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 return entry
         return None
 
-    def _classify_phase(self, entry: ScheduleEntry) -> str:
-        """Determine phase from schedule entry reason text."""
+    def _classify_phase(
+        self, entry: ScheduleEntry, indoor_temp: float | None = None,
+    ) -> str:
+        """Determine phase from schedule entry reason text and current conditions."""
         from .const import PHASE_COASTING, PHASE_MAINTAINING, PHASE_PRE_COOLING, PHASE_PRE_HEATING
         reason = entry.reason.lower()
+
+        # Override: if indoor temp already at or beyond the target, the HVAC
+        # would not actually run -- label as maintaining, not pre-heating/cooling.
+        if indoor_temp is not None:
+            if "pre-heating" in reason and indoor_temp >= entry.target_temp - 0.5:
+                return PHASE_MAINTAINING
+            if "pre-cooling" in reason and indoor_temp <= entry.target_temp + 0.5:
+                return PHASE_MAINTAINING
+
         if "pre-cooling" in reason:
             return PHASE_PRE_COOLING
         if "pre-heating" in reason:
@@ -2933,6 +2931,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             profiler=self.profiler,
             max_days=DEFAULT_HISTORY_BOOTSTRAP_DAYS,
             indoor_temp_entities=self.sensor_hub._indoor_temp_entities,
+            attic_temp_entity=getattr(self.sensor_hub, "_attic_temp_entity", None),
         )
 
         self._history_bootstrap_result = result.reason if not result.success else "ok"
