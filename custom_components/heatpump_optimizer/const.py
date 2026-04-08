@@ -1,7 +1,7 @@
 """Constants for the Heat Pump Optimizer integration."""
 
 DOMAIN = "heatpump_optimizer"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 PLATFORMS = ["sensor", "binary_sensor", "switch"]
 
 # Config keys
@@ -54,6 +54,11 @@ DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS = 2
 DEFAULT_STALE_FORECAST_HOURS = 6
 DEFAULT_UPDATE_INTERVAL_MINUTES = 5
 DEFAULT_HVAC_POWER_WATTS = 3500  # typical heat pump cooling draw; overridden by tonnage+SEER if provided
+DEFAULT_FAN_ONLY_WATTS = 300     # blower fan only, no compressor
+
+# Mode-aware power estimation (optional overrides for when no power sensor exists)
+CONF_COOLING_WATTS = "cooling_watts"
+CONF_HEATING_WATTS = "heating_watts"
 DEFAULT_AUX_HEAT_TYPE = "unknown"
 AUX_HEAT_TYPES = ["none", "electric_strip", "gas", "oil", "unknown"]
 DEFAULT_CARBON_WEIGHT = 0.0
@@ -159,6 +164,12 @@ CONF_CRAWLSPACE_TEMP_ENTITY = "crawlspace_temp_entity"
 
 # Aux heat override (optional — for thermostats that don't report aux heat)
 CONF_AUX_HEAT_OVERRIDE_ENTITY = "aux_heat_override_entity"
+
+# Duct-based aux heat detection (optional — supply air temp sensor)
+CONF_DUCT_TEMP_ENTITY = "duct_temp_entity"
+DEFAULT_DUCT_AUX_THRESHOLD_F = 110.0     # absolute supply temp = aux heat
+DEFAULT_DUCT_AUX_RATE_THRESHOLD_F = 100.0  # supply temp requiring rate check
+DEFAULT_DUCT_AUX_RATE_MIN = 3.0           # F/min rise rate = aux heat
 
 # Occupancy (multi-entity, replaces singular CONF_OCCUPANCY_ENTITY)
 CONF_OCCUPANCY_ENTITIES = "occupancy_entities"
@@ -288,6 +299,35 @@ DEFAULT_HUMIDITY_SQUELCH_OFF = 55.0   # %RH — deactivate squelch below this
 
 # Setpoint switching penalty
 DEFAULT_SWITCHING_PENALTY_WEIGHT = 0.3  # soft penalty for consecutive setpoint changes
+
+# Zone-aware presence (extends existing presence detection)
+CONF_HOME_ZONE_STATES = "home_zone_states"  # extra person states that count as home
+DEFAULT_HOME_ZONE_STATES: list[str] = []    # empty = only "home"/"on" count
+
+# Thermostat profile control (optional — controls home/away/sleep comfort profile)
+CONF_PROFILE_CONTROL_ENABLED = "profile_control_enabled"
+CONF_PROFILE_ENTITY = "profile_entity"            # select.* entity ID
+CONF_PROFILE_ENTITY_TYPE = "profile_entity_type"  # "select" or "preset"
+CONF_PROFILE_MAP_HOME = "profile_map_home"
+CONF_PROFILE_MAP_AWAY = "profile_map_away"
+CONF_PROFILE_MAP_SLEEP = "profile_map_sleep"
+CONF_ARRIVAL_SLEEP_CUTOFF = "arrival_sleep_cutoff"
+CONF_SLEEP_AWAY_OVERRIDE = "sleep_away_override"
+CONF_SLEEP_AWAY_DELAY_MINUTES = "sleep_away_delay_minutes"
+
+PROFILE_TYPE_SELECT = "select"
+PROFILE_TYPE_PRESET = "preset"
+
+DEFAULT_PROFILE_CONTROL_ENABLED = False
+DEFAULT_PROFILE_ENTITY_TYPE = PROFILE_TYPE_SELECT
+DEFAULT_PROFILE_MAP_HOME = "home"
+DEFAULT_PROFILE_MAP_AWAY = "away"
+DEFAULT_PROFILE_MAP_SLEEP = "sleep"
+DEFAULT_ARRIVAL_SLEEP_CUTOFF = "21:30"
+DEFAULT_SLEEP_AWAY_OVERRIDE = True
+DEFAULT_SLEEP_AWAY_DELAY_MINUTES = 10
+
+EVENT_PROFILE_CHANGED = f"{DOMAIN}_profile_changed"
 
 # Resilience constants
 CONF_WEATHER_ENTITIES = "weather_entities"

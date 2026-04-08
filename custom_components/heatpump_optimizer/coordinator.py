@@ -30,6 +30,7 @@ from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.calendar_occupancy import CalendarOccupancyAdapter
 from .adapters.forecast import async_get_forecast, async_get_forecast_multi, enrich_forecast_with_grid_data, populate_sun_elevation
 from .adapters.occupancy import OccupancyAdapter, OccupancyMode
+from .adapters.profile import ProfileAdapter
 from .adapters.appliance_manager import ApplianceManager
 from .adapters.sensor_hub import SensorHub
 from .adapters.thermostat import ThermostatAdapter
@@ -44,8 +45,10 @@ from .const import (
     CONF_AUX_HEAT_OVERRIDE_ENTITY,
     CONF_CARBON_WEIGHT,
     CONF_CO2_ENTITY,
+    CONF_COOLING_WATTS,
     CONF_COST_WEIGHT,
     CONF_CRAWLSPACE_TEMP_ENTITY,
+    CONF_DUCT_TEMP_ENTITY,
     CONF_AUXILIARY_APPLIANCES,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
@@ -56,6 +59,7 @@ from .const import (
     CONF_ELECTRICITY_RATE_ENTITY,
     CONF_GRID_IMPORT_ENTITY,
     CONF_HVAC_POWER_DEFAULT_WATTS,
+    CONF_HEATING_WATTS,
     CONF_HVAC_POWER_ENTITY,
     CONF_HOME_SQFT,
     CONF_HVAC_TONNAGE,
@@ -80,6 +84,25 @@ from .const import (
     CONF_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_OCCUPANCY_ENTITIES,
+    CONF_HOME_ZONE_STATES,
+    CONF_PROFILE_CONTROL_ENABLED,
+    CONF_PROFILE_ENTITY,
+    CONF_PROFILE_ENTITY_TYPE,
+    CONF_PROFILE_MAP_HOME,
+    CONF_PROFILE_MAP_AWAY,
+    CONF_PROFILE_MAP_SLEEP,
+    CONF_ARRIVAL_SLEEP_CUTOFF,
+    CONF_SLEEP_AWAY_OVERRIDE,
+    CONF_SLEEP_AWAY_DELAY_MINUTES,
+    DEFAULT_PROFILE_CONTROL_ENABLED,
+    DEFAULT_PROFILE_ENTITY_TYPE,
+    DEFAULT_PROFILE_MAP_HOME,
+    DEFAULT_PROFILE_MAP_AWAY,
+    DEFAULT_PROFILE_MAP_SLEEP,
+    DEFAULT_ARRIVAL_SLEEP_CUTOFF,
+    DEFAULT_SLEEP_AWAY_OVERRIDE,
+    DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
+    EVENT_PROFILE_CHANGED,
     CONF_PRECONDITIONING_BUFFER_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
@@ -109,6 +132,9 @@ from .const import (
     DEFAULT_SUN_ENTITY,
     DEFAULT_CARBON_WEIGHT,
     DEFAULT_COST_WEIGHT,
+    DEFAULT_DUCT_AUX_RATE_MIN,
+    DEFAULT_DUCT_AUX_RATE_THRESHOLD_F,
+    DEFAULT_DUCT_AUX_THRESHOLD_F,
     DEFAULT_HVAC_POWER_WATTS,
     DEFAULT_MODEL_CONFIDENCE_THRESHOLD,
     ACTIVATION_TIER_LEARNING,
@@ -250,6 +276,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._carbon_weight: float = opts.get(CONF_CARBON_WEIGHT, DEFAULT_CARBON_WEIGHT)
         self._cost_weight: float = opts.get(CONF_COST_WEIGHT, DEFAULT_COST_WEIGHT)
         self._aux_heat_override_entity_id: str | None = opts.get(CONF_AUX_HEAT_OVERRIDE_ENTITY) or None
+        self._duct_temp_entity: str | None = opts.get(CONF_DUCT_TEMP_ENTITY) or None
+        self._duct_temp_buffer: list[tuple[float, float]] = []  # (timestamp_s, temp_f)
 
         # Physical system specs — merged into opts by __init__.py
         # (onboarding data merged first, options flow overrides second)
@@ -324,8 +352,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             door_window_entities=opts.get(CONF_DOOR_WINDOW_ENTITIES) or [],
             attic_temp_entity=opts.get(CONF_ATTIC_TEMP_ENTITY),
             crawlspace_temp_entity=opts.get(CONF_CRAWLSPACE_TEMP_ENTITY),
+            duct_temp_entity=opts.get(CONF_DUCT_TEMP_ENTITY),
             power_entity=self._power_entity_id,
             power_default_watts=self._power_default_watts,
+            cooling_watts=opts.get(CONF_COOLING_WATTS),
+            heating_watts=opts.get(CONF_HEATING_WATTS),
+            aux_heat_kw=self._aux_heat_kw,
             co2_entity=self._co2_entity_id,
             rate_entity=self._rate_entity_id,
             flat_rate=self._flat_rate,
@@ -459,7 +491,42 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Adapters (HA ↔ engine)
         self.thermostat = ThermostatAdapter(hass, climate_entity_id)
-        self.occupancy = OccupancyAdapter(hass, entity_ids=occupancy_entity_ids)
+        self.occupancy = OccupancyAdapter(
+            hass,
+            entity_ids=occupancy_entity_ids,
+            home_zone_states=opts.get(CONF_HOME_ZONE_STATES, []),
+        )
+
+        # Thermostat profile control (optional — home/away/sleep presets)
+        self._profile_adapter: ProfileAdapter | None = None
+        if opts.get(CONF_PROFILE_CONTROL_ENABLED, DEFAULT_PROFILE_CONTROL_ENABLED):
+            profile_entity = opts.get(CONF_PROFILE_ENTITY)
+            profile_type = opts.get(
+                CONF_PROFILE_ENTITY_TYPE, DEFAULT_PROFILE_ENTITY_TYPE
+            )
+            if profile_entity or profile_type == "preset":
+                self._profile_adapter = ProfileAdapter(
+                    hass,
+                    entity_type=profile_type,
+                    entity_id=profile_entity,
+                    climate_entity_id=climate_entity_id,
+                    profile_map={
+                        "home": opts.get(CONF_PROFILE_MAP_HOME, DEFAULT_PROFILE_MAP_HOME),
+                        "away": opts.get(CONF_PROFILE_MAP_AWAY, DEFAULT_PROFILE_MAP_AWAY),
+                        "sleep": opts.get(CONF_PROFILE_MAP_SLEEP, DEFAULT_PROFILE_MAP_SLEEP),
+                    },
+                )
+        self._arrival_sleep_cutoff: str = opts.get(
+            CONF_ARRIVAL_SLEEP_CUTOFF, DEFAULT_ARRIVAL_SLEEP_CUTOFF
+        )
+        self._sleep_away_override: bool = opts.get(
+            CONF_SLEEP_AWAY_OVERRIDE, DEFAULT_SLEEP_AWAY_OVERRIDE
+        )
+        self._sleep_away_delay_minutes: int = opts.get(
+            CONF_SLEEP_AWAY_DELAY_MINUTES, DEFAULT_SLEEP_AWAY_DELAY_MINUTES
+        )
+        self._last_profile_mode: str | None = None
+        self._away_delay_pending_since: datetime | None = None
 
         # Calendar-based occupancy scheduling (optional, multi-calendar)
         calendar_entities = opts.get(CONF_CALENDAR_ENTITIES, [])
@@ -584,6 +651,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Storage
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self._unsub_state_listener = None
+        self._unsub_occupancy_listener = None
 
     # ── Setup / Shutdown ────────────────────────────────────────────
 
@@ -611,6 +679,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self._handle_thermostat_state_change,
         )
 
+        # Profile control: listen for person entity changes for fast updates
+        if self._profile_adapter and self.occupancy.entity_ids:
+            self._unsub_occupancy_listener = async_track_state_change_event(
+                self.hass,
+                self.occupancy.entity_ids,
+                self._handle_occupancy_state_change,
+            )
+
         # Run initial optimization (non-fatal — weather/thermostat may not be ready yet)
         try:
             await self._run_strategic_optimization()
@@ -628,6 +704,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         if self._unsub_state_listener:
             self._unsub_state_listener()
+        if self._unsub_occupancy_listener:
+            self._unsub_occupancy_listener()
 
         # Write safe midpoint so thermostat doesn't hold an extreme temp
         thermo_state = self.thermostat.read_state()
@@ -1030,7 +1108,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # ── Shared sensor reads (used by savings, counterfactual, profiler) ──
 
         hvac_running = self._is_hvac_running(thermo_state)
-        power_watts = self.sensor_hub.read_power_draw()
+
+        # Aux heat state — computed before power draw so mode-aware estimation
+        # can use the correct wattage (resistive strips vs compressor)
+        aux_heat_active = self._is_aux_heat_running(thermo_state)
+        self._cached_aux_heat_active = aux_heat_active
+
+        hvac_action = getattr(thermo_state, "hvac_action", None) if thermo_state else None
+        power_watts = self.sensor_hub.read_power_draw(
+            hvac_action=hvac_action,
+            aux_heat_active=aux_heat_active,
+        )
         co2_intensity = self.sensor_hub.read_co2_intensity()
         elec_rate = self.sensor_hub.read_electricity_rate()
         solar_reading = self.sensor_hub.read_solar_production()
@@ -1039,11 +1127,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.strategic.forecast_snapshot
         )
         outdoor_temp = outdoor_reading.value if outdoor_reading else None
-
-        # Aux heat state (computed once, reused across savings/EKF/learner)
-        aux_heat_active = self._is_aux_heat_running(thermo_state)
-        # Cache for use in strategic optimization (called from other async paths)
-        self._cached_aux_heat_active = aux_heat_active
 
         # Effective outdoor temp for aux learner (wind-chill-adjusted if available)
         _eff_outdoor = outdoor_temp
@@ -1366,6 +1449,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     "calendar_mode": "away",
                     "effective_mode": "home",
                 })
+
+        # Profile control: update thermostat profile on occupancy transitions
+        if self._profile_adapter is not None and not self._monitor_only:
+            await self._update_thermostat_profile(effective_mode, thermo_state)
 
         # Apply preemptive override learning adjustments
         now_hour = datetime.now(timezone.utc).hour
@@ -1865,6 +1952,92 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Set occupancy mode (service call)."""
         self.occupancy.force_mode(mode)
 
+    # ── Thermostat profile control ──────────────────────────────────
+
+    async def _update_thermostat_profile(
+        self,
+        effective_mode: OccupancyMode,
+        thermo_state: Any,
+    ) -> None:
+        """Update thermostat comfort profile based on occupancy + time-of-day."""
+        desired = self._determine_desired_profile(effective_mode)
+        if desired == self._last_profile_mode:
+            self._away_delay_pending_since = None
+            return
+
+        # HVAC-active delay for transitions to "away"
+        if desired == "away" and self._should_delay_away_transition(thermo_state):
+            return
+
+        old_profile = self._last_profile_mode
+        success = await self._profile_adapter.async_set_profile(desired)  # type: ignore[union-attr]
+        if success:
+            self._last_profile_mode = desired
+            self._away_delay_pending_since = None
+            self._fire_event(EVENT_PROFILE_CHANGED, {
+                "old_profile": old_profile,
+                "new_profile": desired,
+                "effective_mode": effective_mode.value,
+            })
+
+    def _determine_desired_profile(self, effective_mode: OccupancyMode) -> str:
+        """Map occupancy mode + time-of-day to thermostat profile name."""
+        if effective_mode in (OccupancyMode.AWAY, OccupancyMode.VACATION):
+            return "away"
+
+        # HOME: check sleep window
+        if (
+            self.sleep_config.get("enabled")
+            and StrategicPlanner._is_in_sleep_window(
+                datetime.now(timezone.utc), self.sleep_config
+            )
+        ):
+            return "sleep"
+
+        # Arrival cutoff: if transitioning from away and it's late, use sleep
+        if self._last_profile_mode == "away":
+            try:
+                parts = self._arrival_sleep_cutoff.split(":")
+                cutoff = dt_time(int(parts[0]), int(parts[1]))
+            except (ValueError, IndexError):
+                cutoff = dt_time(21, 30)
+            if dt_util.now().time() >= cutoff:
+                return "sleep"
+
+        return "home"
+
+    def _should_delay_away_transition(self, thermo_state: Any) -> bool:
+        """Check if away transition should be delayed due to active HVAC."""
+        if not self._sleep_away_override:
+            return False
+        if self._sleep_away_delay_minutes <= 0:
+            return False
+
+        hvac_action = getattr(thermo_state, "hvac_action", None)
+        if hvac_action not in ("heating", "cooling"):
+            return False
+
+        now = datetime.now(timezone.utc)
+        if self._away_delay_pending_since is None:
+            self._away_delay_pending_since = now
+            _LOGGER.info(
+                "Delaying away profile transition -- HVAC is %s "
+                "(will wait up to %d min)",
+                hvac_action,
+                self._sleep_away_delay_minutes,
+            )
+            return True
+
+        elapsed = (now - self._away_delay_pending_since).total_seconds() / 60.0
+        if elapsed < self._sleep_away_delay_minutes:
+            return True
+
+        _LOGGER.info(
+            "Away transition delay expired (%.1f min) -- proceeding",
+            elapsed,
+        )
+        return False
+
     async def async_demand_response(self, mode: str, duration_minutes: int) -> None:
         """Activate or deactivate demand response mode.
 
@@ -2031,6 +2204,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if old_state and old_state.state != new_state.state:
             if self.watchdog.check_mode_change(new_state.state):
                 self.hass.async_create_task(self._safe_reoptimize())
+
+    @callback
+    def _handle_occupancy_state_change(self, event) -> None:
+        """React to person entity state changes for immediate profile updates."""
+        if self._profile_adapter and not self._monitor_only:
+            self.hass.async_create_task(self.async_request_refresh())
 
     # ── Model tracker feeding ───────────────────────────────────────
 
@@ -2986,21 +3165,67 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     def _is_aux_heat_running(self, thermo_state) -> bool:
         """Check if auxiliary/emergency heat is currently running."""
-        # User-provided override entity takes priority
+        # Priority 1: User-provided override entity
         if self._aux_heat_override_entity_id:
             state = self.hass.states.get(self._aux_heat_override_entity_id)
             if state and state.state not in ("unavailable", "unknown"):
                 return state.state == "on"
-            # Override unavailable — fall through to thermostat detection
+            # Override unavailable — fall through
 
+        # Priority 2: Native duct temperature detection
+        if self._duct_temp_entity:
+            is_heating = (
+                thermo_state is not None
+                and thermo_state.available
+                and getattr(thermo_state, "hvac_action", None) == "heating"
+            )
+            if is_heating:
+                duct_result = self._detect_aux_heat_from_duct()
+                if duct_result is not None:
+                    return duct_result
+
+        # Priority 3: Thermostat hvac_action
         if thermo_state is None or not thermo_state.available:
             return False
         action = getattr(thermo_state, "hvac_action", None)
         if action:
             return action in ("aux_heating", "emergency_heating")
-        # Some thermostats expose aux heat as an attribute
+        # Priority 4: Thermostat aux_heat attribute
         attrs = getattr(thermo_state, "attributes", {})
         return bool(attrs.get("aux_heat", False))
+
+    def _detect_aux_heat_from_duct(self) -> bool | None:
+        """Detect aux heat from supply duct temperature and rate of change.
+
+        Returns True if aux heat is likely running, False if not,
+        None if insufficient data or sensor unavailable.
+        """
+        reading = self.sensor_hub.read_duct_temp()
+        if reading is None or reading.stale:
+            return None
+
+        now_ts = reading.timestamp.timestamp()
+        duct_temp = reading.value
+
+        # Append to ring buffer, trim to last 5 readings
+        self._duct_temp_buffer.append((now_ts, duct_temp))
+        if len(self._duct_temp_buffer) > 5:
+            self._duct_temp_buffer = self._duct_temp_buffer[-5:]
+
+        # High absolute temperature = almost certainly resistive heat
+        if duct_temp >= DEFAULT_DUCT_AUX_THRESHOLD_F:
+            return True
+
+        # Moderate temperature + rapid rise = aux heat starting up
+        if duct_temp >= DEFAULT_DUCT_AUX_RATE_THRESHOLD_F and len(self._duct_temp_buffer) >= 2:
+            oldest_ts, oldest_temp = self._duct_temp_buffer[0]
+            elapsed_min = (now_ts - oldest_ts) / 60.0
+            if elapsed_min > 0:
+                rate = (duct_temp - oldest_temp) / elapsed_min
+                if rate >= DEFAULT_DUCT_AUX_RATE_MIN:
+                    return True
+
+        return False
 
     # ── Diagnostic helpers ─────────────────────────────────────────
 
@@ -3349,6 +3574,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ),
             "baseline_kwh_today": today_savings.total_baseline_kwh,
             "actual_kwh_today": today_savings.total_actual_kwh,
+            "actual_kwh_cumulative": cumulative["kwh_actual"],
             "worst_case_kwh_today": today_savings.total_worst_case_kwh,
             "savings_kwh_cumulative": (
                 cumulative["kwh_saved"]
@@ -3517,6 +3743,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             ),
             "aux_heat_kwh_today": today_savings.total_aux_heat_kwh,
             "avoided_aux_heat_kwh_today": today_savings.total_avoided_aux_kwh,
+
+            # Profile control
+            "profile_control": {
+                "enabled": self._profile_adapter is not None,
+                "current_profile": (
+                    self._profile_adapter.current_profile
+                    if self._profile_adapter else None
+                ),
+                "last_set_profile": self._last_profile_mode,
+                "entity": (
+                    self._profile_adapter.target_entity_id
+                    if self._profile_adapter else None
+                ),
+            },
         }
 
     def _next_transition_info(self) -> dict[str, str] | None:
@@ -3628,9 +3868,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         else:
             sources["outdoor_humidity"] = {"source": "none", "stale": True, "status": "unavailable"}
 
-        # Power provenance
+        # Power provenance (diagnostic snapshot — no mode context needed)
         total_count += 1
-        power = self.sensor_hub.read_power_draw()
+        power = self.sensor_hub.read_power_draw()  # legacy fallback OK for diagnostics
         if power is not None:
             sources["power"] = {"status": "ok", "value": power}
             healthy_count += 1

@@ -51,11 +51,13 @@ from .const import (
     CONF_COMFORT_COOL_MIN,
     CONF_COMFORT_HEAT_MAX,
     CONF_COMFORT_HEAT_MIN,
+    CONF_COOLING_WATTS,
     CONF_COST_WEIGHT,
     CONF_CRAWLSPACE_TEMP_ENTITY,
     CONF_DEMAND_RESPONSE_ENTITY,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
+    CONF_DUCT_TEMP_ENTITY,
     CONF_DOOR_WINDOW_ENTITIES,
     CONF_DEPARTURE_ZONE,
     CONF_DEPARTURE_ZONES,
@@ -63,6 +65,7 @@ from .const import (
     CONF_ELECTRICITY_RATE_ENTITY,
     CONF_GRID_IMPORT_ENTITY,
     CONF_HVAC_POWER_DEFAULT_WATTS,
+    CONF_HEATING_WATTS,
     CONF_HVAC_POWER_ENTITY,
     CONF_HOME_SQFT,
     CONF_HVAC_TONNAGE,
@@ -80,6 +83,26 @@ from .const import (
     CONF_MONITOR_ONLY,
     CONF_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_OCCUPANCY_ENTITIES,
+    CONF_HOME_ZONE_STATES,
+    CONF_PROFILE_CONTROL_ENABLED,
+    CONF_PROFILE_ENTITY,
+    CONF_PROFILE_ENTITY_TYPE,
+    CONF_PROFILE_MAP_HOME,
+    CONF_PROFILE_MAP_AWAY,
+    CONF_PROFILE_MAP_SLEEP,
+    CONF_ARRIVAL_SLEEP_CUTOFF,
+    CONF_SLEEP_AWAY_OVERRIDE,
+    CONF_SLEEP_AWAY_DELAY_MINUTES,
+    PROFILE_TYPE_SELECT,
+    PROFILE_TYPE_PRESET,
+    DEFAULT_PROFILE_CONTROL_ENABLED,
+    DEFAULT_PROFILE_ENTITY_TYPE,
+    DEFAULT_PROFILE_MAP_HOME,
+    DEFAULT_PROFILE_MAP_AWAY,
+    DEFAULT_PROFILE_MAP_SLEEP,
+    DEFAULT_ARRIVAL_SLEEP_CUTOFF,
+    DEFAULT_SLEEP_AWAY_OVERRIDE,
+    DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
     CONF_OCCUPIED_WEIGHT_MULTIPLIER,
     CONF_OPTIMIZATION_AGGRESSIVENESS,
     CONF_PRECONDITIONING_BUFFER_MINUTES,
@@ -712,7 +735,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_menu(
             step_id="init",
-            menu_options=["mode", "comfort", "sleep_schedule", "presence", "energy", "solar_panels", "equipment", "advanced"],
+            menu_options=["mode", "comfort", "sleep_schedule", "presence", "profile_control", "energy", "solar_panels", "equipment", "advanced"],
         )
 
     async def async_step_mode(
@@ -817,6 +840,15 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ): selector.EntitySelector(
                         selector.EntitySelectorConfig(
                             domain=["binary_sensor", "input_boolean", "switch"],
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_DUCT_TEMP_ENTITY,
+                        description={"suggested_value": self._options.get(CONF_DUCT_TEMP_ENTITY)},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            exclude_entities=exclude,
                         ),
                     ),
                     vol.Optional(
@@ -1077,6 +1109,26 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             min=500, max=20000, step=100,
                             unit_of_measurement="W",
                             mode=selector.NumberSelectorMode.SLIDER,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_COOLING_WATTS,
+                        description={"suggested_value": self._options.get(CONF_COOLING_WATTS)},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=500, max=20000, step=100,
+                            unit_of_measurement="W",
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_HEATING_WATTS,
+                        description={"suggested_value": self._options.get(CONF_HEATING_WATTS)},
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=500, max=25000, step=100,
+                            unit_of_measurement="W",
+                            mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
                     vol.Optional(
@@ -1496,8 +1548,16 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
     async def async_step_presence(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Presence entities, debounce, and away delta."""
+        """Presence entities, debounce, away delta, and home zone states."""
         if user_input is not None:
+            # Parse home_zone_states from comma-separated text
+            zones_str = user_input.pop("home_zone_states_text", "")
+            if zones_str:
+                user_input[CONF_HOME_ZONE_STATES] = [
+                    z.strip() for z in zones_str.split(",") if z.strip()
+                ]
+            else:
+                user_input[CONF_HOME_ZONE_STATES] = []
             self._options.update(user_input)
             return self.async_create_entry(title="", data=self._options)
 
@@ -1513,6 +1573,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ]
         else:
             occupancy_default = existing_occupancy
+
+        # Format zone states list as comma-separated for display
+        zone_states = self._options.get(CONF_HOME_ZONE_STATES, [])
+        zone_states_text = ", ".join(zone_states) if isinstance(zone_states, list) else str(zone_states)
 
         return self.async_show_form(
             step_id="presence",
@@ -1558,6 +1622,119 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             step=0.5,
                             unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.SLIDER,
+                        ),
+                    ),
+                    vol.Optional(
+                        "home_zone_states_text",
+                        default=zone_states_text,
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            multiline=False,
+                            type=selector.TextSelectorType.TEXT,
+                        ),
+                    ),
+                }
+            ),
+        )
+
+    # ── Thermostat profile control ───────────────────────────────────
+
+    async def async_step_profile_control(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Thermostat comfort profile control (home/away/sleep presets)."""
+        if user_input is not None:
+            user_input = self._strip_empty_strings(user_input)
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+
+        return self.async_show_form(
+            step_id="profile_control",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_PROFILE_CONTROL_ENABLED,
+                        default=self._options.get(
+                            CONF_PROFILE_CONTROL_ENABLED,
+                            DEFAULT_PROFILE_CONTROL_ENABLED,
+                        ),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_PROFILE_ENTITY_TYPE,
+                        default=self._options.get(
+                            CONF_PROFILE_ENTITY_TYPE,
+                            DEFAULT_PROFILE_ENTITY_TYPE,
+                        ),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=PROFILE_TYPE_SELECT,
+                                    label="Select entity (select.*)",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=PROFILE_TYPE_PRESET,
+                                    label="Climate preset mode",
+                                ),
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_PROFILE_ENTITY,
+                        default=self._options.get(CONF_PROFILE_ENTITY, ""),
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=["select"],
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_PROFILE_MAP_HOME,
+                        default=self._options.get(
+                            CONF_PROFILE_MAP_HOME,
+                            DEFAULT_PROFILE_MAP_HOME,
+                        ),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        CONF_PROFILE_MAP_AWAY,
+                        default=self._options.get(
+                            CONF_PROFILE_MAP_AWAY,
+                            DEFAULT_PROFILE_MAP_AWAY,
+                        ),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        CONF_PROFILE_MAP_SLEEP,
+                        default=self._options.get(
+                            CONF_PROFILE_MAP_SLEEP,
+                            DEFAULT_PROFILE_MAP_SLEEP,
+                        ),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        CONF_ARRIVAL_SLEEP_CUTOFF,
+                        default=self._options.get(
+                            CONF_ARRIVAL_SLEEP_CUTOFF,
+                            DEFAULT_ARRIVAL_SLEEP_CUTOFF,
+                        ),
+                    ): selector.TimeSelector(),
+                    vol.Optional(
+                        CONF_SLEEP_AWAY_OVERRIDE,
+                        default=self._options.get(
+                            CONF_SLEEP_AWAY_OVERRIDE,
+                            DEFAULT_SLEEP_AWAY_OVERRIDE,
+                        ),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        CONF_SLEEP_AWAY_DELAY_MINUTES,
+                        default=self._options.get(
+                            CONF_SLEEP_AWAY_DELAY_MINUTES,
+                            DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=30,
+                            step=1,
+                            unit_of_measurement="min",
                         ),
                     ),
                 }

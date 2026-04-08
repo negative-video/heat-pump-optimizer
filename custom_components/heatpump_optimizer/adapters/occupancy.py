@@ -45,6 +45,7 @@ class OccupancyAdapter:
         debounce_minutes: int = 5,
         *,
         entity_id: str | None = None,
+        home_zone_states: list[str] | None = None,
     ):
         self.hass = hass
         # Backward compat: singular → list
@@ -54,6 +55,10 @@ class OccupancyAdapter:
         self.debounce_minutes = debounce_minutes
         self._forced_mode: OccupancyMode | None = None
         self._last_active: dict[str, datetime] = {}
+        # Extra person entity states that count as "home" (e.g., zone names)
+        self._home_zone_states = [
+            s.lower().strip() for s in (home_zone_states or [])
+        ]
 
     def get_people_home_count(self) -> int:
         """Count the number of tracked entities currently in HOME state.
@@ -224,14 +229,14 @@ class OccupancyAdapter:
             return OccupancyMode.VACATION
         return OccupancyMode.AWAY
 
-    @staticmethod
-    def _interpret_state(state_value: str) -> OccupancyMode:
+    def _interpret_state(self, state_value: str) -> OccupancyMode:
         """Map an entity state string to an occupancy mode.
 
         Handles:
         - person.* states: "home", "not_home", "away"
         - binary_sensor states: "on" (occupied), "off" (away)
         - input_select states: "home", "away", "vacation"
+        - Configured zone states (e.g., "Lake Monticello") -> HOME
         - "unavailable"/"unknown": treated as AWAY (not home) to avoid
           phantom occupancy from entity hiccups inflating internal heat gain.
         """
@@ -239,10 +244,15 @@ class OccupancyAdapter:
 
         if normalized in ("home", "on"):
             return OccupancyMode.HOME
+
+        # Check configured zone states (e.g., neighborhood zones)
+        if self._home_zone_states and normalized in self._home_zone_states:
+            return OccupancyMode.HOME
+
         if normalized in ("vacation", "extended_away"):
             return OccupancyMode.VACATION
         if normalized in ("not_home", "away", "off", "unavailable", "unknown"):
             return OccupancyMode.AWAY
 
-        _LOGGER.debug("Unknown occupancy state '%s' — defaulting to AWAY", state_value)
+        _LOGGER.debug("Unknown occupancy state '%s' -- defaulting to AWAY", state_value)
         return OccupancyMode.AWAY

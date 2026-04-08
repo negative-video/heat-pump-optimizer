@@ -67,7 +67,7 @@ The Extended Kalman Filter jointly estimates several coupled building parameters
 - **Graduated activation** -- Starts optimizing conservatively once the profiler has enough data for current conditions, rather than waiting for full model convergence. Four tiers: learning, conservative, standard, confident.
 - **Forecast-driven scheduling** -- Hourly weather forecasts, with optional electricity rate and carbon intensity awareness.
 - **Savings tracking** -- A counterfactual digital twin simulates what your thermostat would have done without optimization, using the profiler's measured performance data. Decomposed into runtime, COP, rate, and carbon components.
-- **Occupancy-aware** -- Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
+- **Occupancy-aware** -- Widens comfort range when away, with calendar integration, pre-conditioning before arrival, and optional thermostat profile control (home/away/sleep).
 - **Room-aware sensing** -- Weights indoor temperature by room occupancy instead of averaging all sensors equally. Includes blend mitigation (detects and compensates for Ecobee/Nest satellite sensor blending) and humidity squelch (suppresses cooling setpoint changes when high humidity would trigger unnecessary dehumidification).
 - **House thermal load breakdown** -- Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
 - **Temperature profile chart** -- Observation coverage visualization showing where the profiler has data and where gaps remain, with per-mode trendlines and observation density by outdoor temperature.
@@ -202,6 +202,7 @@ None of these are required. Each one improves accuracy or unlocks additional fea
 | Electricity rate | Cost-aware optimization — shift runtime to cheaper hours |
 | Attic temperature | Boundary heat transfer through ceiling; duct efficiency correction (see below) |
 | Crawlspace temperature | Boundary heat transfer through floor; improves winter heat loss modeling |
+| Supply duct temperature | Native aux heat detection for thermostats that don't report it (e.g., Ecobee via HomeKit). See below |
 | Door/window contact sensors | Infiltration scaling -- profiler skips observations and EKF pauses parameter updates while open to avoid corrupting estimates |
 
 ### Comfort and Safety Ranges
@@ -220,20 +221,26 @@ The integration asks for a few optional system specs during initial setup. Every
 | **Aux / emergency heat type** | Thermostat wiring label (`W2`/`E`), HVAC documentation, or air handler label | `electric_strip` enables BTU injection into the EKF when no power sensor is present (see below); `gas`/`oil` flags heat as non-electric for cost modeling |
 | **Aux heat capacity (kW)** | Air handler nameplate (e.g., "10 kW" strip kit) | Provides an accurate BTU estimate for each aux heating interval when no circuit power meter is configured |
 
-**Advanced — available in the Energy options step after initial setup:**
+**Advanced -- available in the Energy options step after initial setup:**
 
 | Field | Where to find it | Effect |
 |---|---|---|
 | **SEER / SEER2 rating** | Unit nameplate, EnergyGuide label, or manufacturer spec sheet | Combined with tonnage, derives rated power draw: `W_rated = (tons × 12,000) / SEER`. Overrides the 3,500 W flat default for all cost and savings calculations |
 | **Rated watts (override)** | Clamp meter reading, or nameplate if labeled | Direct override of the derived estimate; highest priority in the power chain |
+| **Cooling power draw** | Clamp meter reading during cooling | Measured power during cooling mode. Overrides the spec-derived default. Useful if you've measured actual draw and want to account for resistive losses or duct leakage |
+| **Heating power draw** | Clamp meter reading during heating | Measured power during heat pump heating mode. If not set, defaults to 115% of cooling watts |
 
-**How power draw is resolved** (in priority order):
-1. Explicit rated watts set in the Energy options step
-2. Derived from tonnage + SEER: `(tons × 12,000) / SEER`
-3. Estimated from tonnage alone: `tons × 850 W` (≈ 14 SEER, conservative)
-4. Flat 3,500 W default
+**Mode-aware power estimation** -- When no live HVAC power sensor is configured, the integration estimates power draw based on the current HVAC mode:
 
-A live HVAC power sensor (clamp meter or smart plug, configured in the Energy step) always supersedes all of the above for actual runtime accounting.
+| HVAC Mode | Power Source |
+|---|---|
+| Cooling | Cooling watts (configured, or derived from tonnage/SEER) |
+| Heating (heat pump) | Heating watts (configured, or cooling watts x 1.15) |
+| Aux/emergency heat | Aux heat capacity (kW) from system specs |
+| Fan only | 300 W (blower fan only) |
+| Idle/off | 0 W |
+
+This replaces the need for a manual template sensor that maps `hvac_action` to wattage. If you have a clamp meter or smart plug providing a live power sensor, it always supersedes all estimates regardless of mode.
 
 ### Solar Panels
 
@@ -295,12 +302,51 @@ The optimizer can read calendar entities to predict when you're home or away:
 - Events matching **away keywords** (e.g., "Office", "In-Person") → away
 - Comfort range widens when away; pre-conditions before expected return
 
+#### Zone-Aware Presence Detection
+
+By default, the integration treats person entities as "home" only when they're in the HA `home` zone. If you have additional zones configured (e.g., a neighborhood zone for faster GPS-based detection), you can add their names in **Configure → Presence & Away → Additional home zone names**.
+
+For example, adding `Lake Monticello` means `person.gerald` will be treated as home when they're in either the `home` zone or the `Lake Monticello` zone. This gives you faster, more reliable presence detection -- GPS updates can detect you entering a larger neighborhood zone before narrowing to the home zone.
+
+Multiple zone names can be comma-separated (e.g., `Lake Monticello, Neighborhood`). Matching is case-insensitive.
+
+#### Thermostat Profile Control
+
+Many smart thermostats (Ecobee, Nest, Honeywell) have built-in comfort profiles -- home, away, sleep -- that apply their own setpoints and behaviors. Without this feature, you'd need a separate automation to switch profiles based on presence, which can conflict with the optimizer's setpoint control.
+
+Enable **Thermostat Profile Control** in the options menu to let the integration manage your thermostat's comfort profile directly. The integration sets the profile based on occupancy state and time of day, then optimizes setpoints within that profile's context.
+
+**How it works:**
+
+| Condition | Profile set |
+|-----------|-------------|
+| Everyone leaves | Away |
+| Someone arrives (before cutoff time) | Home |
+| Someone arrives (after cutoff time) | Sleep |
+| Sleep schedule active + someone home | Sleep |
+| Sleep schedule active + nobody home | Away |
+
+**Configuration** (in **Configure → Thermostat Profile Control**):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Profile control method** | Select entity | Controls profiles via a `select.*` entity (Ecobee) or via `climate.set_preset_mode` (other thermostats) |
+| **Profile select entity** | -- | The entity that controls your thermostat's mode (e.g., `select.my_ecobee_current_mode`) |
+| **Home/Away/Sleep profile names** | home/away/sleep | Map to your thermostat's actual profile names |
+| **Arrival sleep cutoff** | 9:30 PM | Arrivals after this time get the sleep profile instead of home |
+| **Override sleep to away** | Yes | When nobody is home during the sleep window, use away instead of sleep |
+| **Away transition delay** | 10 min | If the HVAC is actively running when transitioning to away, wait this long to let the cycle complete |
+
+Profile updates happen immediately when a person entity changes state (not just on the 5-minute update cycle), so transitions are responsive to GPS and zone events.
+
+This replaces standalone automations that control your thermostat's comfort mode based on presence. The integration coordinates profile selection with its own setpoint optimization, eliminating conflicts between the two.
+
 #### Departure-Aware Pre-conditioning
 
 For more precise timing, add departure profiles in the Schedule options step pairing each person with:
 
-- **Departure zone** — The HA zone to monitor (typically `zone.home`)
-- **Travel time sensor** — Commute time in minutes (e.g., Waze or Google Maps)
+- **Departure zone** -- The HA zone to monitor (typically `zone.home`)
+- **Travel time sensor** -- Commute time in minutes (e.g., Waze or Google Maps)
 
 When configured, if a calendar event shows "Office" at 9:00 AM and the travel sensor reads 25 minutes, the optimizer ensures comfort through ~8:35 AM, then relaxes when you leave.
 
@@ -325,7 +371,7 @@ If you prefer different temperatures at night, enable the sleep schedule in **Co
 | **Cooling range** | 70–76°F |
 | **Heating range** | 60–66°F |
 
-Sleep bounds only apply when someone is home. If the house is unoccupied during sleeping hours, the normal away-mode comfort range is used instead.
+Sleep bounds only apply when someone is home. If the house is unoccupied during sleeping hours, the normal away-mode comfort range is used instead. When thermostat profile control is enabled, the integration also sets the thermostat's profile to "away" (not "sleep") when nobody is home during the sleep window.
 
 ### Wet Room Squelch
 
@@ -410,6 +456,15 @@ Each sensor includes a `model_confidence` attribute and a `reliable` flag (false
 |--------|-------------|------|
 | Aux Heat Learned HP Watts | EMA-learned heat pump baseline power draw during non-aux heating intervals | W |
 | Aux Heat Resistive BTU | Estimated resistive strip output (derived from circuit watts − learned HP watts) | BTU/hr |
+
+#### Energy Consumption
+
+| Entity | Description | Unit |
+|--------|-------------|------|
+| HVAC Energy Today | Actual HVAC energy consumed today (resets at midnight). Compatible with HA Energy Dashboard | kWh |
+| HVAC Energy Total | All-time cumulative HVAC energy consumed. Monotonically increasing after learning completes | kWh |
+
+These sensors are HA Energy Dashboard compatible (`device_class: energy`, proper `state_class`). To track weekly, monthly, or yearly consumption, wrap either sensor with HA's built-in [utility_meter](https://www.home-assistant.io/integrations/utility_meter/) integration -- no manual template sensors needed.
 
 #### Savings (Daily)
 
@@ -1649,6 +1704,13 @@ High duty → setpoint near the active end of the comfort range (triggering HVAC
 ## Aux Heat Learner
 
 When a heat pump switches to auxiliary or emergency heat, the circuit draws 2–3× more power as resistive heating strips engage alongside (or instead of) the compressor. If this extra heat is not accounted for, the EKF sees a large unexplained temperature rise and incorrectly inflates `Q_heat_base` — poisoning the learned heating capacity.
+
+**Detection methods** -- The integration detects aux heat using the first available source (in priority order):
+
+1. **Override entity** -- A binary_sensor or input_boolean you create (Options > Equipment > Aux heat override)
+2. **Supply duct temperature** -- A temperature sensor in your ductwork (Options > Equipment > Supply duct temperature sensor). The integration computes the derivative internally and detects aux heat when: supply air exceeds 110F, or exceeds 100F with a rise rate above 3F/min. Heat pump supply air is typically 90-105F; resistive strips produce 120-140F. This replaces the need for manual HA derivative + template binary_sensor setup
+3. **Thermostat hvac_action** -- `aux_heating` or `emergency_heating` reported by the climate entity
+4. **Thermostat attribute** -- Some thermostats expose an `aux_heat` attribute
 
 The `AuxHeatLearner` solves this by learning two quantities adaptively:
 

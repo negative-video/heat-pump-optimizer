@@ -125,31 +125,128 @@ class TestOccupancyInit:
 
 
 class TestInterpretState:
-    """Unit tests for _interpret_state static method."""
+    """Unit tests for _interpret_state instance method."""
+
+    def _adapter(self, **kwargs):
+        """Create adapter with no entities for state interpretation tests."""
+        return OccupancyAdapter(_make_hass({}), **kwargs)
 
     @pytest.mark.parametrize("value", ["home", "Home", "HOME", "on", "On", "ON"])
     def test_home_states(self, value):
-        assert OccupancyAdapter._interpret_state(value) == OccupancyMode.HOME
+        assert self._adapter()._interpret_state(value) == OccupancyMode.HOME
 
     @pytest.mark.parametrize("value", ["not_home", "away", "off", "Away", "OFF"])
     def test_away_states(self, value):
-        assert OccupancyAdapter._interpret_state(value) == OccupancyMode.AWAY
+        assert self._adapter()._interpret_state(value) == OccupancyMode.AWAY
 
     @pytest.mark.parametrize("value", ["vacation", "extended_away", "Vacation", "EXTENDED_AWAY"])
     def test_vacation_states(self, value):
-        assert OccupancyAdapter._interpret_state(value) == OccupancyMode.VACATION
+        assert self._adapter()._interpret_state(value) == OccupancyMode.VACATION
 
     def test_unknown_defaults_to_away(self):
-        assert OccupancyAdapter._interpret_state("unknown") == OccupancyMode.AWAY
-        assert OccupancyAdapter._interpret_state("unavailable") == OccupancyMode.AWAY
+        a = self._adapter()
+        assert a._interpret_state("unknown") == OccupancyMode.AWAY
+        assert a._interpret_state("unavailable") == OccupancyMode.AWAY
 
     def test_whitespace_stripped(self):
-        assert OccupancyAdapter._interpret_state("  home  ") == OccupancyMode.HOME
-        assert OccupancyAdapter._interpret_state(" away ") == OccupancyMode.AWAY
+        a = self._adapter()
+        assert a._interpret_state("  home  ") == OccupancyMode.HOME
+        assert a._interpret_state(" away ") == OccupancyMode.AWAY
 
     def test_case_insensitive(self):
-        assert OccupancyAdapter._interpret_state("HoMe") == OccupancyMode.HOME
-        assert OccupancyAdapter._interpret_state("VACATION") == OccupancyMode.VACATION
+        a = self._adapter()
+        assert a._interpret_state("HoMe") == OccupancyMode.HOME
+        assert a._interpret_state("VACATION") == OccupancyMode.VACATION
+
+
+class TestHomeZoneStates:
+    """Tests for zone-aware presence detection via home_zone_states."""
+
+    def test_zone_state_maps_to_home(self):
+        """Person in a configured zone should be treated as HOME."""
+        hass = _make_hass({"person.gerald": "Lake Monticello"})
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald"],
+            home_zone_states=["Lake Monticello"],
+        )
+        assert adapter.get_mode() == OccupancyMode.HOME
+
+    def test_zone_state_case_insensitive(self):
+        """Zone state matching should be case-insensitive."""
+        hass = _make_hass({"person.gerald": "lake monticello"})
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald"],
+            home_zone_states=["Lake Monticello"],
+        )
+        assert adapter.get_mode() == OccupancyMode.HOME
+
+    def test_unknown_zone_state_defaults_away(self):
+        """Person in an unconfigured zone should be AWAY."""
+        hass = _make_hass({"person.gerald": "Work"})
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald"],
+            home_zone_states=["Lake Monticello"],
+        )
+        assert adapter.get_mode() == OccupancyMode.AWAY
+
+    def test_empty_zone_states_preserves_behavior(self):
+        """With no zone states configured, existing behavior unchanged."""
+        hass = _make_hass({"person.gerald": "Lake Monticello"})
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald"],
+            home_zone_states=[],
+        )
+        # "Lake Monticello" is not "home" or "on", so AWAY
+        assert adapter.get_mode() == OccupancyMode.AWAY
+
+    def test_multiple_zone_states(self):
+        """Multiple configured zones should all map to HOME."""
+        hass = _make_hass({"person.gerald": "Neighborhood"})
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald"],
+            home_zone_states=["Lake Monticello", "Neighborhood"],
+        )
+        assert adapter.get_mode() == OccupancyMode.HOME
+
+    def test_multi_person_any_in_zone_is_home(self):
+        """If any person is in a configured zone, mode is HOME."""
+        hass = _make_hass({
+            "person.gerald": "not_home",
+            "person.elizabeth": "Lake Monticello",
+        })
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald", "person.elizabeth"],
+            home_zone_states=["Lake Monticello"],
+        )
+        assert adapter.get_mode() == OccupancyMode.HOME
+
+    def test_multi_person_all_away_from_zones(self):
+        """If all people are away from all zones, mode is AWAY."""
+        hass = _make_hass({
+            "person.gerald": "not_home",
+            "person.elizabeth": "not_home",
+        })
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald", "person.elizabeth"],
+            home_zone_states=["Lake Monticello"],
+        )
+        assert adapter.get_mode() == OccupancyMode.AWAY
+
+    def test_no_zone_states_param_defaults_empty(self):
+        """Omitting home_zone_states entirely should work like empty list."""
+        hass = _make_hass({"person.gerald": "Lake Monticello"})
+        adapter = OccupancyAdapter(
+            hass,
+            entity_ids=["person.gerald"],
+        )
+        assert adapter.get_mode() == OccupancyMode.AWAY
 
 
 class TestGetMode:

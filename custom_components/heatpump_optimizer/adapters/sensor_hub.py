@@ -33,6 +33,7 @@ from ..const import (
     DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
     DEFAULT_DOOR_WINDOW_DEBOUNCE_SECONDS,
     DEFAULT_EMA_ALPHA,
+    DEFAULT_FAN_ONLY_WATTS,
     DEFAULT_HUMIDITY_SQUELCH_OFF,
     DEFAULT_HUMIDITY_SQUELCH_ON,
     DEFAULT_SENSOR_STALE_MINUTES,
@@ -84,9 +85,15 @@ class SensorHub:
         # Buffer zone temperature sensors (optional)
         attic_temp_entity: str | None = None,
         crawlspace_temp_entity: str | None = None,
+        # Duct-based aux heat detection (optional)
+        duct_temp_entity: str | None = None,
         # Existing sensor config (migrated from coordinator)
         power_entity: str | None = None,
         power_default_watts: float = 3500.0,
+        # Mode-aware power estimation (optional overrides)
+        cooling_watts: float | None = None,
+        heating_watts: float | None = None,
+        aux_heat_kw: float | None = None,
         co2_entity: str | None = None,
         rate_entity: str | None = None,
         flat_rate: float | None = None,
@@ -126,9 +133,18 @@ class SensorHub:
         self._attic_temp_entity = attic_temp_entity
         self._crawlspace_temp_entity = crawlspace_temp_entity
 
+        # Duct-based aux heat detection (optional)
+        self._duct_temp_entity = duct_temp_entity
+
         # Existing (migrated from coordinator)
         self._power_entity = power_entity
         self._power_default_watts = power_default_watts
+        # Mode-aware power estimation
+        self._cooling_watts = cooling_watts or power_default_watts
+        self._heating_watts = heating_watts or (
+            cooling_watts * 1.15 if cooling_watts else power_default_watts * 1.15
+        )
+        self._aux_heat_kw = aux_heat_kw
         self._co2_entity = co2_entity
         self._rate_entity = rate_entity
         self._flat_rate = flat_rate
@@ -963,6 +979,12 @@ class SensorHub:
         reading = self._read_multi_temp([self._crawlspace_temp_entity], "Crawlspace temp")
         return reading
 
+    def read_duct_temp(self) -> SensorReading | None:
+        """Supply duct temperature in F. Returns None if not configured or unavailable."""
+        if not self._duct_temp_entity:
+            return None
+        return self._read_multi_temp([self._duct_temp_entity], "Duct temp")
+
     # ── Energy / solar production ─────────────────────────────────────
 
     def read_solar_production(self) -> SensorReading | None:
@@ -1028,11 +1050,22 @@ class SensorHub:
 
     # ── Migrated sensor reads (from coordinator) ──────────────────────
 
-    def read_power_draw(self) -> float | None:
-        """HVAC power draw. Entity → default watts fallback.
+    def read_power_draw(
+        self,
+        hvac_action: str | None = None,
+        aux_heat_active: bool = False,
+    ) -> float | None:
+        """HVAC power draw. Entity → mode-aware estimate → default watts.
 
-        When the configured power entity is unavailable, falls back to default
-        watts so savings tracking continues during transient sensor outages.
+        When a power entity is configured and available, its value is used
+        regardless of mode. Otherwise, returns a mode-appropriate estimate
+        based on the current hvac_action.
+
+        Args:
+            hvac_action: Current HVAC action (heating, cooling, idle, etc.).
+                If None, falls back to the legacy single-constant behavior.
+            aux_heat_active: True if aux/emergency heat is detected (from
+                duct sensor, override entity, or thermostat attribute).
         """
         if self._power_entity:
             value = self._read_entity(
@@ -1040,14 +1073,27 @@ class SensorHub:
             )
             if value is not None:
                 return value
-            # Entity configured but unavailable — fall back to default
-            if self._power_default_watts:
-                _LOGGER.debug(
-                    "HVAC power entity unavailable, using default %dW",
-                    self._power_default_watts,
-                )
-                return self._power_default_watts
-            return None
+            # Entity configured but unavailable — fall through to estimation
+            # If no fallback watts and no mode context, report unavailable
+            if hvac_action is None and not self._power_default_watts:
+                return None
+
+        # Mode-aware estimation when hvac_action is provided
+        if hvac_action is not None:
+            if aux_heat_active or hvac_action in ("aux_heating", "emergency_heating"):
+                if self._aux_heat_kw:
+                    return self._aux_heat_kw * 1000.0
+                return self._power_default_watts  # no aux spec, use general default
+            if hvac_action == "cooling":
+                return self._cooling_watts
+            if hvac_action == "heating":
+                return self._heating_watts
+            if hvac_action == "fan_only":
+                return float(DEFAULT_FAN_ONLY_WATTS)
+            if hvac_action in ("idle", "off"):
+                return 0.0
+
+        # Legacy fallback: no hvac_action provided or unrecognized action
         return self._power_default_watts
 
     def read_co2_intensity(self) -> float | None:

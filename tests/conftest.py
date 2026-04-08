@@ -86,6 +86,9 @@ def _register_stubs():
     ha_core = types.ModuleType("homeassistant.core")
     ha_core.HomeAssistant = MagicMock
     ha_core.ServiceCall = MagicMock
+    ha_core.SupportsResponse = type("SupportsResponse", (), {
+        "ONLY": "only", "OPTIONAL": "optional", "NONE": "none",
+    })
     ha_core.callback = lambda f: f
     sys.modules.setdefault("homeassistant.core", ha_core)
 
@@ -105,6 +108,10 @@ def _register_stubs():
         "MBAR": "mbar",
         "PSI": "psi",
     })
+    ha_const.UnitOfEnergy = type("UnitOfEnergy", (), {
+        "KILO_WATT_HOUR": "kWh",
+        "WATT_HOUR": "Wh",
+    })
     ha_const.EntityCategory = type("EntityCategory", (), {
         "DIAGNOSTIC": "diagnostic",
         "CONFIG": "config",
@@ -116,6 +123,13 @@ def _register_stubs():
     ha_util = types.ModuleType("homeassistant.util")
     ha_util.__path__ = ["homeassistant/util"]
     sys.modules.setdefault("homeassistant.util", ha_util)
+
+    ha_dt = types.ModuleType("homeassistant.util.dt")
+    ha_dt.utcnow = lambda: datetime.now(timezone.utc)
+    ha_dt.now = lambda tz=None: datetime.now(tz or timezone.utc)
+    ha_dt.as_local = lambda dt: dt
+    ha_dt.parse_datetime = lambda s: datetime.fromisoformat(s) if s else None
+    sys.modules.setdefault("homeassistant.util.dt", ha_dt)
 
     ha_unit_conv = types.ModuleType("homeassistant.util.unit_conversion")
     ha_unit_conv.TemperatureConverter = TemperatureConverter
@@ -194,6 +208,13 @@ def _register_stubs():
         "TOTAL_INCREASING": "total_increasing",
     })
     sys.modules.setdefault("homeassistant.components.sensor", ha_sensor)
+
+    ha_diagnostics = types.ModuleType("homeassistant.components.diagnostics")
+    ha_diagnostics.async_redact_data = lambda data, to_redact: {
+        k: ("**REDACTED**" if k in to_redact else v)
+        for k, v in data.items()
+    }
+    sys.modules.setdefault("homeassistant.components.diagnostics", ha_diagnostics)
 
     # -- voluptuous stub --
     vol_mod = types.ModuleType("voluptuous")
@@ -293,6 +314,8 @@ def mock_coordinator():
         "kalman_confidence": 0.75,
         "kalman_observations": 500,
         "initialization_mode": "learning",
+        "actual_kwh_today": 0.0,
+        "actual_kwh_cumulative": 0.0,
     }
     coordinator.async_force_reoptimize = AsyncMock()
     coordinator.pause = MagicMock()

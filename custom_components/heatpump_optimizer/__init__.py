@@ -20,6 +20,7 @@ from homeassistant.helpers.start import async_at_started
 from .const import (
     CONF_AWAY_COMFORT_DELTA,
     CONF_CLIMATE_ENTITY,
+    CONF_COOLING_WATTS,
     CONF_COMFORT_COOL_MAX,
     CONF_COMFORT_COOL_MIN,
     CONF_COMFORT_HEAT_MAX,
@@ -46,7 +47,9 @@ from .const import (
     CONF_SLEEP_SCHEDULE_ENABLED,
     CONF_SLEEP_SCHEDULE_END,
     CONF_SLEEP_SCHEDULE_START,
+    CONF_DUCT_TEMP_ENTITY,
     CONF_DWELL_TIME_MINUTES,
+    CONF_HEATING_WATTS,
     CONF_THERMOSTAT_DEADBAND,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
@@ -166,6 +169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_INDOOR_TEMP_ENTITIES, CONF_INDOOR_HUMIDITY_ENTITIES,
         # System specs set during initial setup — editable later via options flow
         CONF_HOME_SQFT, CONF_HVAC_TONNAGE, CONF_AUX_HEAT_TYPE, CONF_AUX_HEAT_KW,
+        CONF_COOLING_WATTS, CONF_HEATING_WATTS, CONF_DUCT_TEMP_ENTITY,
     ):
         if _key not in opts:
             _val = entry.data.get(_key)

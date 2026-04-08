@@ -104,6 +104,7 @@
           "comfort": "Temperature boundaries",
           "sleep_schedule": "Sleep schedule",
           "presence": "Presence & away",
+          "profile_control": "Thermostat profile control",
           "energy": "Energy & cost tracking",
           "solar_panels": "Solar panels",
           "equipment": "Thermostat & weather source",
@@ -137,10 +138,12 @@
         "data": {
           "climate_entity": "Climate entity (thermostat)",
           "weather_entities": "Weather entities (first = primary, rest = fallback)",
-          "aux_heat_override_entity": "Aux heat override sensor (optional)"
+          "aux_heat_override_entity": "Aux heat override sensor (optional)",
+          "duct_temp_entity": "Supply duct temperature sensor (optional)"
         },
         "data_description": {
-          "aux_heat_override_entity": "A binary sensor or input_boolean that turns on when auxiliary/emergency heat is running. Use this if your thermostat doesn't report aux heat status. Create a template binary_sensor in Home Assistant with your detection logic (e.g., heating + high duct temperature) and select it here."
+          "aux_heat_override_entity": "A binary sensor or input_boolean that turns on when auxiliary/emergency heat is running. Use this if your thermostat doesn't report aux heat status.",
+          "duct_temp_entity": "A temperature sensor in your supply ductwork. When configured, the integration detects auxiliary heat automatically from high supply air temperatures without any manual template setup. This is separate from the crawlspace sensor used for boundary zone modeling."
         }
       },
       "outdoor_sensors": {
@@ -166,6 +169,8 @@
           "hvac_power_entity": "HVAC power sensor",
           "hvac_seer": "HVAC SEER1 rating",
           "hvac_power_default_watts": "Fallback HVAC power (watts)",
+          "cooling_watts": "Cooling power draw (watts)",
+          "heating_watts": "Heating power draw (watts)",
           "co2_entity": "CO₂ intensity sensor",
           "electricity_rate_entity": "Electricity rate entity",
           "electricity_flat_rate": "Flat electricity rate ($/kWh)",
@@ -178,6 +183,8 @@
           "hvac_power_entity": "A sensor that reports your HVAC system's current power draw in watts.",
           "hvac_seer": "Enter the SEER1 rating (not SEER2). If you only have a SEER2 rating, multiply it by 1.04 to approximate SEER1 (e.g. SEER2 15.2 \u2192 enter 15.8).",
           "hvac_power_default_watts": "Fallback power estimate when no HVAC power sensor is available. Set to your system's typical draw.",
+          "cooling_watts": "Measured power draw during cooling mode. Overrides the spec-derived estimate. Leave blank to auto-calculate from tonnage and SEER.",
+          "heating_watts": "Measured power draw during heat pump heating mode. Overrides the spec-derived estimate. Leave blank to auto-calculate from cooling watts.",
           "electricity_rate_entity": "A sensor or input_number that provides your current electricity rate in $/kWh. Accepts sensor entities or helpers like input_number.",
           "electricity_flat_rate": "Flat electricity rate in $/kWh. Only used when no rate entity is configured. Set to 0 to disable.",
           "carbon_weight": "How much to weigh carbon intensity in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
@@ -279,12 +286,40 @@
         "data": {
           "occupancy_entities": "Presence entities",
           "occupancy_debounce_minutes": "Presence debounce (minutes)",
-          "away_comfort_delta": "Away mode temperature delta"
+          "away_comfort_delta": "Away mode temperature delta",
+          "home_zone_states_text": "Additional home zone names"
         },
         "data_description": {
           "occupancy_entities": "Person entities, binary sensors, or device trackers used to detect if someone is home.",
           "occupancy_debounce_minutes": "How long to wait after the last sensor reports 'away' before switching to away mode.",
-          "away_comfort_delta": "How much wider to make the optimization range when everyone is away."
+          "away_comfort_delta": "How much wider to make the optimization range when everyone is away.",
+          "home_zone_states_text": "Comma-separated zone names that count as 'home' for presence detection (e.g., 'Lake Monticello, Neighborhood'). Person entities in these zones will be treated as home."
+        }
+      },
+      "profile_control": {
+        "title": "Thermostat Profile Control",
+        "description": "Automatically set your thermostat's comfort profile (home/away/sleep) based on presence detection and time of day. This replaces standalone automations that control your thermostat's mode.",
+        "data": {
+          "profile_control_enabled": "Enable profile control",
+          "profile_entity_type": "Profile control method",
+          "profile_entity": "Profile select entity",
+          "profile_map_home": "Home profile name",
+          "profile_map_away": "Away profile name",
+          "profile_map_sleep": "Sleep profile name",
+          "arrival_sleep_cutoff": "Arrival sleep cutoff time",
+          "sleep_away_override": "Override sleep to away when nobody home",
+          "sleep_away_delay_minutes": "Away transition delay (minutes)"
+        },
+        "data_description": {
+          "profile_control_enabled": "When enabled, the integration will set your thermostat's comfort profile based on presence and time of day.",
+          "profile_entity_type": "How to control the profile: via a select entity (Ecobee, etc.) or via the climate entity's preset mode.",
+          "profile_entity": "The select entity that controls your thermostat's comfort profile (e.g., select.my_ecobee_current_mode).",
+          "profile_map_home": "The profile/preset name your thermostat uses for home mode.",
+          "profile_map_away": "The profile/preset name your thermostat uses for away mode.",
+          "profile_map_sleep": "The profile/preset name your thermostat uses for sleep mode.",
+          "arrival_sleep_cutoff": "When someone arrives after this time, set the profile to sleep instead of home.",
+          "sleep_away_override": "When nobody is home and the sleep schedule activates, use away mode instead of sleep to save energy.",
+          "sleep_away_delay_minutes": "If the HVAC is actively running when transitioning to away, wait this many minutes before switching to let the cycle complete."
         }
       },
       "schedule": {
@@ -583,6 +618,8 @@
       "savings_co2_cumulative": { "name": "CO2 Avoided Total", "description": "Total carbon dioxide emissions avoided since the optimizer was installed." },
       "baseline_kwh_today": { "name": "Baseline Energy Today", "description": "How much energy your old thermostat schedule would have used today without the optimizer." },
       "worst_case_kwh_today": { "name": "Worst Case Energy Today", "description": "Maximum possible energy usage if HVAC ran continuously all day. Used as an upper bound for savings calculations." },
+      "hvac_energy_today": { "name": "HVAC Energy Today", "description": "Actual HVAC energy consumed today. Compatible with the HA Energy Dashboard. Use HA's utility_meter integration to create weekly, monthly, or yearly tracking." },
+      "hvac_energy_cumulative": { "name": "HVAC Energy Total", "description": "All-time cumulative HVAC energy consumed. Monotonically increasing after the learning period completes." },
       "occupancy_forecast": { "name": "Occupancy Forecast", "description": "The optimizer's prediction of when people will be home or away, based on presence sensors and calendar events." },
       "preconditioning_status": { "name": "Pre-conditioning Status", "description": "Whether the optimizer is warming or cooling your home in advance of someone's arrival." },
       "apparent_temperature": { "name": "Feels-Like Temperature", "description": "Indoor temperature adjusted for humidity. High humidity makes warm air feel hotter; low humidity makes cool air feel colder." },

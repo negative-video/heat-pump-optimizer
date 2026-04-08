@@ -61,6 +61,8 @@ async def async_setup_entry(
         SavingsCO2CumulativeSensor(coordinator, entry),
         BaselineKwhTodaySensor(coordinator, entry),
         WorstCaseKwhTodaySensor(coordinator, entry),
+        HvacEnergyTodaySensor(coordinator, entry),
+        HvacEnergyCumulativeSensor(coordinator, entry),
         # Calendar occupancy / pre-conditioning sensors
         OccupancyForecastSensor(coordinator, entry),
         PreconditioningStatusSensor(coordinator, entry),
@@ -858,6 +860,50 @@ class WorstCaseKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("worst_case_kwh_today")
+
+
+class HvacEnergyTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
+    """Actual HVAC energy consumed today (kWh).
+
+    Compatible with HA Energy Dashboard. Use HA's utility_meter integration
+    to create weekly, monthly, or yearly tracking from this sensor.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "hvac_energy_today", "HVAC Energy Today")
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_suggested_display_precision = 2
+        self._attr_icon = "mdi:flash"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("actual_kwh_today")
+
+
+class HvacEnergyCumulativeSensor(OptimizerBaseSensor):
+    """All-time cumulative HVAC energy consumed (kWh).
+
+    Compatible with HA Energy Dashboard. Monotonically increasing;
+    only accumulates after the learning period completes.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "hvac_energy_cumulative", "HVAC Energy Total")
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:flash"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("actual_kwh_cumulative")
 
 
 # ── Calendar Occupancy / Pre-conditioning ──────────────────────────

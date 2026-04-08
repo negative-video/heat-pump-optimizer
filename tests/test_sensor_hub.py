@@ -40,6 +40,9 @@ sys.modules["custom_components.heatpump_optimizer.engine"] = engine_pkg
 
 ha_core = types.ModuleType("homeassistant.core")
 ha_core.HomeAssistant = MagicMock
+ha_core.SupportsResponse = type("SupportsResponse", (), {
+    "ONLY": "only", "OPTIONAL": "optional", "NONE": "none",
+})
 sys.modules["homeassistant"] = types.ModuleType("homeassistant")
 sys.modules["homeassistant"].__path__ = ["homeassistant"]
 sys.modules["homeassistant.core"] = ha_core
@@ -1054,6 +1057,110 @@ class TestWeightedIndoorReads:
         assert r is not None
         assert r.value == pytest.approx(55.0, abs=0.01)
         assert r.source == "weighted:2/3"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Mode-Aware Power Draw
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestModeAwarePowerDraw:
+    """read_power_draw() with hvac_action returns mode-appropriate wattage."""
+
+    def test_cooling_uses_cooling_watts(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, cooling_watts=3000.0)
+        assert hub.read_power_draw(hvac_action="cooling") == pytest.approx(3000.0)
+
+    def test_heating_uses_heating_watts(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, heating_watts=4000.0)
+        assert hub.read_power_draw(hvac_action="heating") == pytest.approx(4000.0)
+
+    def test_heating_derived_from_cooling(self):
+        """When only cooling_watts is set, heating defaults to cooling * 1.15."""
+        hass = _make_hass({})
+        hub = _make_hub(hass, cooling_watts=3000.0)
+        assert hub.read_power_draw(hvac_action="heating") == pytest.approx(3450.0)
+
+    def test_idle_returns_zero(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, power_default_watts=3000.0)
+        assert hub.read_power_draw(hvac_action="idle") == pytest.approx(0.0)
+
+    def test_off_returns_zero(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, power_default_watts=3000.0)
+        assert hub.read_power_draw(hvac_action="off") == pytest.approx(0.0)
+
+    def test_fan_only_returns_300(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, power_default_watts=3000.0)
+        assert hub.read_power_draw(hvac_action="fan_only") == pytest.approx(300.0)
+
+    def test_aux_heating_uses_aux_kw(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, aux_heat_kw=15.0)
+        assert hub.read_power_draw(hvac_action="aux_heating") == pytest.approx(15000.0)
+
+    def test_aux_heat_active_flag_overrides_action(self):
+        """aux_heat_active=True uses aux watts even if action is 'heating'."""
+        hass = _make_hass({})
+        hub = _make_hub(hass, aux_heat_kw=17.0, heating_watts=4000.0)
+        result = hub.read_power_draw(hvac_action="heating", aux_heat_active=True)
+        assert result == pytest.approx(17000.0)
+
+    def test_entity_overrides_mode(self):
+        """When a power entity is configured and available, mode is ignored."""
+        hass = _make_hass({"sensor.pw": _make_state(5000)})
+        hub = _make_hub(hass, power_entity="sensor.pw")
+        assert hub.read_power_draw(hvac_action="idle") == pytest.approx(5000.0)
+
+    def test_backward_compat_no_action(self):
+        """Calling without hvac_action returns default watts (backward compat)."""
+        hass = _make_hass({})
+        hub = _make_hub(hass, power_default_watts=3500.0)
+        assert hub.read_power_draw() == pytest.approx(3500.0)
+
+    def test_no_aux_kw_falls_back_to_default(self):
+        """aux_heating without aux_heat_kw configured uses general default."""
+        hass = _make_hass({})
+        hub = _make_hub(hass, power_default_watts=3500.0)
+        assert hub.read_power_draw(hvac_action="aux_heating") == pytest.approx(3500.0)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Duct Temperature Reading
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestReadDuctTemp:
+    """read_duct_temp() returns supply air temp or None."""
+
+    def test_not_configured(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass)
+        assert hub.read_duct_temp() is None
+
+    def test_available(self):
+        hass = _make_hass({"sensor.duct": _make_state(120, unit="\u00b0F")})
+        hub = _make_hub(hass, duct_temp_entity="sensor.duct")
+        result = hub.read_duct_temp()
+        assert result is not None
+        assert result.value == pytest.approx(120.0, abs=1.0)
+
+    def test_celsius_conversion(self):
+        """Duct temp in Celsius is converted to Fahrenheit."""
+        hass = _make_hass({"sensor.duct": _make_state(50, unit="\u00b0C")})
+        hub = _make_hub(hass, duct_temp_entity="sensor.duct")
+        result = hub.read_duct_temp()
+        assert result is not None
+        assert result.value == pytest.approx(122.0, abs=1.0)
+
+    def test_unavailable(self):
+        hass = _make_hass({"sensor.duct": _make_state("unavailable")})
+        hub = _make_hub(hass, duct_temp_entity="sensor.duct")
+        assert hub.read_duct_temp() is None
 
 
 if __name__ == "__main__":
