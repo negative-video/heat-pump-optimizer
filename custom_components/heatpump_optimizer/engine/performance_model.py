@@ -325,6 +325,8 @@ class PerformanceModel:
         For heating: 1.0 at the warmest measured outdoor temp, lower at colder temps.
         """
         if mode == "cool":
+            if not self._cool_deltas:
+                return 0.0
             delta = self.cooling_delta(outdoor_temp)
             # Best (most negative) cooling delta in measured data
             best = min(self._cool_deltas.values())  # e.g., -9.6
@@ -332,6 +334,8 @@ class PerformanceModel:
                 return 0.0
             return abs(delta) / abs(best)
         elif mode == "heat":
+            if not self._heat_deltas:
+                return 0.0
             delta = self.heating_delta(outdoor_temp)
             best = max(self._heat_deltas.values())  # e.g., 2.7
             if best == 0:

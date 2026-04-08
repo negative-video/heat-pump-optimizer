@@ -14,6 +14,7 @@ Learning:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
@@ -92,7 +93,6 @@ from .const import (
     CONF_TOU_SCHEDULE,
     CONF_CALIBRATION_ENABLED,
     CONF_USE_ADAPTIVE_MODEL,
-    CONF_USE_GREYBOX_MODEL,
     CONF_WIND_SPEED_ENTITY,
     DEFAULT_CALENDAR_AWAY_KEYWORDS,
     DEFAULT_CALENDAR_DEFAULT_MODE,
@@ -117,8 +117,12 @@ from .const import (
     ACTIVATION_TIER_CONFIDENT,
     CONSERVATIVE_DRIFT_CONFIDENCE,
     CONSERVATIVE_MIN_MODE_OBS,
-    CONSERVATIVE_COMFORT_BUFFER,
+    AGGRESSIVENESS_AGGRESSIVE,
+    AGGRESSIVENESS_CONSERVATIVE,
     DEFAULT_FORECAST_CACHE_MAX_AGE_HOURS,
+    DEFAULT_HISTORY_BOOTSTRAP_DAYS,
+    DEFAULT_SAFETY_COOL_MAX,
+    DEFAULT_SAFETY_HEAT_MIN,
     DEFAULT_STALE_FORECAST_HOURS,
     DEFAULT_THERMOSTAT_TOLERANCE_CYCLES,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -160,7 +164,6 @@ from .engine.performance_model import PerformanceModel
 from .engine.thermal_simulator import ThermalSimulator
 from .engine.adaptive_performance_model import AdaptivePerformanceModel
 from .engine.counterfactual_simulator import CounterfactualSimulator
-from .engine.greybox_optimizer import GreyBoxOptimizer
 from .learning.aux_heat_learner import AuxHeatLearner
 from .learning.baseline_capture import BaselineCapture
 from .learning.model_tracker import ModelTracker
@@ -225,7 +228,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.sleep_config = sleep_config or {}
 
         # Safety limits (absolute guardrails)
-        from .const import DEFAULT_SAFETY_HEAT_MIN, DEFAULT_SAFETY_COOL_MAX
         self.safety_limits = safety_limits or (DEFAULT_SAFETY_HEAT_MIN, DEFAULT_SAFETY_COOL_MAX)
 
         # Behavior parameters
@@ -373,7 +375,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Engine initialization — varies by mode
         self._initialization_mode = initialization_mode
         self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
-        self._use_greybox = opts.get(CONF_USE_GREYBOX_MODEL, False)
 
         # Read current indoor temp for EKF initialization (may not be available yet)
         _init_state = ThermostatAdapter(hass, climate_entity_id).read_state()
@@ -402,9 +403,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             )
         elif initialization_mode == "import" and model_import_data:
             # Restore from exported model
-            import json as _json
             try:
-                parsed = _json.loads(model_import_data) if isinstance(model_import_data, str) else model_import_data
+                parsed = json.loads(model_import_data) if isinstance(model_import_data, str) else model_import_data
                 state_data = parsed.get("state", parsed)
                 self.estimator = ThermalEstimator.from_dict(state_data)
                 self.model = PerformanceModel.from_estimator(self.estimator)
@@ -443,16 +443,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self.adaptive_model.heat_differential = self.model.heat_differential
 
         # Performance profiler (empirical HVAC deltas, reaches confidence faster
-        # than EKF, used to blend parameters into grey-box optimizer)
+        # than EKF; primary model for optimization)
         self.profiler = PerformanceProfiler()
 
         # Coefficient calibrator (slow outer loop for EKF physics coefficients)
         self.coeff_store = CoefficientStore()
         self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
         self.estimator._coeff_store = self.coeff_store
-
-        # Grey-box optimizer (LP + Kalman)
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
 
         # Aux heat activation learner
         self.aux_heat_learner = AuxHeatLearner(
@@ -499,11 +496,16 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         self._occupancy_timeline: list[OccupancyForecastPoint] = []
 
         # Layer 1: Strategic Planner
+        # Aggressive mode: halve the reoptimize interval for faster adaptation
+        reopt_hours = self._reoptimize_interval_hours
+        if self._aggressiveness == AGGRESSIVENESS_AGGRESSIVE:
+            reopt_hours = max(1, reopt_hours // 2)
+
         self.strategic = StrategicPlanner(
             optimizer=self.optimizer,
             resist_balance_point=self.model.resist_balance_point or 50.0,
-            greybox_optimizer=self.greybox_optimizer,
             sleep_config=self.sleep_config,
+            reoptimize_interval_hours=float(reopt_hours),
         )
 
         # Layer 2: Tactical Controller
@@ -620,6 +622,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     async def async_shutdown(self) -> None:
         """Graceful shutdown: safe setpoint, persist state, remove listeners."""
+        if self._bootstrap_retry_unsub is not None:
+            self._bootstrap_retry_unsub()
+            self._bootstrap_retry_unsub = None
+
         if self._unsub_state_listener:
             self._unsub_state_listener()
 
@@ -812,7 +818,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # Outdoor temp staleness
         outdoor_reading = self.sensor_hub.read_outdoor_temp(
-            self._forecast_cache if hasattr(self, "_forecast_cache") else None
+            forecast_snapshot=self.strategic.forecast_snapshot
         )
         if outdoor_reading and outdoor_reading.stale:
             ir.async_create_issue(
@@ -1011,7 +1017,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         # ── Kalman filter update ──────────────────────────────────────
 
-        if thermo_state.indoor_temp is not None and (self._use_adaptive or self._use_greybox):
+        if thermo_state.indoor_temp is not None and self._use_adaptive:
             self._feed_estimator(thermo_state, now)
             # Fire event when confidence threshold is first reached
             if not self._confidence_threshold_reached and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
@@ -1044,7 +1050,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if new_forecast and outdoor_temp is not None:
             try:
                 _eff_outdoor = new_forecast[0].effective_outdoor_temp or outdoor_temp
-            except Exception:
+            except (AttributeError, TypeError, IndexError):
                 pass
 
         # Aux heat activation learning and HP baseline watts tracking
@@ -1069,8 +1075,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     hvac_mode=thermo_state.hvac_mode or "off",
                     power_watts=power_watts,
                 )
-        except Exception:
-            _LOGGER.debug("Aux heat learner update failed", exc_info=True)
+        except (ValueError, TypeError, ZeroDivisionError):
+            _LOGGER.warning("Aux heat learner update failed", exc_info=True)
 
         # Compute resistive BTU for EKF (separates HP from strip contribution).
         # When a power sensor is available, subtract the learned HP baseline from
@@ -1092,7 +1098,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
         try:
             actual_cop = None
-            if outdoor_temp is not None and (self._use_adaptive or self._use_greybox):
+            if outdoor_temp is not None and self._use_adaptive:
                 mode = self.strategic.mode or "off"
                 actual_cop = self.counterfactual._cop_at_outdoor_temp(outdoor_temp, mode)
 
@@ -1110,7 +1116,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 aux_heat_active=aux_heat_active,
                 hp_baseline_watts=self.aux_heat_learner.learned_hp_watts,
             )
-        except Exception:
+        except (ValueError, TypeError, ZeroDivisionError, KeyError):
             _LOGGER.warning("Savings tracking failed", exc_info=True)
 
         # ── Baseline capture (during learning phase) ───────────────
@@ -1127,7 +1133,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     self.baseline_capture.build_template()
                     _LOGGER.info("Baseline schedule captured after %d days",
                                  self.baseline_capture.sample_days)
-        except Exception:
+        except (ValueError, TypeError, KeyError):
             _LOGGER.warning("Baseline capture failed", exc_info=True)
 
         # ── Counterfactual simulation step ─────────────────────────
@@ -1141,7 +1147,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 effective_mode = self.occupancy.get_effective_mode(
                     self._occupancy_timeline or None
                 )
-                from .adapters.occupancy import OccupancyAdapter, OccupancyMode
                 adj_cool = OccupancyAdapter.adjust_comfort_for_mode(
                     self.comfort_cool, "cool", effective_mode,
                 )
@@ -1178,7 +1183,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                         if self.aux_heat_learner.is_learned else None
                     ),
                 )
-        except Exception:
+        except (ValueError, TypeError, ZeroDivisionError, KeyError):
             _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
 
         # ── Performance profiler feed ─────────────────────────────
@@ -1225,21 +1230,21 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # ── Seed EKF from profiler (one-time) ─────────────────────
         try:
             self._try_seed_ekf_from_profiler()
-        except Exception:
+        except (ValueError, TypeError, KeyError, AttributeError):
             _LOGGER.warning("Profiler EKF seeding failed", exc_info=True)
 
         # ── Update accuracy tier ───────────────────────────────────
 
         try:
             self._update_accuracy_tier()
-        except Exception:
+        except (ValueError, TypeError, KeyError, AttributeError):
             _LOGGER.warning("Accuracy tier update failed", exc_info=True)
 
         # ── Model progress check (repair issue) ──────────────────
 
         try:
             self._check_model_progress()
-        except Exception:
+        except (ValueError, TypeError, KeyError, AttributeError):
             _LOGGER.warning("Model progress check failed", exc_info=True)
 
         # ── Periodic learning persistence ───────────────────────────
@@ -1249,12 +1254,19 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             try:
                 await self._persist_state()
                 self._last_learning_persist = now
-            except Exception:
+            except (OSError, ValueError, TypeError):
                 _LOGGER.warning("Failed to persist learning state, will retry next cycle", exc_info=True)
 
         return self._build_data(thermo_state)
 
     # ── Strategic optimization ──────────────────────────────────────
+
+    async def _safe_reoptimize(self) -> None:
+        """Run strategic optimization with error logging for fire-and-forget tasks."""
+        try:
+            await self._run_strategic_optimization()
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Background re-optimization failed", exc_info=True)
 
     async def _run_strategic_optimization(
         self, forecast: list[ForecastPoint] | None = None,
@@ -1373,9 +1385,20 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             comfort_cool = (comfort_cool[0] - delta, comfort_cool[1] + delta)
             comfort_heat = (comfort_heat[0] - delta, comfort_heat[1] + delta)
 
-        # Select active model and optimizer path
+        # Apply aggressiveness: conservative uses inner 60% of band,
+        # limiting how far the optimizer can push setpoints from midpoint.
+        if self._aggressiveness == AGGRESSIVENESS_CONSERVATIVE:
+            for name, rng in [("cool", comfort_cool), ("heat", comfort_heat)]:
+                band = rng[1] - rng[0]
+                margin = band * 0.2  # shrink 20% each side = inner 60%
+                narrowed = (rng[0] + margin, rng[1] - margin)
+                if name == "cool":
+                    comfort_cool = narrowed
+                else:
+                    comfort_heat = narrowed
+
+        # Select active model
         active_model = self._get_active_model()
-        use_greybox_now = self._should_use_greybox()
 
         # Update balance point.  Prefer the profiler's measured value (derived
         # from a trendline fit to real observations) over the adaptive model's
@@ -1385,20 +1408,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         profiler_bp = profiler_data.get("balance_point", {}).get("resist")
         if profiler_bp is not None:
             self.strategic.resist_balance_point = profiler_bp
-        elif active_model is self.adaptive_model or use_greybox_now:
+        elif active_model is self.adaptive_model:
             param_conf = self.estimator.parameter_confidence
             if param_conf.get("internal_coupling", 0) >= 0.1:
                 bp = self.adaptive_model.resist_balance_point
                 if bp is not None:
                     self.strategic.resist_balance_point = bp
 
-        # Configure strategic planner for grey-box or heuristic path
-        self.strategic._use_greybox = use_greybox_now
-
         # Temporarily swap model for optimization if using adaptive model
         original_model = self.optimizer.model
         original_sim_model = self.simulator.model
-        if active_model is not self.model and not use_greybox_now:
+        if active_model is not self.model:
             self.optimizer.model = active_model
             self.simulator.model = active_model
 
@@ -1492,7 +1512,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         occupancy_timeline: list[OccupancyForecastPoint] | None,
         indoor_temp: float,
     ) -> None:
-        """Plan pre-conditioning for the next AWAY→HOME transition."""
+        """Plan pre-conditioning for the next AWAY->HOME transition."""
+        # Skip pre-conditioning at conservative tier -- model predictions
+        # are not reliable enough for cost-optimal timing decisions.
+        if self._is_conservative_mode:
+            self._precondition_plan = None
+            return
+
         if not occupancy_timeline or not self.calendar_occupancy:
             self._precondition_plan = None
             return
@@ -1539,12 +1565,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
     @staticmethod
     def _load_departure_profiles(opts: dict) -> list[dict[str, str]]:
         """Load departure profiles from options, with legacy migration."""
-        import json as _json
-
         raw = opts.get(CONF_DEPARTURE_PROFILES)
         if raw:
             try:
-                profiles = _json.loads(raw)
+                profiles = json.loads(raw)
                 if isinstance(profiles, list):
                     return profiles
             except (ValueError, TypeError):
@@ -1577,9 +1601,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Parse humidity squelch pairs from JSON string."""
         if not raw:
             return []
-        import json as _json
         try:
-            pairs = _json.loads(raw)
+            pairs = json.loads(raw)
             if isinstance(pairs, list):
                 return [
                     p for p in pairs
@@ -1757,8 +1780,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.adaptive_model.heat_differential = self.model.heat_differential
         except AttributeError:
             pass
-        self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
-        self.strategic.greybox_optimizer = self.greybox_optimizer
 
         # Update downstream model references
         self.simulator.model = self.model
@@ -1938,8 +1959,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             if not self._paused:  # don't override user-initiated pause
                 return
             self._paused = False
-            _LOGGER.info("Pause constraint expired — resuming optimization")
-            self.hass.async_create_task(self._run_strategic_optimization())
+            _LOGGER.info("Pause constraint expired -- resuming optimization")
+            self.hass.async_create_task(self._safe_reoptimize())
 
     def export_model(self) -> dict:
         """Export learned Kalman filter parameters in human-readable format."""
@@ -1968,8 +1989,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
             self.adaptive_model.cool_differential = self.model.cool_differential
             self.adaptive_model.heat_differential = self.model.heat_differential
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
-            self.strategic.greybox_optimizer = self.greybox_optimizer
             _LOGGER.info(
                 "Imported model: %d observations, confidence=%.0f%%",
                 self.estimator._n_obs,
@@ -1998,7 +2017,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "old_mode": old_mode,
             "new_mode": new_mode,
         })
-        self.hass.async_create_task(self._run_strategic_optimization())
+        self.hass.async_create_task(self._safe_reoptimize())
 
     @callback
     def _handle_thermostat_state_change(self, event) -> None:
@@ -2008,10 +2027,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         if new_state is None:
             return
 
-        # HVAC mode change (heat→cool, etc.)
+        # HVAC mode change (heat->cool, etc.)
         if old_state and old_state.state != new_state.state:
             if self.watchdog.check_mode_change(new_state.state):
-                self.hass.async_create_task(self._run_strategic_optimization())
+                self.hass.async_create_task(self._safe_reoptimize())
 
     # ── Model tracker feeding ───────────────────────────────────────
 
@@ -2227,7 +2246,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                         result.get("samples_used", 0),
                         result.get("regression_residual", 0),
                     )
-            except Exception:
+            except (ValueError, TypeError, KeyError, ZeroDivisionError):
                 _LOGGER.warning(
                     "Coefficient calibration failed", exc_info=True
                 )
@@ -2258,21 +2277,11 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             return profiler_model
 
         # Fallback: adaptive model (EKF-derived) if available and not learning
-        if (self._use_adaptive or self._use_greybox) and self._activation_tier != ACTIVATION_TIER_LEARNING:
+        if self._use_adaptive and self._activation_tier != ACTIVATION_TIER_LEARNING:
             return self.adaptive_model
 
         # Last resort: conservative static defaults
         return self.model
-
-    def _should_use_greybox(self) -> bool:
-        """Determine whether to use the grey-box LP optimizer.
-
-        Deprecated: the heuristic optimizer with profiler-measured data
-        produces more accurate results than the LP with EKF-derived
-        parameters.  Always returns False.  The greybox code is retained
-        for potential future use with validated physics models.
-        """
-        return False
 
     # ── Helpers ─────────────────────────────────────────────────────
 
@@ -2306,17 +2315,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         safety_min, safety_max = self.safety_limits
         comfort = (max(comfort[0], safety_min), min(comfort[1], safety_max))
 
-        # Conservative activation: widen comfort band to reduce risk of
-        # discomfort when the model has limited HVAC performance data.
-        # Skip the learning-mode shrinking below — conservative mode
-        # manages its own comfort band width.
+        # Conservative activation: use inner 80% of comfort band to limit
+        # optimization aggressiveness when the model has limited HVAC data.
+        # A wider band lets the optimizer push temps further from midpoint
+        # (more pre-heating/cooling), so shrinking reduces that risk.
         if self._is_conservative_mode:
-            comfort = (
-                comfort[0] - CONSERVATIVE_COMFORT_BUFFER,
-                comfort[1] + CONSERVATIVE_COMFORT_BUFFER,
-            )
-            # Re-apply safety limits after widening
-            comfort = (max(comfort[0], safety_min), min(comfort[1], safety_max))
+            band = comfort[1] - comfort[0]
+            margin = band * 0.1  # shrink by 10% from each side = inner 80%
+            comfort = (comfort[0] + margin, comfort[1] - margin)
         elif self._is_learning_active():
             # Learning mode conservatism: use inner 60% of band (only when
             # NOT in conservative activation — conservative has its own widening)
@@ -2365,7 +2371,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Compute the activation tier (called once per cycle, cached by property).
 
         Profiler-primary: the profiler is the main confidence signal.
-        The EKF confidence is checked only as a secondary gate for greybox.
+        The EKF confidence is checked as a secondary signal.
         Baseline capture is no longer required -- the profiler bootstraps
         from recorder history and can produce a model within minutes.
         """
@@ -2753,7 +2759,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             try:
                 self.model_tracker = ModelTracker.from_dict(stored["model_tracker"])
                 _LOGGER.debug("Restored model tracker state")
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore model tracker — using fresh state",
                                 exc_info=True)
         if "solar_adjuster" in stored:
@@ -2761,7 +2767,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.solar_adjuster = SolarAdjuster.from_dict(stored["solar_adjuster"])
                 _LOGGER.debug("Restored solar adjuster (coefficient=%.3f)",
                               self.solar_adjuster.solar_coefficient)
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore solar adjuster — using fresh state",
                                 exc_info=True)
         if "override_tracker" in stored:
@@ -2769,7 +2775,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.override_tracker = OverrideTracker.from_dict(stored["override_tracker"])
                 _LOGGER.debug("Restored %d override records",
                               self.override_tracker.record_count)
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore override tracker — using fresh state",
                                 exc_info=True)
         if "savings_tracker" in stored:
@@ -2778,7 +2784,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 totals = self.savings_tracker.cumulative_totals()
                 _LOGGER.debug("Restored savings tracker (%.1f kWh saved cumulative)",
                               totals["kwh_saved"])
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore savings tracker — using fresh state",
                                 exc_info=True)
         if "coefficient_store" in stored:
@@ -2788,7 +2794,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     "Restored coefficient store (%d calibrations)",
                     self.coeff_store.calibration_count,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore coefficient store — using defaults",
                                 exc_info=True)
         if "coefficient_calibrator" in stored:
@@ -2797,7 +2803,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     stored["coefficient_calibrator"], self.coeff_store,
                 )
                 _LOGGER.debug("Restored coefficient calibrator")
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore coefficient calibrator — using fresh state",
                                 exc_info=True)
         if "thermal_estimator" in stored:
@@ -2805,14 +2811,12 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
                 self.estimator._coeff_store = self.coeff_store
                 self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-                self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
-                self.strategic.greybox_optimizer = self.greybox_optimizer
                 _LOGGER.info(
                     "Restored Kalman filter (%d observations, confidence=%.0f%%)",
                     self.estimator._n_obs,
                     self.estimator.confidence * 100,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning(
                     "Failed to restore thermal estimator — using fresh state. "
                     "The model will re-learn from scratch.",
@@ -2826,7 +2830,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     self.baseline_capture.sample_days,
                     self.baseline_capture.confidence * 100,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore baseline capture — using fresh state",
                                 exc_info=True)
         if "counterfactual" in stored:
@@ -2836,21 +2840,18 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     "Restored counterfactual simulator (virtual_temp=%.1f°F)",
                     self.counterfactual.virtual_indoor_temp,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore counterfactual simulator — using fresh state",
                                 exc_info=True)
         if "performance_profiler" in stored:
             try:
                 self.profiler = PerformanceProfiler.from_dict(stored["performance_profiler"])
-                # Update greybox optimizer's profiler reference (it was constructed
-                # with the original empty profiler before restoration)
-                self.greybox_optimizer._profiler = self.profiler
                 _LOGGER.debug(
                     "Restored performance profiler (%d observations, confidence=%.0f%%)",
                     self.profiler.total_observations,
                     self.profiler.confidence() * 100,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore performance profiler — using fresh state",
                                 exc_info=True)
         if "aux_heat_learner" in stored:
@@ -2865,7 +2866,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     self.aux_heat_learner.threshold_f,
                     self.aux_heat_learner.learned_hp_watts,
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore aux heat learner — using fresh state",
                                 exc_info=True)
 
@@ -2917,7 +2918,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         through the EKF to achieve meaningful model convergence immediately.
         """
         from .learning.history_bootstrap import async_bootstrap_from_history
-        from .const import DEFAULT_HISTORY_BOOTSTRAP_DAYS
 
         result = await async_bootstrap_from_history(
             hass=self.hass,
@@ -2940,8 +2940,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             # Rebuild dependent objects with updated estimator state
             self.estimator._coeff_store = self.coeff_store
             self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-            self.greybox_optimizer = GreyBoxOptimizer(self.estimator, self.coeff_store, profiler=self.profiler)
-            self.strategic.greybox_optimizer = self.greybox_optimizer
 
             # Reset profiler tracking so the first live cycle starts clean
             # (avoids perpetual skipped_interval from stale bootstrap timestamp)
@@ -3104,8 +3102,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                         round(pt.comfort_max, 1),
                     )
 
-        # Subsample to one point per hour (heuristic optimizer uses 5-min
-        # steps producing ~288 points; grey-box already uses hourly steps).
+        # Subsample to one point per hour (optimizer uses 5-min
+        # steps producing ~288 points).
         result = []
         seen_hours: set[int] = set()
         for pt in schedule.simulation:
@@ -3287,11 +3285,6 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "kalman_observations": self.estimator._n_obs,
             "using_adaptive_model": (
                 self._use_adaptive
-                and not self._use_greybox
-                and self._activation_tier != ACTIVATION_TIER_LEARNING
-            ),
-            "using_greybox_model": (
-                self._use_greybox
                 and self._activation_tier != ACTIVATION_TIER_LEARNING
             ),
             "learning_active": self._is_learning_active(),

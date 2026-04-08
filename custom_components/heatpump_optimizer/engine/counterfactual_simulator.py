@@ -381,7 +381,7 @@ class CounterfactualSimulator:
             rate_arbitrage = actual_kwh * (baseline_rate - actual_rate)
 
         return {
-            "runtime_savings_kwh": max(0.0, runtime_savings_kwh),
+            "runtime_savings_kwh": runtime_savings_kwh,
             "cop_savings_kwh": cop_savings_kwh,
             "rate_arbitrage_savings": rate_arbitrage,
         }

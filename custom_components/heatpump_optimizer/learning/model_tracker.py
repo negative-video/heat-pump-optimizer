@@ -1,20 +1,15 @@
-"""Model accuracy tracker — learns correction factors from prediction errors.
+"""Model accuracy tracker -- learns correction factors from prediction errors.
+
+DEPRECATED: Per-mode error corrections are superseded by the EKF's online
+learning (thermal_estimator.py). This module is retained only for diagnostic
+reporting and will be removed in a future version.
 
 Tracks predicted vs actual indoor temperatures over time, binned by:
   - HVAC mode (cool, heat, resist/off)
-  - Outdoor temperature range (5°F bins)
+  - Outdoor temperature range (5F bins)
 
 When the model consistently over- or under-predicts, applies correction factors
-to the performance model's delta lookups. This handles:
-  - Gradual system degradation (dirty filter, refrigerant leak)
-  - Seasonal changes not captured in the base profile
-  - Building envelope changes (new windows, insulation)
-
-TODO: Per-mode error corrections are now largely superseded by the EKF's
-online learning (thermal_estimator.py). The EKF continuously adapts all
-parameters, making bin-based correction factors redundant for most users.
-Consider deprecating once the EKF has proven reliable across a full
-heating+cooling season.
+to the performance model's delta lookups.
 """
 
 from __future__ import annotations

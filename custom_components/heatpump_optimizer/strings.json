@@ -35,7 +35,7 @@
       },
       "air_sensors": {
         "title": "Air Sensors",
-        "description": "Optional indoor and outdoor sensors that significantly improve the optimizer's accuracy. Detected sensors are pre-filled — adjust as needed. You can skip this step and configure sensors later.",
+        "description": "Optional indoor and outdoor sensors that significantly improve the optimizer's accuracy. Detected sensors are pre-filled -- adjust as needed. You can skip this step and configure sensors later.",
         "data": {
           "indoor_temp_entities": "Indoor temperature sensors",
           "indoor_humidity_entities": "Indoor humidity sensors",
@@ -88,8 +88,8 @@
       }
     },
     "error": {
-      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor — please remove the duplicate",
-      "invalid_model_data": "Invalid model data — paste the JSON from the export_model service",
+      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor -- please remove the duplicate",
+      "invalid_model_data": "Invalid model data -- paste the JSON from the export_model service",
       "cool_range_inverted": "Cooling minimum must be less than cooling maximum",
       "heat_range_inverted": "Heating minimum must be less than heating maximum",
       "safety_above_comfort": "Safety minimum must be below the comfort heating minimum",
@@ -145,7 +145,7 @@
       },
       "outdoor_sensors": {
         "title": "Outdoor & Building Sensors",
-        "description": "Optional outdoor and building envelope sensors that improve prediction accuracy. Detected sensors are pre-filled — adjust as needed.",
+        "description": "Optional outdoor and building envelope sensors that improve prediction accuracy. Detected sensors are pre-filled -- adjust as needed.",
         "data": {
           "outdoor_temp_entities": "Outdoor temperature sensors",
           "outdoor_humidity_entities": "Outdoor humidity sensors",
@@ -183,7 +183,7 @@
           "carbon_weight": "How much to weigh carbon intensity in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
           "cost_weight": "How much to weigh electricity cost in optimization decisions (0 = ignore, 1 = prioritize equally with energy efficiency).",
           "tou_schedule": "Time-of-use electricity rates let the optimizer shift HVAC runtime to cheaper hours.\n\nPaste a JSON array like this example (weekday afternoon peak at $0.35/kWh, everything else at $0.12/kWh):\n['{'\"days\": [0,1,2,3,4], \"start_hour\": 14, \"end_hour\": 19, \"rate\": 0.35'}', '{'\"days\": [0,1,2,3,4,5,6], \"start_hour\": 0, \"end_hour\": 24, \"rate\": 0.12'}']\n\nDays: 0=Monday through 6=Sunday. The optimizer checks rates from first to last and uses the first match, so put specific periods before general ones. Leave empty to use the rate entity or flat rate instead.",
-          "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode — widening the comfort range to reduce HVAC load during grid stress events."
+          "demand_response_entity": "An input_boolean or binary sensor that, when turned on, triggers demand response mode -- widening the comfort range to reduce HVAC load during grid stress events."
         }
       },
       "solar_panels": {
@@ -217,7 +217,6 @@
           "reoptimize_interval_hours": "Re-optimization interval",
           "max_setpoint_change_per_hour": "Maximum temperature change rate",
           "use_adaptive_model": "Use adaptive thermal model (Kalman filter)",
-          "use_greybox_model": "Use grey-box LP optimizer",
           "calibration_enabled": "Enable coefficient calibration (experimental)",
           "thermostat_deadband": "Thermostat deadband (°F)",
           "dwell_time_minutes": "Minimum time between setpoint changes"
@@ -228,7 +227,6 @@
           "reoptimize_interval_hours": "How often to rebuild the schedule from the latest forecast.",
           "max_setpoint_change_per_hour": "Limits how quickly the optimizer can change your setpoint to avoid jarring temperature swings.",
           "use_adaptive_model": "Enables online learning of your home's thermal characteristics via Extended Kalman Filter.",
-          "use_greybox_model": "Uses a physics-based LP optimizer with learned parameters. Requires the adaptive model.",
           "calibration_enabled": "Applies daily calibration of physics coefficients (wind infiltration, attic conductance, COP slopes) to your specific home. When off, the calibrator still runs in observe-only mode and logs proposed adjustments to diagnostic sensors.",
           "thermostat_deadband": "The temperature deadband (hysteresis) your thermostat uses. Used by the counterfactual simulator to model baseline behavior. Most thermostats use 0.5°F.",
           "dwell_time_minutes": "Minimum time between setpoint writes (5-30 min). Increase if your thermostat reacts poorly to frequent changes."
@@ -316,7 +314,7 @@
       },
       "schedule_advanced": {
         "title": "Advanced Calendar Settings",
-        "description": "These settings are only needed if your calendar contains events that indicate when you're home (e.g., 'WFH' or 'Remote'). Most users only need away keywords — the optimizer assumes you're home when there's no away event.",
+        "description": "These settings are only needed if your calendar contains events that indicate when you're home (e.g., 'WFH' or 'Remote'). Most users only need away keywords -- the optimizer assumes you're home when there's no away event.",
         "data": {
           "calendar_default_mode": "Default mode (no event)",
           "calendar_home_keywords": "Home keywords"
@@ -350,7 +348,7 @@
       },
       "appliance_edit": {
         "title": "Configure Appliance",
-        "description": "Configure the appliance details. For most appliances, just provide the power draw — thermal impact is calculated automatically. All electrical energy consumed by an appliance inside your home becomes heat.",
+        "description": "Configure the appliance details. For most appliances, just provide the power draw -- thermal impact is calculated automatically. All electrical energy consumed by an appliance inside your home becomes heat.",
         "data": {
           "name": "Name",
           "state_entity": "State entity",
@@ -361,7 +359,7 @@
         },
         "data_description": {
           "name": "A short name for this appliance (e.g., \"Water Heater\", \"Dryer\").",
-          "state_entity": "The entity that reports whether this appliance is running — a binary_sensor, switch, water_heater, or sensor.",
+          "state_entity": "The entity that reports whether this appliance is running -- a binary_sensor, switch, water_heater, or sensor.",
           "active_states": "Comma-separated state values that mean \"running\". Default: on. For sensors with specific states, use the exact string (e.g., \"compressor_running\").",
           "power_entity": "A sensor reporting real-time power in watts (e.g., from a smart plug). When available, live readings drive the thermal model for more accurate predictions.",
           "estimated_watts": "Power draw when running. This is the primary input for thermal impact calculation. If you have a power sensor, this serves as a fallback.",
@@ -410,7 +408,7 @@
       },
       "indoor_rooms_edit": {
         "title": "Room Sensors",
-        "description": "Assign temperature, humidity, and motion sensors to each room. Discovered sensors are pre-filled from your area registry — adjust as needed. Rooms: {room_details}",
+        "description": "Assign temperature, humidity, and motion sensors to each room. Discovered sensors are pre-filled from your area registry -- adjust as needed. Rooms: {room_details}",
         "data": {}
       },
       "blend_mitigation": {
@@ -445,13 +443,12 @@
       }
     },
     "error": {
-      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor — please remove the duplicate",
+      "sensor_overlap": "A sensor cannot be used as both indoor and outdoor -- please remove the duplicate",
       "cool_range_inverted": "Cooling minimum must be less than cooling maximum",
       "heat_range_inverted": "Heating minimum must be less than heating maximum",
       "safety_above_comfort": "Safety minimum must be below the comfort heating minimum",
       "comfort_above_safety": "Comfort cooling maximum must be below the safety maximum",
-      "greybox_requires_adaptive": "The grey-box LP optimizer requires the adaptive thermal model to be enabled",
-      "tou_invalid_json": "Invalid JSON — check syntax and try again",
+      "tou_invalid_json": "Invalid JSON -- check syntax and try again",
       "tou_not_array": "TOU schedule must be a JSON array of rate period objects",
       "tou_invalid_entry": "Each TOU entry must be a JSON object with at least a \"rate\" field",
       "tou_missing_rate": "Each TOU entry must include a \"rate\" field ($/kWh)"

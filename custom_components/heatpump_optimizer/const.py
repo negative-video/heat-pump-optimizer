@@ -115,9 +115,6 @@ CONSERVATIVE_MIN_MODE_OBS = 30
 # Comfort band widening in conservative mode (°F added to each side)
 CONSERVATIVE_COMFORT_BUFFER = 1.0
 
-# Grey-box model (LP optimizer + Kalman filter)
-CONF_USE_GREYBOX_MODEL = "use_greybox_model"
-
 # Coefficient calibration (slow outer-loop adaptation of physics coefficients)
 CONF_CALIBRATION_ENABLED = "calibration_enabled"
 

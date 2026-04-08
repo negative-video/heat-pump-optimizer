@@ -16,55 +16,68 @@ Most thermostats don't account for this — they react to the current temperatur
 
 ## How It Works
 
-The integration builds a physics-based thermal model of your home (insulation, thermal mass, HVAC capacity) that it learns automatically from thermostat readings via a Kalman filter. The model starts with textbook-average coefficients for wind infiltration, attic/crawlspace heat transfer, occupancy heat, and COP degradation, then a daily calibration pass analyzes prediction errors to adjust these coefficients to match your home's actual behavior. Three control layers run on top of it:
+The integration learns how your HVAC system actually performs by recording observed temperature change rates across outdoor temperatures and solar conditions. This empirical performance profiler -- the primary thermal model -- builds lookup tables from your thermostat data, binned by outdoor temperature and solar condition (sunny, cloudy, night). On first setup, a history bootstrap replays up to 10 days of recorder data through the profiler, so it can reach initial confidence within hours rather than weeks.
 
-1. **Strategic planner** — Re-optimizes setpoint schedule every 1–4 hours based on weather forecasts, electricity rates, and grid carbon intensity.
-2. **Tactical controller** — Checks reality against the model every 5 minutes and nudges the setpoint if the house is drifting.
-3. **Watchdog** — Detects manual thermostat changes, mode switches, and sensor failures.
+A 9-state Extended Kalman Filter runs in parallel as a secondary model, continuously estimating building physics (insulation, thermal mass, HVAC capacity, solar gain) for diagnostics and deep parameter learning. The profiler drives scheduling; the EKF provides supplementary insight.
 
-### Model Stability
+Three control layers run on top:
 
-The Extended Kalman Filter jointly estimates several coupled building parameters (insulation R-value, thermal mass, HVAC capacity, solar gain) from a single observation — your thermostat's temperature reading. Several safeguards prevent these estimates from diverging during low-information conditions:
+1. **Strategic planner** -- Re-optimizes setpoint schedule every 1-4 hours based on weather forecasts, electricity rates, and grid carbon intensity.
+2. **Tactical controller** -- Checks reality against the model every 5 minutes and nudges the setpoint if the house is drifting.
+3. **Watchdog** -- Detects manual thermostat changes, mode switches, and sensor failures.
 
-**Thermal mass and R-value bounds and gating** — Thermal mass is capped at 30,000 BTU/°F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges (R_inv: 0.01 to 1.0, giving R-values from 1 to 100 °F-hr/BTU). The initial thermal mass time constant is 24 hours so T_mass tracks daily temperature cycles within a day rather than acting as a near-constant phantom heat source that confounds R-value estimation. When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass - T_air| < 0.5F`), the filter freezes thermal mass learning entirely. A bell-shaped gain curve peaks at 3.0F delta (optimal observability) and tapers to zero at both extremes (below 0.5F = equilibrium, above 8.0F = likely filter divergence). Per-cycle rate limiting (5% max change for thermal mass, 5% for air capacitance, 1% for R-value) provides a final safety net. During early learning (first ~2 weeks), R-value rate limits are tightened further (ramping from 0.3% to 1.0% per cycle) to prevent the diurnal oscillations that occur when solar gain lag and thermal mass coupling confound envelope estimation.
+### Performance Profiler
 
-**R-value stability during HVAC operation** — When the HVAC is actively running, the dominant temperature forcing is from the compressor output, not the building envelope. The filter attenuates R-value and internal coupling Kalman gains by 80% during active HVAC to prevent compressor-driven temperature changes from corrupting insulation estimates.
+The profiler accumulates observed HVAC performance into solar-aware 2D lookup tables -- keyed by `(outdoor_temp, solar_condition)` -- across four modes: compressor cooling, compressor heating, auxiliary heat, and passive drift (no HVAC). Solar condition is classified from the attic temperature sensor: sunny when the attic exceeds outdoor by more than 10F, cloudy at 7-10F above outdoor, and night otherwise.
 
-**Solar-to-mass coupling** — 30% of solar heat gain goes directly to the thermal mass node (floors, walls, furniture heated by sunlight through windows), not just the air. Without this, the EKF's thermal mass state barely moves during sunny days, and when solar gain drops at sunset the model can't explain why the house stays warmer than expected -- it misattributes the thermal mass heat release to a leaky envelope, causing R-value to crash by 5-10% every sunny evening.
+**Confidence** is the geometric mean of three factors per mode: coverage (fraction of the expected outdoor temp range with data), depth (total observation hours vs a 48-hour minimum), and quality (fraction of temperature bins with 6+ samples). Overall confidence is the minimum across modes with at least 30 observations. The profiler rejects outliers (temperature changes greater than 2F per 5-minute interval or rates exceeding 15F/hr) and skips observations while auxiliary appliances are active.
 
-**R-value stability during solar transitions** — When solar gain is changing rapidly (sunrise/sunset), the Kalman gain for R-value is attenuated proportionally to the rate of solar change. This prevents the EKF from blaming envelope resistance for temperature changes driven by the solar-to-mass pathway lag during transitions.
+When the profiler reaches 70% confidence but the EKF is below 30%, the profiler's measured trendlines seed EKF parameters as a one-time prior injection, accelerating EKF convergence from weeks to days.
 
-**Profiler-to-EKF seeding** — When the performance profiler reaches 70% confidence but the EKF is still below 30%, the profiler's empirically measured trendlines are used to seed EKF parameters (R-value, thermal capacity, HVAC capacity) as a one-time prior injection. This accelerates EKF convergence from weeks to days, especially in single-mode seasons where the EKF lacks heating or cooling observations.
+<details>
+<summary><strong>EKF stability safeguards (secondary model)</strong></summary>
 
-**Early learning damping** — During the first ~12 hours (144 observations), parameter Kalman gains are scaled from 50% to 100%. This prevents the wide initial priors from causing chaotic parameter jumps based on a handful of readings while still allowing meaningful convergence.
+The Extended Kalman Filter jointly estimates several coupled building parameters (insulation R-value, thermal mass, HVAC capacity, solar gain) from a single observation -- your thermostat's temperature reading. Several safeguards prevent these estimates from diverging during low-information conditions:
 
-**Persistent bias correction** — When the model consistently over- or under-predicts indoor temperature (mean innovation magnitude > 1.5°F over the last hour), parameter Kalman gains are temporarily boosted up to 3x to accelerate self-correction. This prevents the EKF from drifting for hours without meaningfully adjusting its estimates. R-value and internal coupling gains are excluded from the boost when HVAC is running or solar gain is changing rapidly, since in those conditions the bias is likely from HVAC or solar model error rather than envelope estimation.
+**Thermal mass and R-value bounds and gating** -- Thermal mass is capped at 30,000 BTU/F (realistic for even heavy masonry homes) and R-value conductance is bounded to physical ranges (R_inv: 0.01 to 1.0, giving R-values from 1 to 100 F-hr/BTU). The initial thermal mass time constant is 24 hours so T_mass tracks daily temperature cycles within a day rather than acting as a near-constant phantom heat source that confounds R-value estimation. When the hidden thermal mass temperature is near equilibrium with air temperature (`|T_mass - T_air| < 0.5F`), the filter freezes thermal mass learning entirely. A bell-shaped gain curve peaks at 3.0F delta (optimal observability) and tapers to zero at both extremes (below 0.5F = equilibrium, above 8.0F = likely filter divergence). Per-cycle rate limiting (5% max change for thermal mass, 5% for air capacitance, 1% for R-value) provides a final safety net. During early learning (first ~2 weeks), R-value rate limits are tightened further (ramping from 0.3% to 1.0% per cycle) to prevent the diurnal oscillations that occur when solar gain lag and thermal mass coupling confound envelope estimation.
 
-**R-value diurnal oscillation damping** — R-value can absorb systematic prediction errors from solar gain lag and thermal mass coupling, causing it to oscillate with the day/night cycle (rising when outdoor approaches indoor and the envelope signal is weak, crashing when outdoor diverges and the over-estimated R can't explain the fast change). A rolling 24-hour window tracks the R-value range; when the swing exceeds 20%, the per-cycle rate limit tightens proportionally (down to 10% of normal at 50%+ swing). This self-correcting mechanism dampens the aliasing without slowing long-term convergence.
+**R-value stability during HVAC operation** -- When the HVAC is actively running, the dominant temperature forcing is from the compressor output, not the building envelope. The filter attenuates R-value and internal coupling Kalman gains by 80% during active HVAC to prevent compressor-driven temperature changes from corrupting insulation estimates.
 
-**Tonnage-anchored HVAC capacity** — When you provide system tonnage at setup, the filter treats it as a strong prior: initial uncertainty is ±10% (not the ±316% blind default), process noise is reduced 100x, and per-cycle drift is capped at 2%. This prevents the capacity estimate from collapsing during early learning when the air thermal capacitance (`C_air`) is still poorly estimated. The filter can still converge to the true value over days — it just can't abandon the rated capacity in a few hours. Without tonnage, the filter converges freely from a generic default.
+**Solar-to-mass coupling** -- 30% of solar heat gain goes directly to the thermal mass node (floors, walls, furniture heated by sunlight through windows), not just the air. Without this, the EKF's thermal mass state barely moves during sunny days, and when solar gain drops at sunset the model can't explain why the house stays warmer than expected -- it misattributes the thermal mass heat release to a leaky envelope, causing R-value to crash by 5-10% every sunny evening.
 
-**HVAC observability gating** — Cooling capacity only learns when cooling is running; heating capacity only learns when heating is running. Cross-correlations are zeroed for unobserved modes to prevent covariance leakage from dragging idle-mode estimates toward bounds.
+**R-value stability during solar transitions** -- When solar gain is changing rapidly (sunrise/sunset), the Kalman gain for R-value is attenuated proportionally to the rate of solar change. This prevents the EKF from blaming envelope resistance for temperature changes driven by the solar-to-mass pathway lag during transitions.
 
-**Air capacitance idle-mode isolation** — Air thermal capacitance (`C_air`) and envelope resistance (`R_inv`) are confounded during idle operation: the observed temperature decay rate equals `C_inv * R_inv * area`, so either parameter can absorb prediction errors. Without isolation, C_air oscillates wildly (100x swings) during extended idle periods and contaminates R-value through off-diagonal covariance coupling. When HVAC is idle, C_inv process noise is frozen and cross-correlations are zeroed -- the same pattern used for HVAC capacity and thermal mass observability gating. Only active HVAC cycling provides an independent signal (known heat input) that breaks the degeneracy and allows C_air to converge. Per-cycle rate limiting (5% max change) and tightened bounds (200 to 10,000 BTU/F) provide additional stability.
+**Early learning damping** -- During the first ~12 hours (144 observations), parameter Kalman gains are scaled from 50% to 100%. This prevents the wide initial priors from causing chaotic parameter jumps based on a handful of readings while still allowing meaningful convergence.
+
+**Persistent bias correction** -- When the model consistently over- or under-predicts indoor temperature (mean innovation magnitude > 1.5F over the last hour), parameter Kalman gains are temporarily boosted up to 3x to accelerate self-correction. R-value and internal coupling gains are excluded from the boost when HVAC is running or solar gain is changing rapidly, since in those conditions the bias is likely from HVAC or solar model error rather than envelope estimation.
+
+**R-value diurnal oscillation damping** -- R-value can absorb systematic prediction errors from solar gain lag and thermal mass coupling, causing it to oscillate with the day/night cycle. A rolling 24-hour window tracks the R-value range; when the swing exceeds 20%, the per-cycle rate limit tightens proportionally (down to 10% of normal at 50%+ swing).
+
+**Tonnage-anchored HVAC capacity** -- When you provide system tonnage at setup, the filter treats it as a strong prior: initial uncertainty is +/-10% (not the +/-316% blind default), process noise is reduced 100x, and per-cycle drift is capped at 2%. Without tonnage, the filter converges freely from a generic default.
+
+**HVAC observability gating** -- Cooling capacity only learns when cooling is running; heating capacity only learns when heating is running. Cross-correlations are zeroed for unobserved modes to prevent covariance leakage.
+
+**Air capacitance idle-mode isolation** -- Air thermal capacitance (`C_air`) and envelope resistance (`R_inv`) are confounded during idle operation. When HVAC is idle, C_inv process noise is frozen and cross-correlations are zeroed. Only active HVAC cycling provides an independent signal (known heat input) that breaks the degeneracy and allows C_air to converge.
+
+</details>
 
 ## Features
 
-- **Automatic learning** — Extended Kalman Filter estimates building thermal parameters from thermostat data, with optional history bootstrap for faster convergence.
-- **Graduated activation** — Starts optimizing conservatively once it has enough data for current conditions, rather than waiting for full confidence on all parameters. Four tiers: learning, conservative, standard, confident.
-- **Forecast-driven scheduling** — Hourly weather forecasts, with optional electricity rate and carbon intensity awareness.
-- **Savings tracking** — A counterfactual simulation of what your thermostat would have done without optimization, decomposed into runtime, COP, rate, and carbon components.
-- **Occupancy-aware** — Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
-- **Room-aware sensing** — Weights indoor temperature by room occupancy instead of averaging all sensors equally.
-- **House thermal load breakdown** — Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
-- **Temperature profile chart** — Observation coverage visualization showing where the model has data and where gaps remain, with per-mode trendlines and observation density by outdoor temperature.
-- **Per-parameter confidence** — Model confidence broken down by parameter (insulation, thermal mass, heating capacity, cooling capacity, solar gain) with human-readable explanations of what the model still needs to learn.
-- **Auxiliary appliances** — Model thermal impacts of other equipment (heat pump water heaters, dryers, ovens) so the Kalman filter doesn't confuse their effects with building parameter changes.
-- **Aux/emergency heat awareness** — Automatically learns your heat pump's baseline power draw and derives the resistive strip's BTU contribution so the EKF treats it as a known input rather than a surprise heating event.
-- **Sleep schedule** — Configure tighter nighttime comfort bounds with separate heating and cooling targets, active during a customizable sleep window.
-- **Demand response** — Temporarily widen comfort bounds via service call or automation.
-- **Tier-aware dashboard** — Custom sidebar panel adapts its layout to your current learning stage: live observation cards and a retrospective chart during learning mode; savings, forecast, and thermal profile views once calibrated.
-- **Diagnostic sensors** — 50+ entities exposing model state, thermal load breakdown, predictions, savings breakdowns, and confidence levels.
+- **Automatic learning** -- Performance profiler builds empirical lookup tables of your HVAC's actual temperature change rates, binned by outdoor temperature and solar condition. History bootstrap replays recorder data on first startup for immediate progress. A secondary EKF estimates building physics in parallel for diagnostics.
+- **Graduated activation** -- Starts optimizing conservatively once the profiler has enough data for current conditions, rather than waiting for full model convergence. Four tiers: learning, conservative, standard, confident.
+- **Forecast-driven scheduling** -- Hourly weather forecasts, with optional electricity rate and carbon intensity awareness.
+- **Savings tracking** -- A counterfactual digital twin simulates what your thermostat would have done without optimization, using the profiler's measured performance data. Decomposed into runtime, COP, rate, and carbon components.
+- **Occupancy-aware** -- Widens comfort range when away, with calendar integration and pre-conditioning before arrival.
+- **Room-aware sensing** -- Weights indoor temperature by room occupancy instead of averaging all sensors equally. Includes blend mitigation (detects and compensates for Ecobee/Nest satellite sensor blending) and humidity squelch (suppresses cooling setpoint changes when high humidity would trigger unnecessary dehumidification).
+- **House thermal load breakdown** -- Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
+- **Temperature profile chart** -- Observation coverage visualization showing where the profiler has data and where gaps remain, with per-mode trendlines and observation density by outdoor temperature.
+- **Per-mode confidence** -- Profiler confidence broken down by HVAC mode (cooling, heating, aux heat, passive drift) with coverage, depth, and quality metrics. EKF provides supplementary per-parameter confidence (insulation, thermal mass, capacity, solar gain).
+- **Auxiliary appliances** -- Model thermal impacts of other equipment (heat pump water heaters, dryers, ovens) so the profiler skips contaminated observations and the EKF doesn't confuse their effects with building parameter changes.
+- **Aux/emergency heat awareness** -- Automatically learns your heat pump's baseline power draw and derives the resistive strip's BTU contribution so the EKF treats it as a known input rather than a surprise heating event.
+- **Sleep schedule** -- Configure tighter nighttime comfort bounds with separate heating and cooling targets, active during a customizable sleep window.
+- **Demand response** -- Temporarily widen comfort bounds via service call or automation.
+- **Tier-aware dashboard** -- Custom sidebar panel adapts its layout to your current learning stage: live observation cards and a retrospective chart during learning mode; savings, forecast, and thermal profile views once calibrated.
+- **Diagnostic sensors** -- 50+ entities exposing model state, thermal load breakdown, predictions, savings breakdowns, and confidence levels.
 
 ## Getting Started
 
@@ -89,28 +102,30 @@ Or manually:
 
 ### Initial Setup
 
-The config flow has three steps:
+The config flow walks through five screens:
 
 | Step | What you'll configure |
 |------|----------------------|
-| **Equipment** | Thermostat + one or more weather entities (first is primary, rest are fallbacks) |
+| **Equipment** | Thermostat, weather entities, HVAC specs (tonnage, square footage, SEER) |
+| **Temperature Sensors** | Indoor and outdoor temperature/humidity sensor entities |
+| **Presence** | Occupancy entities for away detection (optional, can skip) |
 | **Thermal Model** | Learn automatically or restore a previously exported model |
 | **Temperature Boundaries** | Comfort range (where the optimizer works) and safety limits (never exceeded) |
 
-After setup, open **Configure** on the integration card for advanced options: sensors, energy tracking, optimizer tuning, occupancy, calendars, room-aware sensing, and auxiliary appliances.
+After setup, open **Configure** on the integration card for advanced options: energy tracking, optimizer tuning, calendars, sleep schedule, blend mitigation, room-aware sensing, and auxiliary appliances.
 
 ### What to Expect
 
 | Timeline | What's happening | Dashboard shows |
 |----------|-----------------|-----------------|
-| **Day 1** | Passive observation only — the optimizer watches your thermostat without changing it. Model starts collecting observations. | Learning mode layout: retrospective 48h chart, three learning-progress cards (thermal model, baseline schedule, profiler), milestone checklist, today's snapshot |
-| **Week 1** | Baseline capture completes (7 day minimum). No setpoint writes until this finishes. | Same as Day 1 until baseline completes; milestone "Baseline schedule" marks as done |
-| **Week 2–3** | Graduated activation begins. The optimizer starts making conservative decisions based on well-observed conditions. | Conservative activation: wider comfort bands, savings tracking begins |
-| **Month 1–2+** | Confidence grows as it observes different weather patterns. Activation tier upgrades from conservative to standard to confident as data coverage expands. | Full optimization: normal comfort bands, aggressive pre-conditioning, full savings panel |
+| **Hours 0-6** | History bootstrap replays up to 10 days of recorder data through the profiler. If sufficient history exists, the profiler can reach initial confidence within hours. | Learning mode layout: retrospective 48h chart, three learning-progress cards (thermal model, baseline schedule, profiler), milestone checklist, today's snapshot |
+| **Days 1-3** | Profiler accumulates live observations across current weather conditions. Conservative optimization may begin as soon as the profiler has enough coverage for the active HVAC mode. Baseline capture runs in the background. | Conservative activation: wider comfort bands, savings tracking begins |
+| **Days 4-14** | Profiler coverage grows as it observes more outdoor temperatures and solar conditions. Activation tier upgrades from conservative to standard. EKF converges in parallel for diagnostics. | Standard optimization: normal comfort bands, full savings panel |
+| **Week 2+** | Full confidence as the profiler covers the current season's conditions. Tier upgrades to confident. | Full optimization: aggressive pre-conditioning, rate arbitrage, thermal profile views |
 
-> **Tip:** Providing HVAC tonnage and home square footage during setup significantly speeds up model convergence. Restoring a previously exported model is immediate.
+> **Tip:** Providing HVAC tonnage and home square footage during setup improves energy accounting accuracy from day one. Restoring a previously exported model is immediate.
 
-> **History bootstrap:** On first setup, the integration loads up to 10 days of thermostat and weather history from Home Assistant's recorder. If sufficient data exists, this can reduce or skip the cold-start learning period.
+> **History bootstrap:** On first setup, the integration loads up to 10 days of thermostat and weather history from Home Assistant's recorder. This is the primary mechanism for fast cold-start -- the profiler can reach initial confidence from historical data alone, often within hours of setup.
 
 ### Graduated Activation
 
@@ -118,16 +133,16 @@ Rather than waiting for a single global confidence score to reach a fixed thresh
 
 | Tier | Requirements | Behavior |
 |------|-------------|----------|
-| **Learning** | Baseline not yet captured (first 7 days) | Passive observation only. No thermostat changes. |
-| **Conservative** | Baseline captured + passive drift profiler >= 70% confident + at least 30 HVAC observations in active mode | Optimization active with wider comfort bands (+/- 1F). No aggressive pre-conditioning. Shorter lookahead window. |
-| **Standard** | Global EKF confidence >= 50%, OR mode-specific EKF confidence >= 50%, OR profiler per-mode confidence >= 50% | Full optimization with normal comfort bands. |
-| **Confident** | Global EKF >= 70% or profiler overall confidence >= 70% | Aggressive pre-conditioning, rate arbitrage, full forecast lookahead. |
+| **Learning** | Profiler accumulating initial observations. History bootstrap may complete this within hours. | Passive observation only. No thermostat changes. |
+| **Conservative** | Profiler passive drift confidence >= 70% + at least 30 HVAC observations in active mode | Optimization active with wider comfort bands (+/- 1F). No aggressive pre-conditioning. Shorter lookahead window. |
+| **Standard** | Profiler per-mode confidence >= 50% for the current HVAC mode | Full optimization with normal comfort bands. |
+| **Confident** | Profiler overall confidence >= 70% | Aggressive pre-conditioning, rate arbitrage, full forecast lookahead. |
 
-**Why graduated activation?** A traditional single-threshold approach forces users to wait 6+ weeks for value because the global confidence score averages across all learned parameters equally. Parameters for conditions the home hasn't experienced (e.g., cooling capacity in spring, aux heat performance in summer) drag the score down even though the model may have excellent data for current conditions.
+**Why graduated activation?** The profiler builds confidence by accumulating observations across outdoor temperature bins and solar conditions. It reaches useful confidence for current conditions quickly -- often within hours via history bootstrap -- because it only needs to cover the temperature ranges you're actually experiencing. Modes for conditions the home hasn't seen (e.g., cooling capacity in spring, aux heat in summer) are excluded from the confidence calculation until they accumulate enough data.
 
 **Condition matching:** The optimizer only operates within temperature ranges it has observed. If outdoor conditions fall outside the profiler's data range for the current HVAC mode, the system automatically falls back to conservative behavior. The temperature profile chart in the dashboard shows exactly which conditions the model covers.
 
-**Mode-specific confidence:** The EKF tracks seven physical parameters (envelope R-value, internal coupling, air mass, thermal mass, cooling capacity, heating capacity, solar gain). Not all parameters matter equally for every mode. Heating mode primarily needs envelope parameters + heating capacity. Cooling mode needs envelope parameters + cooling capacity + solar gain. The `mode_confidence()` metric only considers relevant parameters for the current operating mode.
+**Per-mode confidence:** The profiler tracks four modes independently: cooling, heating, auxiliary heat, and passive drift. Confidence per mode is the geometric mean of coverage (fraction of expected outdoor temp range with data), depth (total hours vs a 48-hour minimum), and quality (bins with 6+ samples). This means the profiler can be confident about cooling performance without needing any heating data, and vice versa.
 
 ### Dashboard
 
@@ -137,9 +152,9 @@ A **Heat Pump** tab appears in the sidebar after installation. Its layout adapts
 
 While the system is building its baseline, the panel shifts focus from forecasting to observing:
 
-- **Retrospective chart** — 48h of actual indoor and outdoor temperatures with HVAC on/off shading. The "Model" trace shows the EKF's measurement-corrected estimate of indoor temperature — every 5 minutes the Kalman filter predicts where the temperature should be, compares that prediction to the actual thermostat reading, and corrects its estimate using the Kalman gain. The Model dots should track actual readings closely (typically within 0.5°F); persistent divergence indicates the filter hasn't converged yet or conditions are outside its experience. The separate "Forecast" trace (hollow circles, right of the "Now" line) shows forward-looking simulation using the currently learned parameters — these have no future measurements to correct against, so they may drift.
-- **Three progress cards** — Thermal Model (confidence % with per-parameter breakdown, R-value with climate-relative quality label, thermal mass, capacity), Baseline Schedule (day-of-week dot grid showing which days have been captured), and Performance Data (per-mode observation counts and confidence).
-- **Temperature profile chart** — Scatter/density chart showing observed indoor temperature change rate vs outdoor temperature, colored by HVAC mode (heating, cooling, passive drift). Trendlines drawn only within the observed temperature range. Shows at a glance where the model has data and where gaps remain.
+- **Retrospective chart** -- 48h of actual indoor and outdoor temperatures with HVAC on/off shading. The "Model" trace shows the EKF's measurement-corrected estimate of indoor temperature (diagnostic). The separate "Forecast" trace (hollow circles, right of the "Now" line) shows forward-looking simulation using the profiler's measured performance data.
+- **Three progress cards** -- Performance Profiler (per-mode confidence with coverage, depth, and quality breakdown), Thermal Model (EKF confidence % with per-parameter breakdown, R-value, thermal mass, capacity), and Baseline Schedule (day-of-week dot grid showing which days have been captured).
+- **Temperature profile chart** -- Scatter/density chart showing observed indoor temperature change rate vs outdoor temperature, colored by HVAC mode (heating, cooling, passive drift). Trendlines drawn only within the observed temperature range. Shows at a glance where the profiler has data and where gaps remain.
 - **Milestone checklist** — Step-by-step progress from "sensors connected" through "full optimization enabled." Shows which step is currently in progress.
 - **Today's Snapshot** — Objective energy facts for the day (estimated kWh, current draw, outdoor temp range, aux heat if any). No savings comparisons until the baseline completes.
 
@@ -187,7 +202,7 @@ None of these are required. Each one improves accuracy or unlocks additional fea
 | Electricity rate | Cost-aware optimization — shift runtime to cheaper hours |
 | Attic temperature | Boundary heat transfer through ceiling; duct efficiency correction (see below) |
 | Crawlspace temperature | Boundary heat transfer through floor; improves winter heat loss modeling |
-| Door/window contact sensors | Infiltration scaling — EKF pauses parameter updates while open to avoid corrupting envelope estimates |
+| Door/window contact sensors | Infiltration scaling -- profiler skips observations and EKF pauses parameter updates while open to avoid corrupting estimates |
 
 ### Comfort and Safety Ranges
 
@@ -196,12 +211,12 @@ None of these are required. Each one improves accuracy or unlocks additional fea
 
 ### HVAC System Specifications
 
-The integration asks for a few optional system specs during initial setup. Every field can be left blank — the model will still converge, just more slowly. Providing them tightens the EKF's initial covariance and seeds the energy accounting with accurate values from day one, rather than waiting for the learning pipeline to figure them out over weeks.
+The integration asks for a few optional system specs during initial setup. Every field can be left blank -- the profiler converges quickly regardless. Providing them seeds the energy accounting with accurate values from day one and tightens the EKF's initial covariance for faster secondary model convergence.
 
 | Field | Where to find it | Effect |
 |---|---|---|
 | **Home conditioned area (sq ft)** | Listing, property tax record, or floor plan | Seeds air thermal capacitance (`C_air`); a 1,000 ft² condo and a 4,000 ft² house have 4× different thermal mass |
-| **System tonnage** | Outdoor unit nameplate, HVAC permit, or installer paperwork | Seeds `Q_cool` / `Q_heat` priors in the EKF at ±10% with reduced process noise and per-cycle rate limiting, so the filter respects the rated capacity during early learning rather than overriding it. Without tonnage, the filter starts at a generic default and converges freely over ~2 weeks |
+| **System tonnage** | Outdoor unit nameplate, HVAC permit, or installer paperwork | Derives rated power draw for energy accounting; seeds `Q_cool` / `Q_heat` priors in the EKF at +/-10% for faster secondary model convergence |
 | **Aux / emergency heat type** | Thermostat wiring label (`W2`/`E`), HVAC documentation, or air handler label | `electric_strip` enables BTU injection into the EKF when no power sensor is present (see below); `gas`/`oil` flags heat as non-electric for cost modeling |
 | **Aux heat capacity (kW)** | Air handler nameplate (e.g., "10 kW" strip kit) | Provides an accurate BTU estimate for each aux heating interval when no circuit power meter is configured |
 
@@ -240,7 +255,7 @@ If per-panel area and count are both provided, they take precedence over the tot
 
 ### Auxiliary Appliances
 
-Equipment that impacts indoor temperature — such as a heat pump water heater extracting heat from conditioned air, or a dryer adding heat — can be modeled so the Kalman filter treats their thermal effects as known inputs rather than attributing them to building parameter changes.
+Equipment that impacts indoor temperature -- such as a heat pump water heater extracting heat from conditioned air, or a dryer adding heat -- can be modeled so the profiler skips contaminated observations and the EKF treats their thermal effects as known inputs rather than attributing them to building parameter changes.
 
 > **Aux/emergency heat (resistive strips)** is handled separately and requires no manual configuration. The integration automatically learns your heat pump's baseline power draw from observed non-aux heating intervals, then uses the difference between measured circuit watts and that learned baseline to compute how much heat the resistive strips are actually producing each interval. That derived BTU value (`Q_aux_resistive`) is injected into the EKF as an exogenous load. See [Aux Heat Learner](#aux-heat-learner) in the Math section for the full derivation.
 
@@ -346,7 +361,7 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Model Confidence | Kalman filter confidence level | % |
+| Model Confidence | Profiler confidence level (primary); EKF confidence available as secondary diagnostic | % |
 | Envelope R-Value | Learned envelope thermal resistance | °F·hr/BTU |
 | Thermal Mass | Learned building thermal mass | BTU/°F |
 | Cooling Capacity | Learned base cooling output at 75°F reference | BTU/hr |
@@ -354,13 +369,13 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 | Effective Cooling Capacity | Cooling output adjusted for current outdoor temperature | BTU/hr |
 | Effective Heating Capacity | Heating output adjusted for current outdoor temperature | BTU/hr |
 | Thermal Mass Temperature | Hidden thermal mass node temperature | °F |
-| Grey-Box Active | Whether the LP-based optimizer is being used | — |
+| Grey-Box Active | Deprecated (always false) | -- |
 
 #### Predictions and Diagnostics
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Predicted Temperature | EKF posterior estimate of indoor temperature (measurement-corrected each cycle) | °F |
+| Predicted Temperature | EKF posterior estimate of indoor temperature (diagnostic; profiler drives scheduling) | °F |
 | Prediction Error | Difference between actual and predicted temperature | °F |
 | Model Accuracy | Rolling mean absolute error of predictions | °F |
 | Tactical Correction | Real-time setpoint correction from Layer 2 | °F |
@@ -450,7 +465,7 @@ The profiler builds lookup tables of observed HVAC performance (°F/hr change vs
 
 Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across modes with at least 30 observations — modes with fewer observations are excluded from the calculation and hidden from the card until they accumulate enough data. This prevents seasonal modes (e.g., aux heat in spring) from permanently dragging confidence to 0%.
 
-The profiler builds coverage from live observations across all HVAC modes and outdoor temperature bins. As more varied weather is experienced, the profiler's confidence grows and its measured reality data eventually supersedes the EKF-derived model for heuristic optimization. The profiler also feeds the grey-box LP optimizer (blending empirical deltas with EKF parameters based on relative confidence) and provides one-time prior seeding for the EKF when the profiler reaches confidence before the filter converges.
+The profiler builds coverage from live observations across all HVAC modes, outdoor temperature bins, and solar conditions (sunny, cloudy, night). As more varied weather is experienced, the profiler's confidence grows. The profiler is the primary model driving schedule optimization and provides one-time prior seeding for the EKF when the profiler reaches confidence before the filter converges.
 
 | Entity | Description | Unit |
 |--------|-------------|------|
@@ -676,23 +691,25 @@ automation:
 <details>
 <summary><strong>How Savings Tracking Works</strong></summary>
 
-The integration maintains a counterfactual simulation — a parallel model of what your thermostat would have done without optimization, running against the same actual weather.
+The integration maintains a counterfactual digital twin -- a parallel simulation of what your thermostat would have done without optimization, using the profiler's measured performance data against the same actual weather.
+
+The digital twin uses a dual-setpoint thermostat model (separate heat and cool setpoints, matching how real thermostats operate) with baseline setpoints derived from your comfort configuration and occupancy mode. Solar-condition-aware passive drift calculations ensure the counterfactual accurately captures sunny vs cloudy day differences.
 
 Each hour, it compares the optimizer's actual behavior against this baseline:
 
-- **Runtime savings** — Fewer total runtime minutes while maintaining comfort
-- **COP savings** — Runtime shifted to outdoor temperatures where the heat pump is more efficient
-- **Rate arbitrage** — Runtime shifted to cheaper electricity hours (requires rate sensor or TOU schedule)
-- **Carbon shifting** — Runtime shifted to hours when the grid is cleaner (requires CO₂ intensity sensor)
+- **Runtime savings** -- Fewer total runtime minutes while maintaining comfort
+- **COP savings** -- Runtime shifted to outdoor temperatures where the heat pump is more efficient
+- **Rate arbitrage** -- Runtime shifted to cheaper electricity hours (requires rate sensor or TOU schedule)
+- **Carbon shifting** -- Runtime shifted to hours when the grid is cleaner (requires CO2 intensity sensor)
 
 Savings accuracy improves over time:
 
 | Tier | When | Panel layout | Meaning |
 |------|------|-------------|---------|
-| **Learning** | Days 0–7 | Retrospective chart, progress cards, milestone checklist, today's snapshot (no savings) | Baseline still being captured; savings suppressed |
-| **Estimated** | ~Day 7+ | Savings panel with ±uncertainty label in amber, rough indoor forecast | Baseline captured; model confidence still building |
-| **Simulated** | ~Week 2+ | Full savings panel + forecast, counterfactual digital twin active | Thermal model producing useful estimates |
-| **Calibrated** | Weeks–months | Full panel including thermal profile card with position bars and narrative | Model and baseline both high-confidence |
+| **Learning** | First hours-days | Retrospective chart, progress cards, milestone checklist, today's snapshot (no savings) | Profiler accumulating initial data; savings suppressed |
+| **Estimated** | ~Day 1-3+ | Savings panel with +/-uncertainty label in amber, rough indoor forecast | Profiler reaching confidence; counterfactual active |
+| **Simulated** | ~Days 3-7+ | Full savings panel + forecast, counterfactual digital twin fully operational | Profiler confident, accurate counterfactual |
+| **Calibrated** | Week 2+ | Full panel including thermal profile card with position bars and narrative | Profiler and EKF both high-confidence |
 
 </details>
 
@@ -709,25 +726,9 @@ Savings accuracy improves over time:
 
 ### Thermal Model
 
-Two-node RC thermal circuit with direct solar-to-mass coupling:
+**Primary: Performance Profiler** -- Empirical lookup tables of observed temperature change rates, binned by `(outdoor_temp, solar_condition)` across four HVAC modes. The profiler drives all scheduling decisions. See [Performance Profiler](#performance-profiler) in the Math section for details.
 
-```
-C_air  * dT_air/dt  = (T_out - T_air)/R + (T_mass - T_air)/R_int + Q_hvac + (1-f_s)*Q_solar + Q_appliances + Q_aux_resistive
-C_mass * dT_mass/dt = (T_air - T_mass)/R_int + f_s * Q_solar
-```
-
-Where:
-- `R` — Envelope thermal resistance (insulation)
-- `R_int` — Air-to-mass coupling (internal surfaces)
-- `C_air` — Air thermal capacitance
-- `C_mass` — Thermal mass (walls, slab, furniture)
-- `Q_hvac` — HVAC output (temperature-dependent COP)
-- `Q_solar` — Solar heat gain
-- `f_s` — Solar mass fraction (0.3) -- sunlight through windows directly heats floors, walls, and furniture, not just the air
-- `Q_appliances` — Known thermal loads from auxiliary appliances
-- `Q_aux_resistive` — Resistive strip heat output derived from circuit power minus learned HP baseline (injected as exogenous load when aux/emergency heat is active)
-
-An Extended Kalman Filter estimates 9 state parameters online:
+**Secondary: Extended Kalman Filter** -- Two-node RC thermal circuit estimating 9 building physics parameters online for diagnostics and deep parameter learning:
 
 ```
 [T_air, T_mass, 1/R, 1/R_int, 1/C_air, 1/C_mass, Q_cool_base, Q_heat_base, Q_solar_peak]
@@ -735,11 +736,7 @@ An Extended Kalman Filter estimates 9 state parameters online:
 
 ### Schedule Optimization
 
-Two methods:
-
-- **Work-based heuristic** (default) — Scores each hour by HVAC efficiency at the forecasted outdoor temperature. Shifts runtime to efficient hours. Fast, no dependencies.
-
-- **Grey-box LP optimizer** (optional) — Formulates scheduling as a linear program minimizing energy subject to comfort bounds. Propagates parameter uncertainty to tighten margins when the model is less confident. Enable via `use_greybox_model` in Behavior options. Falls back to heuristic if the solver fails.
+Work-based heuristic scoring: each hour is scored by HVAC efficiency at the forecasted outdoor temperature using the profiler's measured performance data. Runtime is shifted to the most efficient hours while respecting comfort bounds and per-hour balance point suppression (no heating when the house is warming passively, no cooling when it's cooling passively).
 
 ### Data Flow
 
@@ -752,11 +749,12 @@ Coordinator (5-min update cycle)
     |-- SensorHub (weather, occupancy, power, solar)
     |-- ApplianceManager (auxiliary appliance state tracking)
     |-- AuxHeatLearner (learns HP baseline watts; derives Q_aux_resistive from circuit power)
-    |-- ThermalEstimator (Kalman filter parameter learning; receives Q_aux_resistive as exogenous input)
-    |-- StrategicPlanner --> ScheduleOptimizer or GreyBoxOptimizer
+    |-- PerformanceProfiler (primary model: empirical HVAC performance bins)
+    |-- ThermalEstimator (secondary: Kalman filter parameter learning)
+    |-- StrategicPlanner --> ScheduleOptimizer (profiler-driven heuristic)
     |-- TacticalController (drift correction)
     |-- WatchdogController (override detection)
-    |-- CounterfactualSimulator (digital twin)
+    |-- CounterfactualSimulator (profiler-based digital twin)
     |-- SavingsTracker (energy/cost/CO2 accounting; uses learned HP baseline for aux kWh)
     |
 Sensor Entities (50+)
@@ -769,14 +767,15 @@ Sensor Entities (50+)
 
 | Problem | Likely cause | Fix |
 |---------|-------------|-----|
-| Savings show 0 kWh | Baseline capture hasn't completed (needs 7 days) | Wait for the `baseline_complete` event; check Learning Progress sensor |
-| Model confidence stuck at 0% | Not enough weather variety | Needs outdoor temperature swings; providing tonnage and sqft during setup helps |
+| Savings show 0 kWh | Savings tier still in learning/projected phase | Wait for profiler confidence to build; check Learning Progress sensor |
+| Profiler confidence not advancing | Not enough weather variety or HVAC cycling | Needs varied outdoor temperatures and HVAC runtime; history bootstrap accelerates this |
+| Model confidence stuck at 0% | EKF hasn't converged (doesn't affect optimization) | Profiler drives scheduling; EKF confidence is diagnostic only. Providing tonnage and sqft helps EKF converge faster |
 | Setpoint not changing | Optimizer paused or switch off | Check the Optimizer Enabled switch and Current Phase sensor |
 | "Safe mode entered" event | Forecast data stale (>6 hours) | Verify weather entity is updating; check Source Health sensor |
 | Override detected repeatedly | Manual thermostat adjustments | Increase `override_grace_period_hours` in Behavior options |
 | Dashboard not appearing | Panel registration failed | Restart Home Assistant; check logs for frontend errors |
 | Sensors show "unknown" | First update hasn't completed | Wait 5 minutes after restart; check integration logs |
-| R-value or capacity unstable | Unmodeled thermal load (appliance, window, etc.) | Configure auxiliary appliances; call `reset_model` to retrain cleanly |
+| R-value or capacity unstable | EKF-specific: unmodeled thermal load | Does not affect optimization (profiler drives scheduling). Configure auxiliary appliances; call `reset_model` to retrain cleanly |
 
 </details>
 
@@ -788,7 +787,7 @@ Sensor Entities (50+)
 No — the integration works with just a thermostat and a weather entity. That's a fully functional setup. But each additional data source removes a source of ambiguity that the model would otherwise have to guess at, and the impact varies considerably by category.
 
 **What works fine without extra sensors:**
-The EKF can learn envelope R-value, thermal mass, and HVAC capacity from thermostat readings alone, given enough time. Savings tracking uses a default 3,500W power estimate multiplied by HVAC runtime. The optimizer runs correctly on weather-only forecasts. Most homes reach meaningful savings within a few weeks on the bare minimum configuration — the model just takes longer to converge and carries wider uncertainty bands throughout.
+The performance profiler learns HVAC efficiency from thermostat readings alone and can reach initial confidence within hours via history bootstrap. Savings tracking uses a default 3,500W power estimate multiplied by HVAC runtime. The optimizer runs correctly on weather-only forecasts. Most homes reach meaningful optimization within days on the bare minimum configuration.
 
 **What each category actually buys you:**
 
@@ -797,7 +796,7 @@ The EKF can learn envelope R-value, thermal mass, and HVAC capacity from thermos
 | **Outdoor temp sensor** | Uses weather forecast (~1°F typical error, sometimes 3–5°F on calm nights) | Direct measurement eliminates the forecast bias during critical morning pre-heat/cool windows when forecast error is largest |
 | **Outdoor humidity + wind speed** | Wind chill and infiltration corrections default to zero | Improves COP estimation during cold snaps (wind drives more infiltration) and enables wet-bulb corrections for cooling efficiency |
 | **HVAC power sensor** | Energy estimates use 3,500W default × runtime | Actual energy accounting within ~5%; enables aux heat BTU learning; catches COP degradation (dirty filter, low refrigerant) as learned capacity drops |
-| **Solar irradiance** | Grey-box LP uses forecast cloud fraction only for solar load weighting | Provides real-time measured sky condition to the LP planner for better scheduling on variable-cloud days; modestly improves solar_gain_btu convergence by tightening scheduling |
+| **Solar irradiance** | Optimizer uses forecast cloud fraction for solar load weighting | Provides real-time measured sky condition for better scheduling on variable-cloud days; improves profiler's solar-condition classification accuracy |
 | **Room temp sensors + occupancy** | Single thermostat reading, uniform comfort band | Prevents over-conditioning unoccupied zones; room weighting means the optimizer maintains comfort where people actually are, not at the thermostat location |
 | **Calendar / presence** | Comfort band stays constant | Enables pre-conditioning before arrival (you come home to comfort, not the start of a cycle) and relaxed setpoints during long away periods |
 | **Auxiliary appliances** | HPWH, dryer, oven loads appear as unexplained temperature anomalies | EKF doesn't misattribute a dryer cycle as building parameter drift; profiler bins stay clean; prevents false tactical corrections |
@@ -806,7 +805,7 @@ The EKF can learn envelope R-value, thermal mass, and HVAC capacity from thermos
 
 **The honest answer on bare-minimum operation:**
 
-A thermostat + weather entity gives you 70–80% of the value at 0% of the sensor complexity. The optimizer will shift runtime to efficient outdoor temperatures, pre-condition the house during mild mornings, and coast through peak hours — all without any extra setup. The model will converge in roughly 3–4 weeks instead of 1–2, and energy estimates will carry ±20–30% uncertainty instead of ±5–10%.
+A thermostat + weather entity gives you 70-80% of the value at 0% of the sensor complexity. The optimizer will shift runtime to efficient outdoor temperatures, pre-condition the house during mild mornings, and coast through peak hours -- all without any extra setup. The profiler converges within hours to days via history bootstrap, and energy estimates will carry +/-20-30% uncertainty instead of +/-5-10%.
 
 The configuration that consistently moves the needle the most is an **HVAC circuit power sensor** (a clamp meter or smart breaker on the air handler circuit). It unlocks accurate energy accounting, aux heat BTU learning, and a direct signal for detecting equipment degradation. If you're only going to add one thing, that's it.
 
@@ -933,7 +932,7 @@ Your home's wind exposure depends on orientation, tree coverage, and air sealing
 
 **What happens without adaptation:**
 
-Without correction, the EKF absorbs all these errors into its envelope conductance parameter (R_inv). This makes R_inv an *effective* value rather than a physical one — it's whatever number makes the model's predictions match reality *given all the other assumptions*. This works acceptably under the conditions where R_inv was calibrated, but produces systematic prediction error when conditions shift. For example, if the model calibrated during calm weather with a slightly-too-high wind infiltration coefficient, R_inv will be biased low to compensate. Then on the first windy day, both the wind coefficient and the wrong R_inv compound the error.
+The profiler sidesteps this problem entirely -- it measures what happens empirically without trying to model the underlying physics. But the secondary EKF absorbs all coefficient errors into its envelope conductance parameter (R_inv), making R_inv an *effective* value rather than a physical one. This works acceptably under the conditions where R_inv was calibrated, but produces systematic prediction error when conditions shift in the EKF's diagnostic outputs.
 
 **How the coefficient calibrator fixes this:**
 
@@ -964,58 +963,50 @@ In practice, the weather forecast (hourly), electricity rates (hourly), and most
 
 ---
 
-### Why does calibration take weeks? Other "smart" thermostats learn in a few days.
+### How fast does the optimizer learn? Other "smart" thermostats learn in a few days.
 
-Most smart thermostats learn a *schedule* — when you typically adjust the temperature, and what setpoints you prefer. That can be inferred from a few days of usage.
+Most smart thermostats learn a *schedule* -- when you typically adjust the temperature, and what setpoints you prefer. That can be inferred from a few days of usage.
 
-This integration learns *physics* — the actual thermal resistance of your building envelope, the thermal mass of your walls and slab, the real capacity of your heat pump at different outdoor temperatures, and how much solar gain your windows produce. These values can only be estimated when the house is actually responding to a range of conditions: different outdoor temperatures, sunny vs. cloudy days, heating vs. cooling cycles.
+This integration takes a different approach: the **performance profiler** learns your HVAC system's actual efficiency at different outdoor temperatures by recording observed temperature change rates. It doesn't need to model the physics of why -- it just measures what happens. This is much faster: history bootstrap can replay up to 10 days of recorder data through the profiler on first setup, often reaching initial confidence within hours.
 
-A single week of mild spring weather won't excite the parameter space enough to distinguish good insulation from high thermal mass — both cause the house to hold temperature well. The EKF needs to see the house *losing* temperature (cold nights with HVAC off) and *gaining* it (sunny afternoons) to separate envelope loss from solar gain. Full calibration of all 7 parameters typically requires 1–2 months of seasonal variation, though meaningful optimization starts much earlier.
+The secondary **Extended Kalman Filter** does learn physics -- envelope R-value, thermal mass, HVAC capacity, solar gain -- and that process takes weeks to months of seasonal variation. But because the profiler drives scheduling, meaningful optimization starts long before the EKF converges. The EKF runs in parallel for diagnostics and deep parameter learning, and the profiler seeds it with measured trendlines to accelerate convergence.
 
 ---
 
 ### I entered my system specs (tonnage, square footage, aux heat). How much does that actually help?
 
-The short answer: it can shrink the cold-start learning window from **2–3 weeks down to 2–3 days** for the parameters that matter most.
+With the profiler-primary architecture, system specs matter less for initial optimization timeline -- the profiler reaches confidence from observed thermostat data and history bootstrap, regardless of whether you provide specs. But specs still help in two areas:
 
-Here's why. The EKF maintains a covariance matrix alongside the state vector — essentially a confidence interval around each learned parameter. When the filter has no prior information, it starts those intervals very wide so it doesn't get locked into a wrong value early on. The tradeoff is that with wide priors, many observations are needed before the estimate settles down. For HVAC capacity (Q_cool / Q_heat), the default uncertainty is so large that a 1.5-ton window unit and a 5-ton whole-home system are both plausible starting points — the filter has to work through a 16× range before it homes in.
+**Energy accounting from day one:** Tonnage combined with SEER derives rated power draw (`W_rated = tons x 12,000 / SEER`), which gives accurate energy and cost estimates immediately rather than relying on the 3,500W flat default. This is the most visible benefit.
 
-When you provide your system specs, those starting intervals are narrowed to physically reasonable values:
+**EKF convergence (secondary model):** The EKF uses specs to narrow its initial priors:
 
 | What you provide | Parameter seeded | Starting uncertainty | Without it |
 |---|---|---|---|
-| Tonnage | Q_cool, Q_heat | ±10% of rated capacity | ±316% (essentially unconstrained) |
-| Home sq ft | C_air (thermal mass) | ±30% | Wide open |
+| Tonnage | Q_cool, Q_heat | +/-10% of rated capacity | +/-316% (essentially unconstrained) |
+| Home sq ft | C_air (thermal mass) | +/-30% | Wide open |
 
-The EKF update equations themselves don't change — every interval still refines every parameter based on observed temperature response. But starting closer to the truth means **fewer intervals needed to reach a useful estimate**, which directly translates to:
+This helps the EKF converge in days rather than weeks, which improves the diagnostics and thermal load breakdown sensors. The profiler doesn't need these priors -- it measures performance directly.
 
-- More accurate pre-conditioning start times in the first week
-- Savings estimates that reflect reality rather than a wild guess about your system size
-- The `Savings Accuracy Tier` sensor advancing from `learning` to `estimated` sooner
-
-**The EKF will still correct wrong values** — if you misremember your tonnage by half a ton, the filter will drift to the right answer within a few days of actual operation. The specs are priors, not hard constraints. Providing them just gives the filter a head start rather than making it start from scratch.
-
-One field that matters even after the model converges: **aux heat type and capacity**. Without a circuit power sensor, the EKF has no way to know how much heat the resistive strip is adding versus the compressor. If you declare `electric_strip` and enter the strip's kW rating, that heat is modeled as a known input — preventing the filter from incorrectly attributing it to building conductance or inflating the compressor capacity estimate during cold-weather aux events.
+**Aux heat type and capacity** remains the most impactful spec regardless of model. Without a circuit power sensor, the EKF has no way to know how much heat the resistive strip is adding versus the compressor. If you declare `electric_strip` and enter the strip's kW rating, that heat is modeled as a known input -- preventing the filter from misattributing it to building conductance.
 
 ---
 
 ### Can the optimizer push my home's temperature outside my comfort range?
 
-No. The comfort range and safety limits you configure are hard constraints, not targets. The optimizer works *within* the comfort band — shifting *when* it runs and how far toward one end of the band it pre-conditions — but it will never set a temperature outside that range. Safety limits (e.g., 50°F min, 85°F max) are enforced as absolute guardrails that take priority over the schedule under all conditions, including safe mode.
-
-If the model is uncertain, the LP optimizer actually *narrows* its effective working range (adds a margin proportional to parameter uncertainty) so it errs toward running the HVAC rather than drifting outside comfort bounds.
+No. The comfort range and safety limits you configure are hard constraints, not targets. The optimizer works *within* the comfort band -- shifting *when* it runs and how far toward one end of the band it pre-conditions -- but it will never set a temperature outside that range. Safety limits (e.g., 50F min, 85F max) are enforced as absolute guardrails that take priority over the schedule under all conditions, including safe mode.
 
 ---
 
 ### Why do the savings numbers change over time, or sometimes go down?
 
-Savings are measured against a *counterfactual baseline* — what your old thermostat routine would have done that same day. Both the baseline and the thermal model are still being refined during the first few weeks.
+Savings are measured against a *counterfactual baseline* -- what your old thermostat routine would have done that same day, simulated using the profiler's measured performance data. The baseline and profiler are still being refined during the first week or two.
 
 Three things cause reported savings to change:
 
-1. **Baseline capture** — The 7-day baseline records how your thermostat normally behaves (setpoints, runtime patterns). Early in that window, the baseline is extrapolated from fewer days. Once all 7 days are captured, it becomes more representative.
-2. **Model confidence** — Savings estimates are uncertainty-weighted. When model confidence is low, the optimizer is conservative (it doesn't pre-condition as aggressively), so actual savings are smaller. As confidence grows, the optimizer takes better advantage of efficient hours and real savings improve.
-3. **Seasonal variation** — A cold March looks nothing like a mild November to the counterfactual. The optimizer's advantage is largest when there's a meaningful spread between efficient and inefficient hours (big daily temperature swings, variable grid prices). Mild, stable weather naturally produces smaller savings.
+1. **Profiler coverage** -- As the profiler accumulates observations across more outdoor temperatures and solar conditions, its performance predictions become more accurate, which improves counterfactual accuracy.
+2. **Optimizer confidence** -- When profiler confidence is low, the optimizer is conservative (it doesn't pre-condition as aggressively), so actual savings are smaller. As confidence grows, the optimizer takes better advantage of efficient hours and real savings improve.
+3. **Seasonal variation** -- A cold March looks nothing like a mild November to the counterfactual. The optimizer's advantage is largest when there's a meaningful spread between efficient and inefficient hours (big daily temperature swings, variable grid prices). Mild, stable weather naturally produces smaller savings.
 
 The `Savings Accuracy Tier` sensor tells you how much to trust the current numbers. During `learning` and `estimated` tiers, treat the figures as directional, not precise.
 
@@ -1023,7 +1014,7 @@ The `Savings Accuracy Tier` sensor tells you how much to trust the current numbe
 
 ### Why do daily savings show small values while cumulative totals stay at zero?
 
-During the learning period (Days 1–7), you may notice `Energy Saved Today`, `Cost Saved Today`, and `CO₂ Avoided Today` reporting small, noisy values each day — but `Energy Saved Cumulative`, `Cost Saved Cumulative`, and `CO₂ Avoided Cumulative` remain stuck at zero. This is intentional.
+During the early learning period, you may notice `Energy Saved Today`, `Cost Saved Today`, and `CO2 Avoided Today` reporting small, noisy values each day -- but `Energy Saved Cumulative`, `Cost Saved Cumulative`, and `CO2 Avoided Cumulative` remain stuck at zero. This is intentional.
 
 **Daily sensors** record hourly savings regardless of the current accuracy tier. Before the baseline template is built, they use a ratio-based fallback (estimated baseline-to-actual multiplier) that produces rough numbers. These are diagnostic — they show the savings tracker is running, but the values aren't reliable because the optimizer isn't actually controlling the thermostat yet. The daily totals reset at local midnight each day, so nothing accumulates.
 
@@ -1059,21 +1050,17 @@ A few possible reasons:
 
 ### Why does model confidence sometimes drop after being high?
 
-The EKF's confidence metric measures how much each parameter's uncertainty has *shrunk* from its initial value. It can decrease when:
+**Profiler confidence** can decrease when outdoor conditions shift to temperature ranges the profiler hasn't observed yet. For example, the first warm week of spring may push outdoor temps above the profiler's cooling data range -- confidence drops until observations fill in the new bins. This is expected and resolves as the profiler accumulates data in the new conditions.
 
-- **Seasonal transitions** — Moving from heating to cooling season (or vice versa) means the system starts observing conditions outside the range it was calibrated on. The filter widens uncertainty on capacity parameters until it re-confirms them in the new mode.
-- **Equipment changes** — A new air filter, refrigerant recharge, or thermostat replacement changes the actual system behavior. The EKF detects the mismatch and increases uncertainty to allow re-learning.
-- **Process noise** — `Q_cool_base` and `Q_heat_base` have relatively high process noise (1.0) because compressor capacity drifts with refrigerant charge, filter condition, and coil fouling. The filter intentionally keeps some uncertainty on these parameters so it continues tracking gradual changes.
-
-A temporary drop is normal and expected. The filter will re-converge as it accumulates observations in the new conditions.
+**EKF confidence** (secondary/diagnostic) can also decrease during seasonal transitions, equipment changes (new filter, refrigerant recharge), or when process noise causes capacity estimates to drift. This does not affect optimization since the profiler drives scheduling.
 
 ---
 
-### Why do I still need to wait 7 days after setup?
+### Does the optimizer start working right away?
 
-The 7-day wait is for **baseline capture** — the optimizer needs to observe your home's normal thermostat behavior before it can meaningfully improve on it. The thermal model (EKF) converges separately and benefits from tonnage/sqft priors and history bootstrap, but baseline capture requires real-time observation of your existing schedule.
+Yes. The profiler can reach initial confidence within hours via history bootstrap, and conservative optimization can begin as soon as the profiler has enough coverage for the current HVAC mode. There is no mandatory waiting period before the optimizer starts controlling setpoints.
 
-Baseline capture is a separate process that records *your routine* — what setpoints you normally run, what times of day the HVAC runs, how your schedule varies by day of week. There's no equivalent shortcut for that. The 7-day minimum ensures the baseline covers a full week (including weekend patterns) before savings comparisons begin.
+**Baseline capture** still runs in the background to build a picture of your normal thermostat routine for savings comparisons. This takes 7 days to cover a full week (including weekend patterns). During that time, the optimizer is already active -- you just won't see accurate savings numbers until the baseline completes and the counterfactual simulator has a reference to compare against.
 
 ---
 
@@ -1092,7 +1079,7 @@ A Beestat profile measures one thing: how fast your indoor temperature changes a
 
 The EKF model in this integration has **separate parameters** for each of these: envelope resistance (R), thermal mass capacitance (C), HVAC capacity (Q), and solar gain. When initialized from Beestat, the model started with an R-value that already had solar gain baked in, a heating capacity inflated by solar assistance, and a cooling capacity deflated by solar opposition. Then as the EKF tried to *also* learn solar gain separately, it was effectively double-counting — and had to spend days un-learning the biased priors before it could converge on the real values.
 
-The current approach — `cold_start()` with wide priors, optionally narrowed by your HVAC tonnage and home square footage — lets the EKF decompose these effects cleanly from day one using concurrent weather data (solar elevation, cloud cover, wind speed) that Beestat never had access to. Combined with history bootstrap (which replays your Home Assistant recorder data through the model on first startup), the integration typically reaches meaningful confidence within hours to days without any external profile.
+The current approach -- the performance profiler with solar-aware 2D binning -- avoids this problem entirely by measuring performance under specific conditions (outdoor temp + solar condition) rather than trying to decompose the underlying physics. Combined with history bootstrap (which replays your Home Assistant recorder data through the profiler on first startup), the integration typically reaches meaningful confidence within hours to days without any external profile.
 
 ---
 
@@ -1100,9 +1087,9 @@ The current approach — `cold_start()` with wide priors, optionally narrowed by
 
 One integration instance manages one climate entity. For multi-zone systems, the supported approaches are:
 
-- **Single main zone** — Configure only the primary zone's climate entity; configure the other zones as auxiliary appliances if they affect the conditioned space's temperature.
-- **Multiple instances** — Install separate integration instances for each zone (each with its own config entry). They operate independently.
-- **Mini-splits** — Work well if the unit is exposed as a standard `climate` entity in Home Assistant. Units that only expose fan/swing controls without temperature feedback won't produce useful EKF learning.
+- **Single main zone** -- Configure only the primary zone's climate entity; configure the other zones as auxiliary appliances if they affect the conditioned space's temperature.
+- **Multiple instances** -- Install separate integration instances for each zone (each with its own config entry). They operate independently but are unaware of each other -- in overlapping spaces, one instance's pre-conditioning will affect the other's model learning.
+- **Mini-splits** -- Work well if the unit is exposed as a standard `climate` entity in Home Assistant. Mini-split zones with separate outdoor units are the best-supported multizone configuration since each zone's efficiency is independent. Units that only expose fan/swing controls without temperature feedback won't produce useful learning data.
 
 ---
 
@@ -1129,9 +1116,70 @@ The problem is that this blending is invisible to any software reading the therm
 ---
 
 <details>
-<summary><strong>Math</strong> — Full thermal model, EKF, and optimizer formulation</summary>
+<summary><strong>Math</strong> -- Performance profiler, thermal model, EKF, and optimizer formulation</summary>
 
-## Thermal Model
+## Performance Profiler {#performance-profiler}
+
+The profiler is the primary thermal model. It accumulates observed indoor temperature change rates (F/hr) into solar-aware 2D lookup tables, keyed by `(outdoor_temp_bin, solar_condition)`, across four HVAC modes.
+
+### Observation recording
+
+Each 5-minute coordinator cycle, the profiler records an observation if the interval is clean (no appliances active, no outliers):
+
+```
+delta_F_per_hr = (T_indoor_now - T_indoor_prev) / (interval_minutes / 60)
+outdoor_bin = round(T_outdoor)
+```
+
+Outlier rejection: observations are discarded if `|T_indoor_now - T_indoor_prev| > 2.0 F` (per 5-min interval) or `|delta_F_per_hr| > 15.0 F/hr`.
+
+### Solar condition classification
+
+When an attic temperature sensor is available, the solar condition is classified from the attic-outdoor temperature delta:
+
+| Condition | Criterion |
+|-----------|-----------|
+| **Sunny** | `T_attic - T_outdoor > 10.0 F` |
+| **Cloudy** | `7.0 F < T_attic - T_outdoor <= 10.0 F` |
+| **Night** | `T_attic - T_outdoor <= 7.0 F` |
+
+Without an attic sensor, observations are stored in aggregate bins (no solar differentiation).
+
+### Trendline generation
+
+For each `(mode, solar_condition)` combination with enough data, a linear trendline is computed via least-squares regression across outdoor temperature bins:
+
+```
+delta_F_per_hr = slope * T_outdoor + intercept
+```
+
+Trendlines require at least 5 distinct outdoor temperature bins each containing 6+ samples.
+
+### Confidence metric
+
+Confidence per mode is the geometric mean of three factors:
+
+```
+coverage = (bins_with_data / expected_range_bins)
+depth    = min(1.0, total_hours / 48.0)
+quality  = (bins_with_6plus_samples / bins_with_data)
+
+mode_confidence = (coverage * depth * quality) ^ (1/3)
+```
+
+Expected outdoor ranges per mode: cooling 65-100F, heating 0-55F, aux heat 0-35F, passive drift 20-90F.
+
+Overall confidence is the minimum across modes with at least 30 observations. Modes with fewer observations are excluded -- this prevents seasonal modes (e.g., aux heat in spring) from dragging confidence to 0%.
+
+### History bootstrap
+
+On first startup, the profiler replays up to 10 days of thermostat and weather history from Home Assistant's recorder. Each historical interval is processed identically to live data, including solar condition classification (computed from historical attic temperature or sun elevation). This allows the profiler to reach initial confidence within hours rather than weeks.
+
+---
+
+## Thermal Model (EKF)
+
+> **Note:** The two-node RC thermal model is used by the secondary EKF for diagnostics and deep parameter learning. The performance profiler (above) drives scheduling.
 
 The building is modeled as a two-node RC (resistance-capacitance) thermal circuit. One node represents the indoor air; the other represents the thermal mass (walls, slab, furniture). The two nodes exchange heat through an internal coupling resistance, and the air node exchanges heat with the outdoor environment through the building envelope.
 
@@ -1230,20 +1278,22 @@ Every physical model component has been reviewed against building science standa
 | Internal heat gain | **Correct** | 350 BTU/hr per occupant matches ASHRAE 90.1; 800 BTU/hr appliance base load is within the residential range documented in IECC |
 | Boundary zone conductance | **Approximately correct** | K_attic=50 BTU/hr/°F corresponds to ~2000 ft² ceiling at R-30 insulation; scales with configured home area to generalize across home sizes |
 | Exponential integration | **Correct** | Analytical solution to the first-order linear ODE; unconditionally stable for any time step and parameter values |
-| Linearized LP optimizer | **Valid for 24h** | ±1-2°F prediction error over 24 hours; thermal mass freeze corrected by re-iteration |
+| Linearized LP optimizer | **Deprecated** | Superseded by profiler-driven heuristic optimizer in v0.2.0 |
 | Duty cycle model | **Correct for energy** | Time-integral of heat input (∫Q·dt) is identical whether delivered as pulsed on/off or continuous partial capacity over 1-hour bins |
-| Counterfactual simulator | **Excellent** | Uses identical physics equations as the real model — essential for honest savings attribution |
+| Counterfactual simulator | **Excellent** | Uses profiler's measured performance data with dual-setpoint thermostat model -- essential for honest savings attribution |
 
 **Known limitations:**
 
 - **Single-zone assumption** — the model treats the home as one air volume. Multi-zone or multi-story homes with significant temperature stratification are not fully captured.
 - **No explicit latent heat** — humidity effects on cooling capacity are modeled via sensible heat ratio (SHR) correction, but the model does not track absolute humidity or enthalpy.
 - **Linear COP degradation** — real heat pump performance curves are slightly concave, especially near defrost thresholds (30-40°F). The EKF learns effective capacity to compensate, but hour-ahead predictions at temperatures far from the reference may have higher error.
-- **No auto mode-switching** — the optimizer assumes a single HVAC mode (heat or cool) per optimization horizon. Shoulder season days requiring both modes within 24 hours may need manual intervention.
+- **No auto mode-switching** -- the optimizer assumes a single HVAC mode (heat or cool) per optimization horizon. Per-hour balance point suppression prevents unnecessary heating when the house is warming passively (and vice versa), but shoulder season days requiring both modes within 24 hours may still need manual intervention.
 
 ---
 
-## Extended Kalman Filter
+## Extended Kalman Filter (secondary model)
+
+> **Note:** The EKF runs in parallel as a secondary model for diagnostics and deep parameter learning. It does not drive scheduling -- the performance profiler does.
 
 The EKF jointly estimates the two temperature states and seven building/HVAC parameters online, updating every 5 minutes.
 
@@ -1478,9 +1528,11 @@ The calibrator scans for windows where confounders are minimized:
 
 ---
 
-## Grey-Box LP Optimizer
+## Grey-Box LP Optimizer (deprecated)
 
-The grey-box optimizer uses the EKF's learned parameters to formulate HVAC scheduling as a constrained optimization problem. It finds hourly duty cycles (0–1) that minimize a weighted cost function subject to comfort temperature bounds.
+> **Deprecated in v0.2.0.** The grey-box LP optimizer is no longer active -- the profiler-driven heuristic optimizer produces better results with measured performance data. This section is retained for historical reference.
+
+The grey-box optimizer used the EKF's learned parameters to formulate HVAC scheduling as a constrained optimization problem. It found hourly duty cycles (0-1) that minimized a weighted cost function subject to comfort temperature bounds.
 
 ### Linearized thermal model
 
@@ -1681,17 +1733,19 @@ W_resistive_proxy ≈ Q_heat_base · 0.293071      [watts]
 
 ---
 
-### Baseline comparison
+### Counterfactual digital twin
 
-The counterfactual baseline simulates a conventional thermostat holding a fixed midpoint setpoint with ±0.5°F hysteresis:
+The counterfactual simulator runs a parallel "shadow house" using the profiler's measured performance data. It uses a dual-setpoint thermostat model matching how real thermostats operate:
 
 ```
-if mode == "cool" and T > setpoint + 0.5: u_baseline = 1.0
-if mode == "cool" and T > setpoint:       u_baseline = (T - setpoint) / 0.5
-else:                                      u_baseline = 0.0
+if T_virtual > setpoint_high + deadband: mode = cooling, apply profiler cool delta
+if T_virtual < setpoint_low  - deadband: mode = heating, apply profiler heat delta
+else:                                    mode = idle, apply profiler passive drift
 ```
 
-Savings = baseline runtime − optimized runtime, computed using the same thermal model and weather conditions.
+Baseline setpoints are derived from the user's comfort configuration and current occupancy mode (home/away/sleep). Passive drift uses the profiler's solar-condition-aware `resist` trendlines, so the counterfactual correctly distinguishes sunny vs cloudy days.
+
+Savings = baseline runtime - optimized runtime, computed using the same profiler model and actual weather conditions.
 
 ### COP and power estimation
 

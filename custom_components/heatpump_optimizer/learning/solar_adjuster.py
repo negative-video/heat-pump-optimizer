@@ -1,17 +1,17 @@
 """Solar gain correction for passive thermal drift predictions.
 
+DEPRECATED: The cloud-cover coefficient is now superseded by the EKF's
+solar_gain_btu parameter (IDX_SOLAR_GAIN). This module is retained only
+for diagnostic reporting and will be removed in a future version.
+
 The resist profile averages across all sky conditions at each outdoor
-temperature. A sunny 85°F day heats the house faster than a cloudy 85°F day
+temperature. A sunny 85F day heats the house faster than a cloudy 85F day
 due to solar radiation through windows.
 
 This module applies a correction factor to passive drift based on:
   - Cloud cover (from weather forecast)
   - Solar altitude (from sun.sun entity or calculated from lat/time)
   - A learned solar gain coefficient (calibrated from prediction errors)
-
-TODO: This module's cloud-cover coefficient could be absorbed into the EKF's
-solar_gain_btu parameter (IDX_SOLAR_GAIN), which now performs the same role
-via online Kalman learning. Consider deprecating in favor of the EKF path.
 """
 
 from __future__ import annotations

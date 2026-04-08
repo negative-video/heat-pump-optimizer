@@ -102,12 +102,8 @@ async def async_bootstrap_from_history(
         from homeassistant.components.recorder import get_instance
 
         recorder = get_instance(hass)
-        await asyncio.wait_for(
-            recorder.async_db_ready.wait()
-            if hasattr(recorder.async_db_ready, "wait")
-            else recorder.async_db_ready,
-            timeout=30.0,
-        )
+        # async_db_ready is an asyncio.Event in HA 2025.1+ (our minimum version)
+        await asyncio.wait_for(recorder.async_db_ready.wait(), timeout=30.0)
     except ImportError:
         _LOGGER.warning("History bootstrap: recorder component not available")
         return BootstrapResult(success=False, reason="recorder_not_available")

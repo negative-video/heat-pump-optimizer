@@ -131,24 +131,6 @@ def _build_profiler_with_solar():
     return p
 
 
-# ── Greybox deprecation ─────────────────────────────────────────────
-
-
-class TestGreyboxDeprecated:
-    """_should_use_greybox always returns False."""
-
-    def test_greybox_always_false(self):
-        """Greybox is permanently disabled."""
-        # Mock a minimal coordinator-like object
-        coord = MagicMock()
-        coord._use_greybox = True  # user had it enabled in config
-        # Import the method directly and call it -- but since we can't
-        # instantiate the coordinator easily, just verify the logic:
-        # _should_use_greybox() returns False unconditionally.
-        # The code is: return False
-        assert True  # Structural test: verified by reading the code
-
-
 # ── Profiler model selection ─────────────────────────────────────────
 
 

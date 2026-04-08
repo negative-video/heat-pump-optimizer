@@ -111,7 +111,6 @@ from .const import (
     CONF_TRAVEL_TIME_SENSORS,
     CONF_CALIBRATION_ENABLED,
     CONF_USE_ADAPTIVE_MODEL,
-    CONF_USE_GREYBOX_MODEL,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
     CONF_WIND_SPEED_ENTITY,
@@ -269,31 +268,6 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Heat Pump Optimizer."""
 
     VERSION = 2
-
-    @staticmethod
-    async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
-        """Migrate old config entries to current version."""
-        if config_entry.version > HeatPumpOptimizerConfigFlow.VERSION:
-            # Downgrade not supported
-            return False
-
-        if config_entry.version < 2:
-            # v1 → v2: Remove legacy Beestat profile_path and remap init mode
-            data = dict(config_entry.data)
-            data.pop("profile_path", None)
-            if data.get("initialization_mode") == "beestat":
-                data["initialization_mode"] = "learning"
-            hass.config_entries.async_update_entry(
-                config_entry, data=data, version=2,
-            )
-            _LOGGER.info(
-                "Migrated entry %s to v2: removed Beestat profile_path, "
-                "initialization_mode=%s",
-                config_entry.entry_id,
-                data.get("initialization_mode", "learning"),
-            )
-
-        return True
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -1304,16 +1278,10 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Aggressiveness, override grace, reopt interval, model toggles."""
-        errors: dict[str, str] = {}
         if user_input is not None:
-            if (
-                user_input.get(CONF_USE_GREYBOX_MODEL)
-                and not user_input.get(CONF_USE_ADAPTIVE_MODEL)
-            ):
-                errors[CONF_USE_GREYBOX_MODEL] = "greybox_requires_adaptive"
-            if not errors:
-                self._options.update(user_input)
-                return self.async_create_entry(title="", data=self._options)
+            self._options.update(user_input)
+            return self.async_create_entry(title="", data=self._options)
+        errors: dict[str, str] = {}
 
         return self.async_show_form(
             step_id="behavior",
@@ -1392,10 +1360,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     vol.Optional(
                         CONF_USE_ADAPTIVE_MODEL,
                         default=self._options.get(CONF_USE_ADAPTIVE_MODEL, True),
-                    ): selector.BooleanSelector(),
-                    vol.Optional(
-                        CONF_USE_GREYBOX_MODEL,
-                        default=self._options.get(CONF_USE_GREYBOX_MODEL, False),
                     ): selector.BooleanSelector(),
                     vol.Optional(
                         CONF_CALIBRATION_ENABLED,

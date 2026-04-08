@@ -99,6 +99,7 @@ class PerformanceProfiler:
         self._previous_indoor_temp: float | None = None
         self._previous_timestamp: datetime | None = None
         self._total_observations: int = 0
+        self._confidence_hwm: float = 0.0  # high-water mark: confidence can only grow
 
     # ── Recording ─────────────────────────────────────────────────────
 
@@ -494,6 +495,12 @@ class PerformanceProfiler:
         If mode is specified, returns confidence for that mode only.
         Otherwise returns the minimum confidence across modes that have data,
         or 0.0 if no modes have any data.
+
+        Overall confidence uses a high-water mark: bin data only grows
+        (observations are never removed), so overall confidence is
+        monotonically non-decreasing.  Without HWM, a mode crossing the
+        30-observation threshold with sparse data can drag the min() down,
+        causing confusing regressions visible to the user.
         """
         if mode is not None:
             return self._mode_confidence(mode)
@@ -507,8 +514,11 @@ class PerformanceProfiler:
                 confidences.append(self._mode_confidence(m))
 
         if not confidences:
-            return 0.0
-        return min(confidences)
+            return self._confidence_hwm
+
+        raw = min(confidences)
+        self._confidence_hwm = max(self._confidence_hwm, raw)
+        return self._confidence_hwm
 
     def _mode_confidence(self, mode: str) -> float:
         """Confidence for a single mode.
@@ -635,6 +645,7 @@ class PerformanceProfiler:
                 self._previous_timestamp.isoformat()
                 if self._previous_timestamp else None
             ),
+            "confidence_hwm": self._confidence_hwm,
         }
 
     @classmethod
@@ -645,12 +656,11 @@ class PerformanceProfiler:
         )
         profiler._total_observations = data.get("total_observations", 0)
         profiler._previous_indoor_temp = data.get("previous_indoor_temp")
-        ts_str = data.get("previous_timestamp")
-        if ts_str:
-            try:
-                profiler._previous_timestamp = datetime.fromisoformat(ts_str)
-            except (ValueError, TypeError):
-                pass
+        profiler._confidence_hwm = data.get("confidence_hwm", 0.0)
+        # Reset _previous_timestamp on restore so the first post-restart
+        # observation is a clean "skipped_first" baseline instead of being
+        # rejected as a bad interval (the gap since last persist is too long).
+        profiler._previous_timestamp = None
 
         for mode in MODES:
             mode_bins = data.get("bins", {}).get(mode, {})

@@ -35,10 +35,7 @@ class StrategicPlanner:
     resist_balance_point: float  # From performance model (~50.2°F)
     reoptimize_interval_hours: float = 4.0
 
-    # Optional grey-box optimizer (LP-based, set by coordinator)
-    greybox_optimizer: object | None = None
     sleep_config: dict | None = None
-    _use_greybox: bool = False
 
     _last_optimization_time: datetime | None = None
     _last_forecast_snapshot: list[ForecastPoint] = field(default_factory=list)
@@ -150,35 +147,14 @@ class StrategicPlanner:
                 len(occupancy_timeline),
             )
 
-        # Run optimizer (grey-box LP or heuristic)
+        # Run optimizer
         try:
-            if self._use_greybox and self.greybox_optimizer is not None:
-                schedule = self.greybox_optimizer.optimize(
-                    indoor_temp, forecast, comfort, mode,
-                    people_home_count=people_home_count,
-                    indoor_humidity=indoor_humidity,
-                    appliance_btu=appliance_btu,
-                    aux_threshold_f=aux_threshold_f,
-                    aux_heat_active=aux_heat_active,
-                )
-            else:
-                schedule = self.optimizer.optimize_setpoints(
-                    indoor_temp, forecast, comfort, mode
-                )
+            schedule = self.optimizer.optimize_setpoints(
+                indoor_temp, forecast, comfort, mode
+            )
         except Exception:
             _LOGGER.error("Optimization failed", exc_info=True)
-            # If grey-box failed, fall back to heuristic
-            if self._use_greybox and self.greybox_optimizer is not None:
-                _LOGGER.info("Falling back to heuristic optimizer")
-                try:
-                    schedule = self.optimizer.optimize_setpoints(
-                        indoor_temp, forecast, comfort, mode
-                    )
-                except Exception:
-                    _LOGGER.error("Heuristic fallback also failed", exc_info=True)
-                    return None
-            else:
-                return None
+            return None
 
         # Store state
         self._current_schedule = schedule
@@ -369,10 +345,14 @@ class StrategicPlanner:
         """Check if a time falls within the sleep window (handles overnight)."""
         start_str = sleep_config.get("start", "22:00")
         end_str = sleep_config.get("end", "07:00")
-        start_parts = start_str.split(":")
-        end_parts = end_str.split(":")
-        start_h, start_m = int(start_parts[0]), int(start_parts[1])
-        end_h, end_m = int(end_parts[0]), int(end_parts[1])
+        try:
+            start_parts = start_str.split(":")
+            end_parts = end_str.split(":")
+            start_h, start_m = int(start_parts[0]), int(start_parts[1])
+            end_h, end_m = int(end_parts[0]), int(end_parts[1])
+        except (ValueError, IndexError):
+            _LOGGER.warning("Invalid sleep window format: %s-%s", start_str, end_str)
+            return False
 
         try:
             from homeassistant.util import dt as dt_util

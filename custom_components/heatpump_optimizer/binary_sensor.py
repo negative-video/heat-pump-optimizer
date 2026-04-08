@@ -14,6 +14,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, VERSION
+from .coordinator import HeatPumpOptimizerCoordinator
 
 
 def _device_info(entry: ConfigEntry) -> DeviceInfo:
@@ -24,7 +25,6 @@ def _device_info(entry: ConfigEntry) -> DeviceInfo:
         model="Heat Pump Optimizer",
         sw_version=VERSION,
     )
-from .coordinator import HeatPumpOptimizerCoordinator
 
 
 async def async_setup_entry(

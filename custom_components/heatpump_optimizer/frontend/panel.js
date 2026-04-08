@@ -713,7 +713,6 @@ function renderBuildingCard(states, hass) {
   const coolCap = findEntity(states, "cooling_capacity");
   const heatCap = findEntity(states, "heating_capacity");
   const confidence = findEntity(states, "model_confidence");
-  const greybox = findEntity(states, "greybox_active");
 
   const hasData = hasValue(rValue) || hasValue(thermalMass) || hasValue(coolCap) || hasValue(heatCap);
   if (!hasData) return "";
@@ -858,11 +857,10 @@ function renderBuildingCard(states, hass) {
 
   // ── Model type line ──
   let modelTypeLine = "";
-  if (isAvailable(greybox)) {
-    const gba = greybox.attributes || {};
+  if (isAvailable(confidence)) {
+    const cfa = confidence.attributes || {};
     let mt;
-    if (greybox.state === "on" || greybox.state === "true") mt = "Grey-Box LP";
-    else if (gba.using_adaptive === true || gba.using_adaptive === "true") mt = "Kalman Filter";
+    if (cfa.using_adaptive === true || cfa.using_adaptive === "true") mt = "Kalman Filter";
     else mt = "Heuristic";
     modelTypeLine = `<div class="model-type">${mt}</div>`;
   }

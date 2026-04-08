@@ -2,7 +2,7 @@
 
 Tracks the on/off state and power draw of configured appliances (e.g., heat pump
 water heater, dryer, oven) and computes the net thermal impact in BTU/hr for the
-EKF thermal estimator and greybox optimizer.
+EKF thermal estimator and performance profiler.
 
 Follows the SensorHub pattern: reads entity states via hass.states.get(), handles
 unavailable/unknown states gracefully, and returns 0 when no appliances are configured.

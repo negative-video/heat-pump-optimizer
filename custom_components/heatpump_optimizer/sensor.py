@@ -338,7 +338,6 @@ class ModelConfidenceSensor(OptimizerBaseSensor):
             return {}
         attrs = {
             "using_adaptive_model": self.coordinator.data.get("using_adaptive_model", False),
-            "using_greybox_model": self.coordinator.data.get("using_greybox_model", False),
         }
         param_conf = self.coordinator.data.get("kalman_parameter_confidence")
         if param_conf:

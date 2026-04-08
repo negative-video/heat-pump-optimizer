@@ -380,6 +380,7 @@ class ApplianceState:
     current_power_watts: float | None = None
 
 
+@dataclass
 class ValidationReport:
     """Results from validating model predictions against observed data."""
     n_samples: int
