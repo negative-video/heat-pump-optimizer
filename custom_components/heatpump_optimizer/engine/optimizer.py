@@ -207,10 +207,14 @@ class ScheduleOptimizer:
         else:
             get_delta = lambda t: max(self.model.heating_delta(t), 0.01)
 
-        # Calculate "cooling work units" done in each hour
-        # Work = runtime * effectiveness (delta magnitude)
-        # 1 hour at -3.36°F/hr delta = 3.36 work units
-        # 1 hour at -0.66°F/hr delta = 0.66 work units
+        # "Work units" = runtime * net delta magnitude.
+        #
+        # Retained for diagnostics only. The quantity is not conserved under
+        # redistribution: the afternoon envelope gain arrives whether or not
+        # the compressor ran earlier, and pre-conditioning *adds* load, since
+        # a colder house gains heat faster all day. Treating it as a movable
+        # budget is what produced the discredited 25.9% annual savings
+        # figure. Nothing user-facing may consume this.
         hourly_work: dict[int, float] = {}
         hourly_delta: dict[int, float] = {}
         total_work = 0.0
