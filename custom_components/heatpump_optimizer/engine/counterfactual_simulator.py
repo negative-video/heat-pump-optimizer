@@ -1,18 +1,25 @@
-"""Counterfactual simulator -- the digital twin that answers "what if?"
+"""Counterfactual simulator -- the digital twin that answers "why", not "how much".
 
 Runs a parallel simulation of a "shadow house" following the user's
 configured thermostat schedule (dual-setpoint heat_cool) against real
-weather conditions.  By comparing what this virtual house would have
-consumed vs what the optimizer actually consumed, we produce meaningful
-savings metrics that capture:
+weather conditions, and decomposes the difference from actual operation into:
 
 1. Runtime reduction -- fewer total minutes of compressor operation
-2. COP improvement -- running at better outdoor temps (time-shifting)
+2. Modeled COP effect -- attributed to running at milder outdoor temps
 3. Rate/carbon arbitrage -- running at cheaper/cleaner times
 
-The simulator uses the profiler-measured PerformanceModel for passive
-drift and HVAC deltas, making the digital twin as accurate as the
-profiler's empirical trendlines (4x more accurate than EKF-based physics).
+**This is modeled attribution, not measurement.**  The shadow house is
+simulated with the same PerformanceModel that drives the optimizer being
+graded, so a model error shows up on both sides of the subtraction where it
+can cancel or compound without ever surfacing.  The COP term in particular is
+an attribution residual computed from a textbook COP curve; no COP has been
+measured anywhere in this system.
+
+The headline savings number therefore does NOT come from here.  It comes from
+learning/energy_baseline.py, which compares metered kWh against a degree-day
+regression fitted to the user's own optimizer-off days.  Use this module to
+explain where a difference plausibly came from, and label every number it
+produces as modeled.
 """
 
 from __future__ import annotations
@@ -365,7 +372,22 @@ class CounterfactualSimulator:
         actual_rate: float | None,
         baseline_rate: float | None,
     ) -> dict[str, float]:
-        """Decompose total savings into three components."""
+        """Decompose modeled savings into three attribution components.
+
+        Every value returned here is modeled, not measured:
+
+        - `runtime_savings_kwh` prices the simulated runtime difference at the
+          simulated baseline power draw.
+        - `cop_savings_kwh` is a *residual*, whatever total minus runtime
+          leaves over.  It is labelled "modeled COP effect" in the UI because
+          it absorbs COP-curve error, capacity error, and simulator drift
+          alike.  No COP is measured anywhere in this integration.
+        - `rate_arbitrage_savings` is real in structure but only meaningful on
+          a time-varying tariff; on a flat rate it is zero by construction.
+
+        Callers must not present these as measured savings. See
+        SavingsTracker.measured_savings_window() for the auditable number.
+        """
         total_saved_kwh = baseline_result.kwh - actual_kwh
 
         if baseline_result.power_watts > 0 and baseline_result.runtime_minutes > 0:
@@ -382,8 +404,12 @@ class CounterfactualSimulator:
 
         return {
             "runtime_savings_kwh": runtime_savings_kwh,
+            # Legacy key kept for persistence compatibility. Semantically this
+            # is the modeled COP effect, an attribution residual.
             "cop_savings_kwh": cop_savings_kwh,
+            "modeled_cop_effect_kwh": cop_savings_kwh,
             "rate_arbitrage_savings": rate_arbitrage,
+            "modeled": True,
         }
 
     # ── Persistence ─────────────────────────────────────────────────

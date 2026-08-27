@@ -754,6 +754,51 @@ class TestReadPowerDraw:
         assert hub.read_power_draw() == pytest.approx(3500.0)
 
 
+class TestReadPowerDrawSource:
+    """read_power_draw_source: reports whether the watts were actually metered."""
+
+    def test_entity_value_is_measured(self):
+        hass = _make_hass({"sensor.pw": _make_state(3000)})
+        hub = _make_hub(hass, power_entity="sensor.pw")
+        watts, measured = hub.read_power_draw_source()
+        assert watts == pytest.approx(3000.0)
+        assert measured is True
+
+    def test_entity_unavailable_fallback_is_not_measured(self):
+        hass = _make_hass({"sensor.pw": _make_state("unavailable")})
+        hub = _make_hub(hass, power_entity="sensor.pw")
+        watts, measured = hub.read_power_draw_source()
+        assert watts == pytest.approx(3500.0)
+        assert measured is False
+
+    def test_no_entity_estimate_is_not_measured(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, power_default_watts=4000.0)
+        assert hub.read_power_draw_source() == (pytest.approx(4000.0), False)
+
+    def test_mode_aware_estimate_is_not_measured(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass, cooling_watts=3000.0)
+        watts, measured = hub.read_power_draw_source(hvac_action="cooling")
+        assert watts == pytest.approx(3000.0)
+        assert measured is False
+
+    def test_idle_estimate_is_zero_and_not_measured(self):
+        hass = _make_hass({})
+        hub = _make_hub(hass)
+        assert hub.read_power_draw_source(hvac_action="idle") == (0.0, False)
+
+    def test_unavailable_with_no_default_is_none(self):
+        hass = _make_hass({"sensor.pw": _make_state("unavailable")})
+        hub = _make_hub(hass, power_entity="sensor.pw", power_default_watts=0.0)
+        assert hub.read_power_draw_source() == (None, False)
+
+    def test_read_power_draw_delegates_to_source(self):
+        hass = _make_hass({"sensor.pw": _make_state(2750)})
+        hub = _make_hub(hass, power_entity="sensor.pw")
+        assert hub.read_power_draw() == hub.read_power_draw_source()[0]
+
+
 class TestReadCo2Intensity:
     """read_co2_intensity: valid, no entity."""
 

@@ -23,6 +23,9 @@ SERVICE_IMPORT_MODEL = "import_model"
 SERVICE_SET_CONSTRAINT = "set_constraint"
 SERVICE_REBOOTSTRAP = "rebootstrap"
 SERVICE_RESET_MODEL = "reset_model"
+SERVICE_START_AB_TRIAL = "start_ab_trial"
+SERVICE_STOP_AB_TRIAL = "stop_ab_trial"
+SERVICE_AB_TRIAL_RESULT = "ab_trial_result"
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -124,6 +127,34 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             await coordinator._try_history_bootstrap()
             await coordinator.async_request_refresh()
 
+    async def handle_start_ab_trial(call: ServiceCall) -> dict:
+        coordinator = await _get_coordinator()
+        if not coordinator:
+            return {}
+        period_days = call.data.get("period_days", 3)
+        total_days = call.data.get("total_days", 28)
+        _LOGGER.info(
+            "Service call: start A/B trial (%d day blocks, %d days total)",
+            period_days, total_days,
+        )
+        return await coordinator.async_start_ab_trial(
+            period_days=period_days,
+            total_days=total_days,
+        )
+
+    async def handle_stop_ab_trial(call: ServiceCall) -> dict:
+        coordinator = await _get_coordinator()
+        if not coordinator:
+            return {}
+        _LOGGER.info("Service call: stop A/B trial")
+        return await coordinator.async_stop_ab_trial()
+
+    async def handle_ab_trial_result(call: ServiceCall) -> dict:
+        coordinator = await _get_coordinator()
+        if not coordinator:
+            return {}
+        return coordinator.ab_trial_result()
+
     hass.services.async_register(DOMAIN, SERVICE_RESET_MODEL, handle_reset_model)
     hass.services.async_register(DOMAIN, SERVICE_REBOOTSTRAP, handle_rebootstrap)
     hass.services.async_register(DOMAIN, SERVICE_FORCE_REOPTIMIZE, handle_force_reoptimize)
@@ -167,6 +198,30 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             vol.Optional("source", default="service_call"): str,
         }),
     )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_AB_TRIAL,
+        handle_start_ab_trial,
+        # Bounds are enforced in ABTrial.start(), which clamps rather than
+        # rejecting, so a slightly out-of-range automation still runs a trial.
+        schema=vol.Schema({
+            vol.Optional("period_days", default=3): vol.Coerce(int),
+            vol.Optional("total_days", default=28): vol.Coerce(int),
+        }),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_STOP_AB_TRIAL,
+        handle_stop_ab_trial,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_AB_TRIAL_RESULT,
+        handle_ab_trial_result,
+        supports_response=SupportsResponse.ONLY,
+    )
 
 
 async def async_unload_services(hass: HomeAssistant) -> None:
@@ -181,3 +236,6 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_SET_CONSTRAINT)
     hass.services.async_remove(DOMAIN, SERVICE_RESET_MODEL)
     hass.services.async_remove(DOMAIN, SERVICE_REBOOTSTRAP)
+    hass.services.async_remove(DOMAIN, SERVICE_START_AB_TRIAL)
+    hass.services.async_remove(DOMAIN, SERVICE_STOP_AB_TRIAL)
+    hass.services.async_remove(DOMAIN, SERVICE_AB_TRIAL_RESULT)

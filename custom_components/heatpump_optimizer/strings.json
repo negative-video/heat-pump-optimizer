@@ -561,6 +561,28 @@
           "description": "Identifier for the integration or automation that set this constraint."
         }
       }
+    },
+    "start_ab_trial": {
+      "name": "Start A/B Validation Trial",
+      "description": "Alternate the optimizer on and off in fixed blocks and compare the two populations of metered kWh per degree-day. Both arms are measured, so this is the only test that can confirm or refute the savings. During off blocks the optimizer stops writing setpoints and your thermostat follows its own schedule.",
+      "fields": {
+        "period_days": {
+          "name": "Block length",
+          "description": "How many days the optimizer stays on, then off, before switching."
+        },
+        "total_days": {
+          "name": "Trial length",
+          "description": "Total length of the trial. It ends automatically after this many days."
+        }
+      }
+    },
+    "stop_ab_trial": {
+      "name": "Stop A/B Validation Trial",
+      "description": "End the running A/B trial early and resume normal optimization. Days already collected are kept."
+    },
+    "ab_trial_result": {
+      "name": "A/B Trial Result",
+      "description": "Return the current standing of the A/B trial: mean kWh per degree-day with the optimizer on and off, the difference, whether it clears the noise, and the per-day detail behind it."
     }
   },
   "issues": {
@@ -597,7 +619,7 @@
       "predicted_indoor_temp": { "name": "Predicted Indoor Temp", "description": "Where the thermal model thinks your indoor temperature is heading based on weather, insulation, and HVAC state." },
       "prediction_error": { "name": "Prediction Error", "description": "How far off the model's last prediction was from reality. Smaller is better." },
       "model_accuracy": { "name": "Prediction Accuracy", "description": "Overall accuracy of the thermal model's temperature predictions. Lower values mean better predictions." },
-      "estimated_savings": { "name": "Estimated Savings", "description": "Percentage of HVAC runtime saved today compared to your old thermostat schedule." },
+      "estimated_savings": { "name": "Projected Schedule Savings", "description": "Runtime reduction the current schedule is predicted to achieve. This is a projection from the plan, not a measurement of what happened. See Measured Savings for the metered figure." },
       "model_confidence": { "name": "Model Confidence", "description": "How well the optimizer understands your home's thermal behavior. Grows over days and weeks as it observes more heating and cooling cycles." },
       "envelope_r_value": { "name": "Insulation R-Value", "description": "How well your home resists heat flow through walls, roof, and windows. Higher values mean better insulation and less energy needed." },
       "thermal_mass": { "name": "Building Heat Storage", "description": "How much heat your home's walls, floors, and furnishings can absorb. Higher values mean temperatures change slowly, which is good for coasting." },
@@ -610,8 +632,12 @@
       "outdoor_temp_source": { "name": "Outdoor Temperature", "description": "The outdoor temperature the optimizer is using, sourced from your weather entity or outdoor sensors." },
       "indoor_temp_source": { "name": "Indoor Temperature", "description": "The indoor temperature reading the optimizer is using, which may be averaged from multiple sensors." },
       "net_hvac_power": { "name": "HVAC Power Draw", "description": "Current electrical power consumption of your HVAC system in watts." },
-      "savings_kwh_today": { "name": "Energy Saved Today", "description": "Kilowatt-hours of electricity saved today compared to what your old thermostat schedule would have used." },
-      "savings_kwh_cumulative": { "name": "Energy Saved Total", "description": "Total kilowatt-hours saved since the optimizer was installed." },
+      "measured_savings_today": { "name": "Measured Savings Today", "description": "Metered HVAC electricity today compared with a weather-normalized baseline learned from your own days when the optimizer was not running. Both sides are measured. Partial-day figure, so it swings until the day's mean outdoor temperature settles." },
+      "measured_savings_30d": { "name": "Measured Savings 30 Days", "description": "Metered HVAC electricity over recent whole days compared with the weather-normalized baseline. This is the savings number to trust: no thermal model appears on either side of the comparison." },
+      "energy_baseline_status": { "name": "Energy Baseline Status", "description": "Where the weather-normalized baseline came from: measured (fitted to your own optimizer-off days), profile_seed (estimated from a thermostat profile), or none (not enough data yet). Attributes show the kWh per degree-day slopes so you can check them by hand." },
+      "ab_trial": { "name": "A/B Validation Trial", "description": "Status of the A/B trial that alternates the optimizer on and off and compares metered kWh per degree-day between the two. The only test that can actually confirm the savings." },
+      "savings_kwh_today": { "name": "Modeled Savings Today", "description": "Kilowatt-hours saved today according to the digital twin simulation of your old schedule. This is a modeled comparison, not a measurement: use Measured Savings for the real number." },
+      "savings_kwh_cumulative": { "name": "Modeled Savings Total", "description": "Total kilowatt-hours saved since installation according to the digital twin simulation. Modeled, not measured." },
       "savings_cost_today": { "name": "Cost Saved Today", "description": "Money saved on your electricity bill today by running HVAC more efficiently." },
       "savings_cost_cumulative": { "name": "Cost Saved Total", "description": "Total money saved since the optimizer was installed." },
       "savings_co2_today": { "name": "CO2 Avoided Today", "description": "Grams of carbon dioxide emissions avoided today by using less electricity or shifting to cleaner grid hours." },
@@ -626,7 +652,7 @@
       "occupied_rooms": { "name": "Occupied Rooms", "description": "Which rooms currently have detected occupancy. Used to weight temperature readings toward rooms people are actually in." },
       "weighted_indoor_temp": { "name": "Weighted Indoor Temp", "description": "Indoor temperature averaged across rooms, with occupied rooms weighted more heavily than empty ones." },
       "runtime_savings_today": { "name": "Runtime Savings Today", "description": "Energy saved today by running the HVAC system fewer total minutes than your old schedule would have." },
-      "cop_savings_today": { "name": "Efficiency Savings Today", "description": "Energy saved today by running the HVAC during hours when the compressor operates more efficiently (milder outdoor temperatures)." },
+      "cop_savings_today": { "name": "Modeled COP Effect", "description": "Energy the digital twin attributes to running the compressor at milder outdoor temperatures. This is a modeled residual, not a measurement: no COP is measured anywhere in this integration." },
       "rate_savings_today": { "name": "Rate Shift Savings Today", "description": "Money saved today by shifting HVAC runtime to hours with cheaper electricity rates." },
       "carbon_shift_savings_today": { "name": "Carbon Shift Savings Today", "description": "CO2 avoided today by shifting HVAC runtime to hours when the electrical grid was producing less carbon." },
       "baseline_avg_cop": { "name": "Baseline Efficiency (COP)", "description": "The average efficiency your HVAC would have achieved today under your old schedule. COP = units of heating/cooling per unit of electricity." },

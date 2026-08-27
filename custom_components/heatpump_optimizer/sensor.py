@@ -52,7 +52,12 @@ async def async_setup_entry(
         OutdoorTempSourceSensor(coordinator, entry),
         IndoorTempSourceSensor(coordinator, entry),
         NetHvacPowerSensor(coordinator, entry),
-        # Savings tracking sensors
+        # Measured savings (headline: metered kWh vs weather-normalized baseline)
+        MeasuredSavingsTodaySensor(coordinator, entry),
+        MeasuredSavings30dSensor(coordinator, entry),
+        EnergyBaselineStatusSensor(coordinator, entry),
+        ABTrialSensor(coordinator, entry),
+        # Savings tracking sensors (modeled, digital twin)
         SavingsKwhTodaySensor(coordinator, entry),
         SavingsKwhCumulativeSensor(coordinator, entry),
         SavingsCostTodaySensor(coordinator, entry),
@@ -296,10 +301,16 @@ class _LearningNullMixin:
 
 
 class SavingsPercentSensor(_LearningNullMixin, OptimizerBaseSensor):
-    """Estimated runtime savings percentage from current schedule."""
+    """Runtime reduction the current schedule projects.
+
+    A forward-looking projection from the plan, not a measurement of what the
+    house actually used. Measured Savings is the metered equivalent.
+    """
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "estimated_savings", "Estimated Savings")
+        super().__init__(
+            coordinator, entry, "estimated_savings", "Projected Schedule Savings"
+        )
         self._attr_native_unit_of_measurement = "%"
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
@@ -669,11 +680,173 @@ class _DailyResetMixin:
         )
 
 
-class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
-    """Energy saved today vs baseline (kWh)."""
+class MeasuredSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
+    """Metered energy today vs the weather-normalized baseline (kWh).
+
+    This is the headline savings number. Both sides are real: measured HVAC
+    kWh on one side, a degree-day regression fitted to this house's own
+    optimizer-off days on the other. Stays unavailable until the regression
+    has enough baseline days, rather than reporting a modeled guess.
+    """
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "savings_kwh_today", "Energy Saved Today")
+        super().__init__(
+            coordinator, entry, "measured_savings_today", "Measured Savings Today"
+        )
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_suggested_display_precision = 2
+        self._attr_icon = "mdi:scale-balance"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("measured_savings_kwh_today")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        data = self.coordinator.data
+        return {
+            "baseline_kwh": data.get("measured_baseline_kwh_today"),
+            "actual_kwh": data.get("measured_actual_kwh_today"),
+            "baseline_method": "degree-day regression on optimizer-off days",
+            "baseline_source": data.get("energy_baseline_source"),
+            "energy_source": data.get("energy_source"),
+            "note": (
+                "Partial-day figure. The 30 day sensor is the one to trust; "
+                "this one swings before the day's mean temperature settles."
+            ),
+        }
+
+
+class MeasuredSavings30dSensor(OptimizerBaseSensor):
+    """Metered vs weather-normalized baseline over recent whole days (kWh)."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "measured_savings_30d", "Measured Savings 30 Days"
+        )
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.TOTAL
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:scale-balance"
+
+    @property
+    def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("measured_savings_kwh_30d")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        data = self.coordinator.data
+        return {
+            "saved_pct": data.get("measured_savings_pct_30d"),
+            "uncertainty_kwh": data.get("measured_savings_uncertainty_kwh"),
+            "days_compared": data.get("measured_savings_window_days"),
+            "baseline_source": data.get("energy_baseline_source"),
+            "kwh_per_cooling_degree_day": data.get("energy_baseline_kwh_per_cdd"),
+            "kwh_per_heating_degree_day": data.get("energy_baseline_kwh_per_hdd"),
+            "baseline_days_collected": data.get("energy_baseline_days"),
+            "baseline_days_remaining": data.get("energy_baseline_days_remaining"),
+            "energy_source": data.get("energy_source"),
+        }
+
+
+class EnergyBaselineStatusSensor(OptimizerBaseSensor):
+    """How the weather-normalized baseline was derived, and how solid it is."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(
+            coordinator, entry, "energy_baseline_status", "Energy Baseline Status"
+        )
+        self._attr_icon = "mdi:chart-scatter-plot"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        return self.coordinator.data.get("energy_baseline_source")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        data = self.coordinator.data
+        return {
+            "kwh_per_cooling_degree_day": data.get("energy_baseline_kwh_per_cdd"),
+            "kwh_per_heating_degree_day": data.get("energy_baseline_kwh_per_hdd"),
+            "baseline_days": data.get("energy_baseline_days"),
+            "optimized_days": data.get("energy_baseline_optimized_days"),
+            "days_until_measured_fit": data.get("energy_baseline_days_remaining"),
+            "degree_day_base_f": 65.0,
+            "ab_trial_active": data.get("ab_trial_active"),
+            "ab_trial_phase": data.get("ab_trial_phase"),
+        }
+
+
+class ABTrialSensor(OptimizerBaseSensor):
+    """Result of the A/B validation trial, in measured kWh per degree-day."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "ab_trial", "A/B Validation Trial")
+        self._attr_icon = "mdi:ab-testing"
+
+    @property
+    def native_value(self) -> str | None:
+        if self.coordinator.data is None:
+            return None
+        trial = self.coordinator.data.get("ab_trial") or {}
+        if trial.get("active"):
+            phase = self.coordinator.data.get("ab_trial_phase") or "on"
+            return f"running ({phase})"
+        if trial.get("completed"):
+            return "completed"
+        return "idle"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        trial = self.coordinator.data.get("ab_trial") or {}
+        return {
+            "verdict": trial.get("verdict"),
+            "conclusive": trial.get("conclusive"),
+            "optimizer_on_kwh_per_degree_day": trial.get(
+                "optimizer_on_kwh_per_degree_day"
+            ),
+            "optimizer_off_kwh_per_degree_day": trial.get(
+                "optimizer_off_kwh_per_degree_day"
+            ),
+            "difference_pct": trial.get("difference_pct"),
+            "optimizer_on_days": trial.get("optimizer_on_days"),
+            "optimizer_off_days": trial.get("optimizer_off_days"),
+            "period_days": trial.get("period_days"),
+            "total_days": trial.get("total_days"),
+            "start_date": trial.get("start_date"),
+        }
+
+
+class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
+    """Modeled energy saved today vs the digital twin baseline (kWh).
+
+    Kept for continuity and for the "why" breakdown, but it is a model-vs-model
+    number. Prefer Measured Savings for anything that matters.
+    """
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "savings_kwh_today", "Modeled Savings Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.TOTAL
@@ -692,11 +865,17 @@ class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
     def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
             return {}
+        attribution = self.coordinator.data.get("modeled_attribution") or {}
         return {
             "runtime_component": self.coordinator.data.get("runtime_savings_kwh_today"),
-            "cop_component": self.coordinator.data.get("cop_savings_kwh_today"),
+            "modeled_cop_effect": self.coordinator.data.get("cop_savings_kwh_today"),
             "source": self.coordinator.data.get("savings_accuracy_tier"),
             "is_projected": self._is_projected,
+            "confidence": attribution.get("confidence", "modeled, not measured"),
+            "uncertainty": attribution.get("uncertainty"),
+            "measured_alternative": (
+                "sensor.heat_pump_optimizer_measured_savings_30_days"
+            ),
         }
 
 
@@ -1130,12 +1309,18 @@ class RuntimeSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerB
 
 
 class CopSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
-    """Energy saved today from better compressor efficiency (kWh)."""
+    """Modeled COP effect (kWh) attributed by the digital twin.
+
+    This is not a measurement. It is the residual left after the twin's
+    runtime component is subtracted from the twin's total, computed with a
+    textbook COP curve. No COP is measured anywhere in this integration, so the
+    sensor is named and documented as a modeled effect.
+    """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "cop_savings_today", "COP Savings Today")
+        super().__init__(coordinator, entry, "cop_savings_today", "Modeled COP Effect")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.TOTAL
@@ -1149,6 +1334,18 @@ class CopSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
         return self._suppress_during_learning(
             self.coordinator.data.get("cop_savings_kwh_today")
         )
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        attribution = self.coordinator.data.get("modeled_attribution") or {}
+        return {
+            "confidence": attribution.get("confidence", "modeled, not measured"),
+            "uncertainty": attribution.get("uncertainty"),
+            "method": attribution.get("method"),
+            "measured_alternative": "sensor.heat_pump_optimizer_measured_savings_today",
+        }
 
 
 class RateSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):

@@ -38,4 +38,19 @@ async def async_get_config_entry_diagnostics(
     except Exception:  # noqa: BLE001
         diag["learned_model"] = {"error": "unavailable"}
 
+    # Measured savings evidence: the day-by-day degree-day records behind the
+    # headline number, so the whole chain is auditable from a diagnostics dump.
+    try:
+        diag["energy_baseline"] = {
+            **coordinator.energy_baseline.diagnostics(),
+            "days": [d.to_dict() for d in coordinator.energy_baseline.days],
+        }
+    except Exception:  # noqa: BLE001
+        diag["energy_baseline"] = {"error": "unavailable"}
+
+    try:
+        diag["ab_trial"] = coordinator.ab_trial_result()
+    except Exception:  # noqa: BLE001
+        diag["ab_trial"] = {"error": "unavailable"}
+
     return diag
