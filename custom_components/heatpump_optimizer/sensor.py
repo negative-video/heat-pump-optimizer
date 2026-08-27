@@ -299,7 +299,8 @@ class ModelConfidenceSensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return {}
         data = self.coordinator.data
-        return {
+        per_mode = data.get("profiler_mode_detail") or {}
+        attrs = {
             "observations": data.get("thermal_observations"),
             "source": data.get("thermal_source"),
             "note": (
@@ -307,6 +308,18 @@ class ModelConfidenceSensor(OptimizerBaseSensor):
                 "Control decisions use the unsmoothed value."
             ),
         }
+        # Panel renders these as per-mode bars.
+        for mode, key in (
+            ("cool_1", "cool_confidence"),
+            ("heat_1", "heat_confidence"),
+            ("resist", "resist_confidence"),
+            ("auxiliary_heat_1", "aux_heat_confidence"),
+        ):
+            entry = per_mode.get(mode) or {}
+            value = entry.get("confidence")  # already 0-100
+            if value is not None:
+                attrs[key] = round(value)
+        return attrs
 
 
 class ThermalTimeConstantSensor(OptimizerBaseSensor):
@@ -379,11 +392,11 @@ class EffectiveCoolingCapacitySensor(OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(
             coordinator, entry,
-            "effective_cooling_capacity", "Effective Cooling Capacity",
+            "effective_cooling_capacity", "Effective Cooling Rate",
         )
-        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_native_unit_of_measurement = "°F/h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 0
+        self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:snowflake-thermometer"
 
     @property
@@ -401,11 +414,11 @@ class EffectiveHeatingCapacitySensor(OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(
             coordinator, entry,
-            "effective_heating_capacity", "Effective Heating Capacity",
+            "effective_heating_capacity", "Effective Heating Rate",
         )
-        self._attr_native_unit_of_measurement = "BTU/hr"
+        self._attr_native_unit_of_measurement = "°F/h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 0
+        self._attr_suggested_display_precision = 2
         self._attr_icon = "mdi:fire-alert"
 
     @property

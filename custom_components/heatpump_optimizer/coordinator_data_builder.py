@@ -148,8 +148,16 @@ class DataBuilderMixin:
             self.strategic.forecast_snapshot
         )
         _outdoor_val = _outdoor_info.get("value") if _outdoor_info else None
-        # Capacity is the equipment's own forcing, envelope load removed --
-        # measured, rather than an EKF state that absorbed residual error.
+        # The equipment's own forcing, envelope load removed. Published in
+        # degrees per hour, which is what is actually measured.
+        #
+        # These entities used to be BTU/hr, read off an EKF state. Converting
+        # the gross rate back into BTU/hr needs an effective heat capacity,
+        # and the floor-area seed is not that number: it is sized for air plus
+        # light furnishings, and reports roughly a sixth of nameplate for a
+        # correctly sized unit. Publishing a confident BTU/hr figure derived
+        # from it would be exactly the kind of borrowed precision this rework
+        # removed, so the honest measured quantity is published instead.
         _active_model = self._get_active_model()
         _eff_cool = (
             _active_model.gross_hvac_rate("cool", _outdoor_val)

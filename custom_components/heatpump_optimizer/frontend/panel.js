@@ -1473,16 +1473,17 @@ function renderLearningProgressCards(states) {
     massLine = `<div class="lp-param"><span class="lp-param-label">Thermal Mass</span><span class="lp-param-val">${(tm / 1000).toFixed(1)}k BTU/\u00b0F</span><span class="lp-param-qual ${cls}">${lbl}</span></div>`;
   }
   if (hasValue(coolCap)) {
-    capLine = `<div class="lp-param"><span class="lp-param-label">Capacity</span><span class="lp-param-val">${(Number(coolCap.state) / 1000).toFixed(1)}k BTU/hr</span></div>`;
+    capLine = `<div class="lp-param"><span class="lp-param-label">Cooling rate</span><span class="lp-param-val">${Math.abs(Number(coolCap.state)).toFixed(2)} °F/h</span></div>`;
   }
-  // Per-parameter confidence from model_confidence attributes
+  // Per-mode profiler confidence. This previously read the EKF's
+  // per-parameter confidence, whose keys no longer exist, so every row
+  // rendered empty.
   const paramAttrs = modelConf?.attributes || {};
   const PARAM_CONF = [
-    ["envelope_confidence", "Insulation"],
-    ["thermal_mass_confidence", "Thermal Mass"],
-    ["heating_capacity_confidence", "Heating"],
-    ["cooling_capacity_confidence", "Cooling"],
-    ["solar_gain_confidence", "Solar Gain"],
+    ["cool_confidence", "Cooling"],
+    ["heat_confidence", "Heating"],
+    ["resist_confidence", "Passive Drift"],
+    ["aux_heat_confidence", "Aux Heat"],
   ];
   const paramConfRows = PARAM_CONF.map(([key, label]) => {
     const val = paramAttrs[key];

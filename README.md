@@ -394,8 +394,8 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 | Thermal Mass | Learned building thermal mass | BTU/°F |
 | Cooling Capacity | Learned base cooling output at 75°F reference | BTU/hr |
 | Heating Capacity | Learned base heating output at 75°F reference | BTU/hr |
-| Effective Cooling Capacity | Cooling output adjusted for current outdoor temperature | BTU/hr |
-| Effective Heating Capacity | Heating output adjusted for current outdoor temperature | BTU/hr |
+| Effective Cooling Rate | Equipment's own cooling forcing at the current outdoor temperature, envelope load removed | °F/h |
+| Effective Heating Rate | Equipment's own heating forcing at the current outdoor temperature, envelope load removed | °F/h |
 | Thermal Mass Temperature | Hidden thermal mass node temperature | °F |
 
 #### Predictions and Diagnostics
