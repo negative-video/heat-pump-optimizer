@@ -30,12 +30,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
 
     async def _get_coordinator() -> HeatPumpOptimizerCoordinator | None:
         """Get the first (and typically only) coordinator instance."""
-        entries = hass.data.get(DOMAIN, {})
-        if not entries:
-            _LOGGER.error("No Heat Pump Optimizer instances configured")
-            return None
-        # Return the first coordinator
-        return next(iter(entries.values()))
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            coord = getattr(entry, "runtime_data", None)
+            if coord is not None:
+                return coord
+        _LOGGER.error("No Heat Pump Optimizer instances configured")
+        return None
 
     async def handle_force_reoptimize(call: ServiceCall) -> None:
         coordinator = await _get_coordinator()

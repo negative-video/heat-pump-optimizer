@@ -33,7 +33,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up binary sensor entities from a config entry."""
-    coordinator: HeatPumpOptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: HeatPumpOptimizerCoordinator = entry.runtime_data
 
     entities = [
         OptimizerActiveSensor(coordinator, entry),

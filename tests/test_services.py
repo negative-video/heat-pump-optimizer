@@ -58,7 +58,11 @@ def _call(data=None):
 
 
 def _setup(hass, coordinator):
-    hass.data[DOMAIN] = {"entry_1": coordinator}
+    hass.data[DOMAIN] = {"entry_1"}
+    entry = MagicMock()
+    entry.entry_id = "entry_1"
+    entry.runtime_data = coordinator
+    hass.config_entries.async_entries = MagicMock(return_value=[entry])
     _run(services_mod.async_setup_services(hass))
 
 

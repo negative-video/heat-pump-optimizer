@@ -15,3 +15,10 @@ tools/*
 docs/internal/
 .claude/plans/
 .claude/settings.local.json
+
+# macOS
+.DS_Store
+
+# Saved Home Assistant dashboard exports (contain personal entity data)
+*Home Assistant.html
+*Home Assistant_files/

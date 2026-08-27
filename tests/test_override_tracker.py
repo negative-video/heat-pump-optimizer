@@ -24,12 +24,16 @@ PATTERN_WINDOW_DAYS = ot_mod.PATTERN_WINDOW_DAYS
 PREEMPTIVE_MIN_OCCURRENCES = ot_mod.PREEMPTIVE_MIN_OCCURRENCES
 PREEMPTIVE_MAX_ADJUSTMENT_F = ot_mod.PREEMPTIVE_MAX_ADJUSTMENT_F
 
-NOW = datetime(2026, 4, 7, 12, 0, 0, tzinfo=timezone.utc)
+# Anchor NOW to wall clock so boundary assertions against the tracker's
+# datetime.now() in get_stats / detect_patterns remain stable regardless of
+# when the suite runs.
+NOW = datetime.now(timezone.utc)
 
 
 def _ts(days_ago: int = 0, hour: int = 12) -> datetime:
     """Return a UTC timestamp `days_ago` days before NOW at the given hour."""
-    return NOW - timedelta(days=days_ago) + timedelta(hours=hour - 12)
+    target = NOW - timedelta(days=days_ago)
+    return target.replace(hour=hour, minute=0, second=0, microsecond=0)
 
 
 # ── record_override ──────────────────────────────────────────────────

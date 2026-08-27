@@ -277,3 +277,95 @@ class TestProperties:
     def test_override_frequency_empty(self):
         wd = WatchdogController()
         assert wd.get_override_frequency() == {}
+
+
+# ── End-to-end race scenarios ──────────────────────────────────────
+
+
+class TestOptimizerHumanRaces:
+    """Realistic sequences where optimizer writes and human edits interleave.
+
+    These complement the unit-level tests above by exercising the full
+    detect -> pause -> (no-re-fire) -> clear -> resume lifecycle.
+    """
+
+    def test_human_override_during_optimizer_cycle_pauses_once(self):
+        """Optimizer writes 70, human bumps to 73 — callback fires exactly once."""
+        on_detected = MagicMock()
+        on_cleared = MagicMock()
+        wd = WatchdogController()
+        wd.set_callbacks(
+            on_override_detected=on_detected,
+            on_override_cleared=on_cleared,
+        )
+
+        # Optimizer writes 70; thermostat confirms 70 → no override.
+        assert wd.check_override(70.0, 70.0) is False
+        on_detected.assert_not_called()
+
+        # Human bumps to 73 → override detected, callback fires.
+        assert wd.check_override(70.0, 73.0) is True
+        assert wd.state == WatchdogState.OVERRIDE_PAUSED
+        on_detected.assert_called_once()
+
+        # Subsequent polls during grace still return True but do NOT re-fire.
+        assert wd.check_override(70.0, 73.0) is True
+        assert wd.check_override(70.0, 73.5) is True
+        on_detected.assert_called_once()
+        on_cleared.assert_not_called()
+
+    def test_human_returns_then_optimizer_resumes_cleanly(self):
+        """After an override, clearing must fire on_cleared exactly once and
+        the next optimizer write is honoured without a stale pause state."""
+        on_detected = MagicMock()
+        on_cleared = MagicMock()
+        wd = WatchdogController()
+        wd.set_callbacks(
+            on_override_detected=on_detected,
+            on_override_cleared=on_cleared,
+        )
+
+        wd.check_override(70.0, 73.0)  # override
+        assert wd.state == WatchdogState.OVERRIDE_PAUSED
+
+        wd.clear_override()
+        assert wd.state == WatchdogState.ACTIVE
+        on_cleared.assert_called_once()
+
+        # Optimizer resumes, writes 71 which the thermostat echoes — no new override.
+        assert wd.check_override(71.0, 71.0) is False
+        assert wd.state == WatchdogState.ACTIVE
+        on_detected.assert_called_once()  # unchanged since the initial override
+
+    def test_grace_period_expiry_restores_active_exactly_once(self):
+        """Grace expiry must fire on_cleared exactly once even if check_grace_period
+        is polled multiple times afterward."""
+        on_cleared = MagicMock()
+        wd = WatchdogController(grace_period_hours=0.0)  # immediate expiry
+        wd.set_callbacks(on_override_cleared=on_cleared)
+
+        wd.check_override(70.0, 73.0)
+        assert wd.state == WatchdogState.OVERRIDE_PAUSED
+
+        assert wd.check_grace_period() is True
+        assert wd.state == WatchdogState.ACTIVE
+        on_cleared.assert_called_once()
+
+        # Polling again after expiry is a no-op (not paused anymore).
+        assert wd.check_grace_period() is False
+        on_cleared.assert_called_once()
+
+    def test_repeated_mode_flaps_do_not_trigger_early(self):
+        """Oscillating mode changes within the hysteresis window must not
+        confirm a mode change, so on_mode_change stays silent."""
+        on_mode = MagicMock()
+        wd = WatchdogController(mode_change_hysteresis_minutes=30.0)
+        wd.set_callbacks(on_mode_change=on_mode)
+
+        wd.check_mode_change("heat")       # first call -> baseline
+        wd.check_mode_change("cool")       # start hysteresis
+        wd.check_mode_change("heat")       # reverts before hysteresis expires
+        wd.check_mode_change("cool")       # flip again
+
+        on_mode.assert_not_called()
+        assert wd.state == WatchdogState.ACTIVE

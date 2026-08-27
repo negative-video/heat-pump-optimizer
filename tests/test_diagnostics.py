@@ -34,11 +34,12 @@ def _run(coro):
     return _loop.run_until_complete(coro)
 
 
-def _make_entry(data=None, options=None):
+def _make_entry(data=None, options=None, coordinator=None):
     entry = MagicMock()
     entry.entry_id = "test_entry"
     entry.data = data or {"climate_entity": "climate.thermostat", "weather_entity": "weather.home"}
     entry.options = options or {"comfort_min": 68, "comfort_max": 74}
+    entry.runtime_data = coordinator
     return entry
 
 
@@ -56,9 +57,8 @@ def _make_coordinator(data=_SENTINEL, export=None):
 class TestDiagnostics:
     def test_returns_expected_structure(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = _make_coordinator()
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -70,9 +70,8 @@ class TestDiagnostics:
 
     def test_config_entry_data_included(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = _make_coordinator()
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -81,9 +80,11 @@ class TestDiagnostics:
 
     def test_redacts_sensitive_keys(self):
         hass = MagicMock()
-        entry = _make_entry(data={"climate_entity": "climate.t", "password": "secret"})
         coordinator = _make_coordinator()
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(
+            data={"climate_entity": "climate.t", "password": "secret"},
+            coordinator=coordinator,
+        )
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -92,9 +93,8 @@ class TestDiagnostics:
 
     def test_coordinator_data_included(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = _make_coordinator(data={"phase": "heating", "setpoint": 70})
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -102,9 +102,8 @@ class TestDiagnostics:
 
     def test_learned_model_included(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = _make_coordinator(export={"confidence": 92.5})
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -112,9 +111,8 @@ class TestDiagnostics:
 
     def test_coordinator_data_none_handled(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = _make_coordinator(data=None)
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -122,10 +120,9 @@ class TestDiagnostics:
 
     def test_export_model_error_handled(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = _make_coordinator()
         coordinator.export_model.side_effect = RuntimeError("boom")
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 
@@ -133,11 +130,10 @@ class TestDiagnostics:
 
     def test_coordinator_data_error_handled(self):
         hass = MagicMock()
-        entry = _make_entry()
         coordinator = MagicMock()
         type(coordinator).data = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
         coordinator.export_model.return_value = {"confidence": 50}
-        hass.data = {DOMAIN: {entry.entry_id: coordinator}}
+        entry = _make_entry(coordinator=coordinator)
 
         result = _run(diag_mod.async_get_config_entry_diagnostics(hass, entry))
 

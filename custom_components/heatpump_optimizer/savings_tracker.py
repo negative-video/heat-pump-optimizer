@@ -69,6 +69,7 @@ class SavingsTracker:
         self._hour_cop_readings: list[float] = []
         self._hour_mode: str = "off"
         self._hour_solar_offset_kwh: float = 0.0
+        self._hour_grid_import_kwh: float = 0.0
         self._hour_aux_kwh: float = 0.0  # incremental resistive kWh this hour
 
         # Counterfactual simulator reference (set by coordinator)

@@ -22,7 +22,7 @@ async def async_setup_entry(
     monitor_only = entry.options.get(CONF_MONITOR_ONLY, entry.data.get(CONF_MONITOR_ONLY, False))
     if monitor_only:
         return  # No enable/disable switch in monitor-only mode
-    coordinator: HeatPumpOptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: HeatPumpOptimizerCoordinator = entry.runtime_data
     async_add_entities([OptimizerEnabledSwitch(coordinator, entry)])
 
 

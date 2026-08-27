@@ -11,6 +11,17 @@ const ENTITY_PREFIX = "heat_pump_optimizer";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+/** Escape HTML so entity-provided strings never execute as markup. */
+function esc(s) {
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 /** Find the optimizer entity whose ID contains the prefix and ends with `_<suffix>`. */
 function findEntity(states, suffix) {
   for (const id of Object.keys(states)) {
@@ -173,7 +184,7 @@ function renderHeroStrip(states, hass) {
     const names = activeAppliances?.state || "";
     const label = names && names !== "None" ? names : `${Math.abs(btu).toLocaleString()} BTU/hr`;
     const cls = btu < 0 ? "appliance-cooling" : "appliance-heating";
-    applianceChip = `<span class="appliance-chip ${cls}" title="${Math.abs(btu).toLocaleString()} BTU/hr">${label}</span>`;
+    applianceChip = `<span class="appliance-chip ${cls}" title="${Math.abs(btu).toLocaleString()} BTU/hr">${esc(label)}</span>`;
   }
 
   // Tactical correction annotation

@@ -122,7 +122,10 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Heat Pump Optimizer from a config entry."""
-    hass.data.setdefault(DOMAIN, {})
+    # Presence set tracks which entries are loaded, so the panel + services are
+    # registered once on first entry and torn down on the last. The coordinator
+    # itself now lives on entry.runtime_data.
+    active_entries: set[str] = hass.data.setdefault(DOMAIN, set())
 
     # Extract config — options can override data for equipment & comfort values
     climate_entity = (
@@ -222,6 +225,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Create coordinator
     coordinator = HeatPumpOptimizerCoordinator(
         hass,
+        entry=entry,
         climate_entity_id=climate_entity,
         weather_entity_id=weather_entity,
         weather_entity_ids=weather_entities,
@@ -261,10 +265,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async_at_started(hass, _on_ha_started)
 
-    hass.data[DOMAIN][entry.entry_id] = coordinator
+    entry.runtime_data = coordinator
+    is_first_entry = not active_entries
+    active_entries.add(entry.entry_id)
 
     # Register services and sidebar panel (only once for the domain)
-    if len(hass.data[DOMAIN]) == 1:
+    if is_first_entry:
         await async_setup_services(hass)
         await _async_register_panel(hass)
 
@@ -276,18 +282,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry — write safe defaults and clean up."""
-    coordinator: HeatPumpOptimizerCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: HeatPumpOptimizerCoordinator = entry.runtime_data
 
     # Graceful shutdown: write safe setpoint, persist state
     await coordinator.async_shutdown()
 
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    active_entries: set[str] = hass.data.get(DOMAIN, set())
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        active_entries.discard(entry.entry_id)
 
     # Unregister services and panel if no more instances
-    if not hass.data[DOMAIN]:
+    if not active_entries:
         await async_unload_services(hass)
         async_remove_panel(hass, DOMAIN)
 

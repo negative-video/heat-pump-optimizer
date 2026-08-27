@@ -14,17 +14,23 @@ Learning:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, time as dt_time, timedelta, timezone
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util import dt as dt_util
 import homeassistant.helpers.issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+
+from .coordinator_data_builder import DataBuilderMixin
+from .coordinator_helpers import HelpersMixin
+from .coordinator_persistence import PersistenceMixin
 
 from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.calendar_occupancy import CalendarOccupancyAdapter
@@ -206,6 +212,11 @@ _LOGGER = logging.getLogger(__name__)
 # How often to persist learned parameters
 LEARNING_PERSIST_INTERVAL_HOURS = 1
 
+# Timeouts for long-running awaits inside the 5-min update cycle.
+# Both must stay well under the 5-min interval to avoid overlapping refreshes.
+FORECAST_FETCH_TIMEOUT_S = 30.0
+OPTIMIZER_TIMEOUT_S = 90.0
+
 
 def _float_or_none(value: object) -> float | None:
     """Return a float if *value* is a non-zero number, else None."""
@@ -216,7 +227,9 @@ def _float_or_none(value: object) -> float | None:
         return None
 
 
-class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
+class HeatPumpOptimizerCoordinator(
+    DataBuilderMixin, HelpersMixin, PersistenceMixin, DataUpdateCoordinator,
+):
     """Coordinator that manages the full optimization lifecycle."""
 
     def __init__(
@@ -227,6 +240,7 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         comfort_cool: tuple[float, float],
         comfort_heat: tuple[float, float],
         *,
+        entry: ConfigEntry | None = None,
         weather_entity_ids: list[str] | None = None,
         safety_limits: tuple[float, float] | None = None,
         occupancy_entity_ids: list[str] | None = None,
@@ -243,6 +257,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             name=DOMAIN,
             update_interval=timedelta(minutes=DEFAULT_UPDATE_INTERVAL_MINUTES),
         )
+
+        self.entry = entry
 
         # Configuration
         self._monitor_only = monitor_only
@@ -678,6 +694,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             self.climate_entity_id,
             self._handle_thermostat_state_change,
         )
+        if self.entry is not None:
+            self.entry.async_on_unload(self._unsub_state_listener)
 
         # Profile control: listen for person entity changes for fast updates
         if self._profile_adapter and self.occupancy.entity_ids:
@@ -686,6 +704,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 self.occupancy.entity_ids,
                 self._handle_occupancy_state_change,
             )
+            if self.entry is not None:
+                self.entry.async_on_unload(self._unsub_occupancy_listener)
 
         # Run initial optimization (non-fatal — weather/thermostat may not be ready yet)
         try:
@@ -697,15 +717,22 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             )
 
     async def async_shutdown(self) -> None:
-        """Graceful shutdown: safe setpoint, persist state, remove listeners."""
+        """Graceful shutdown: safe setpoint, persist state.
+
+        State-change listeners registered with entry.async_on_unload are
+        cleaned up by HA automatically; only listeners without an entry
+        (bootstrap retry) are unsubbed here.
+        """
         if self._bootstrap_retry_unsub is not None:
             self._bootstrap_retry_unsub()
             self._bootstrap_retry_unsub = None
 
-        if self._unsub_state_listener:
-            self._unsub_state_listener()
-        if self._unsub_occupancy_listener:
-            self._unsub_occupancy_listener()
+        # Fallback unsub for unit-test instances created without an entry.
+        if self.entry is None:
+            if self._unsub_state_listener:
+                self._unsub_state_listener()
+            if self._unsub_occupancy_listener:
+                self._unsub_occupancy_listener()
 
         # Write safe midpoint so thermostat doesn't hold an extreme temp
         thermo_state = self.thermostat.read_state()
@@ -722,8 +749,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Called every 5 minutes by DataUpdateCoordinator."""
         try:
             return await self._update_cycle()
+        except UpdateFailed:
+            raise
         except Exception as err:
-            raise UpdateFailed(f"Update failed: {err}") from err
+            _LOGGER.error(
+                "Update cycle failed: %s: %s",
+                type(err).__name__, err, exc_info=True,
+            )
+            raise UpdateFailed(f"{type(err).__name__}: {err}") from err
 
     async def _update_cycle(self) -> dict[str, Any]:
         """Full 5-minute update cycle."""
@@ -731,9 +764,17 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         now = datetime.now(timezone.utc)
 
         # Always fetch weather early — panel needs it even when paused/override
-        new_forecast, forecast_source = await async_get_forecast_multi(
-            self.hass, self._weather_entity_ids
-        )
+        try:
+            new_forecast, forecast_source = await asyncio.wait_for(
+                async_get_forecast_multi(self.hass, self._weather_entity_ids),
+                timeout=FORECAST_FETCH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "Forecast fetch timed out after %.0fs — using last-good forecast",
+                FORECAST_FETCH_TIMEOUT_S,
+            )
+            new_forecast, forecast_source = None, None
         if new_forecast:
             # Populate sun elevation for all forecast hours using lat/lon
             populate_sun_elevation(
@@ -1306,9 +1347,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                     "Profiler skipped — missing temps: indoor=%s, outdoor=%s",
                     thermo_state.indoor_temp, outdoor_temp,
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001
             self._last_profiler_status = "error"
-            _LOGGER.warning("Profiler observation failed", exc_info=True)
+            _LOGGER.error("Profiler observation failed", exc_info=True)
 
         # ── Seed EKF from profiler (one-time) ─────────────────────
         try:
@@ -1348,8 +1389,10 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         """Run strategic optimization with error logging for fire-and-forget tasks."""
         try:
             await self._run_strategic_optimization()
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
-            _LOGGER.warning("Background re-optimization failed", exc_info=True)
+            _LOGGER.error("Background re-optimization failed", exc_info=True)
 
     async def _run_strategic_optimization(
         self, forecast: list[ForecastPoint] | None = None,
@@ -1519,20 +1562,23 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 if self.aux_heat_learner.is_learned else None
             )
             _aux_active = getattr(self, "_cached_aux_heat_active", False)
-            schedule = await self.hass.async_add_executor_job(
-                self.strategic.optimize,
-                thermo_state.indoor_temp,
-                forecast,
-                comfort_cool,
-                comfort_heat,
-                self._current_indoor_humidity,
-                True,  # humidity_correction
-                occupancy_timeline,
-                people_count,
-                self._current_indoor_humidity,
-                self.appliance_manager.total_thermal_impact_btu(),
-                _aux_threshold,
-                _aux_active,
+            schedule = await asyncio.wait_for(
+                self.hass.async_add_executor_job(
+                    self.strategic.optimize,
+                    thermo_state.indoor_temp,
+                    forecast,
+                    comfort_cool,
+                    comfort_heat,
+                    self._current_indoor_humidity,
+                    True,  # humidity_correction
+                    occupancy_timeline,
+                    people_count,
+                    self._current_indoor_humidity,
+                    self.appliance_manager.total_thermal_impact_btu(),
+                    _aux_threshold,
+                    _aux_active,
+                ),
+                timeout=OPTIMIZER_TIMEOUT_S,
             )
         finally:
             # Restore original model references
@@ -1910,8 +1956,8 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Kick off bootstrap + reoptimize (best-effort)
         try:
             await self._try_history_bootstrap()
-        except Exception:
-            _LOGGER.warning("History bootstrap after reset failed", exc_info=True)
+        except Exception:  # noqa: BLE001
+            _LOGGER.error("History bootstrap after reset failed", exc_info=True)
         await self.async_request_refresh()
 
         _LOGGER.info("Model reset complete — learning from scratch with fresh EKF")
@@ -2133,7 +2179,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
                 return
             self._paused = False
             _LOGGER.info("Pause constraint expired -- resuming optimization")
-            self.hass.async_create_task(self._safe_reoptimize())
+            self._schedule_background_task(
+                self._safe_reoptimize(), "hpo.reoptimize_pause_expired",
+            )
 
     def export_model(self) -> dict:
         """Export learned Kalman filter parameters in human-readable format."""
@@ -2190,7 +2238,9 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
             "old_mode": old_mode,
             "new_mode": new_mode,
         })
-        self.hass.async_create_task(self._safe_reoptimize())
+        self._schedule_background_task(
+            self._safe_reoptimize(), "hpo.reoptimize_mode_change",
+        )
 
     @callback
     def _handle_thermostat_state_change(self, event) -> None:
@@ -2203,13 +2253,29 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # HVAC mode change (heat->cool, etc.)
         if old_state and old_state.state != new_state.state:
             if self.watchdog.check_mode_change(new_state.state):
-                self.hass.async_create_task(self._safe_reoptimize())
+                self._schedule_background_task(
+                    self._safe_reoptimize(), "hpo.reoptimize_hvac_mode",
+                )
 
     @callback
     def _handle_occupancy_state_change(self, event) -> None:
         """React to person entity state changes for immediate profile updates."""
         if self._profile_adapter and not self._monitor_only:
-            self.hass.async_create_task(self.async_request_refresh())
+            self._schedule_background_task(
+                self.async_request_refresh(), "hpo.refresh_occupancy",
+            )
+
+    def _schedule_background_task(self, coro, name: str) -> None:
+        """Schedule a background coroutine tied to the config entry lifecycle.
+
+        When the entry is set (production), uses ConfigEntry.async_create_background_task
+        so HA auto-cancels the task on entry unload. Falls back to hass.async_create_task
+        when no entry is attached (unit-test construction).
+        """
+        if self.entry is not None:
+            self.entry.async_create_background_task(self.hass, coro, name)
+        else:
+            self.hass.async_create_task(coro)
 
     # ── Model tracker feeding ───────────────────────────────────────
 
@@ -2462,1424 +2528,3 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         # Last resort: conservative static defaults
         return self.model
 
-    # ── Helpers ─────────────────────────────────────────────────────
-
-    def _active_comfort_range(self) -> tuple[float, float]:
-        """Get the current comfort range accounting for mode, occupancy, demand response, and safety limits."""
-        mode = self.thermostat.get_active_mode()
-        base = self.comfort_heat if mode == "heat" else self.comfort_cool
-        comfort = self.occupancy.adjust_comfort_range(base, mode)
-
-        # Widen comfort bounds during demand response
-        if self._demand_response_active:
-            now = datetime.now(timezone.utc)
-            if self._demand_response_end and now >= self._demand_response_end:
-                # Auto-restore
-                self._demand_response_active = False
-                self._demand_response_end = None
-                _LOGGER.info("Demand response auto-expired — restoring normal comfort")
-                self._fire_event(f"{DOMAIN}_demand_response", {"mode": "auto_restored"})
-            else:
-                delta = self._demand_response_delta
-                comfort = (comfort[0] - delta, comfort[1] + delta)
-
-        # Apply active constraints from external integrations
-        for constraint in self._active_constraints:
-            if constraint["type"] == "min_temp":
-                comfort = (max(comfort[0], constraint["value"]), comfort[1])
-            elif constraint["type"] == "max_temp":
-                comfort = (comfort[0], min(comfort[1], constraint["value"]))
-
-        # Enforce safety limits (absolute guardrails — never exceeded)
-        safety_min, safety_max = self.safety_limits
-        comfort = (max(comfort[0], safety_min), min(comfort[1], safety_max))
-
-        # Conservative activation: use inner 80% of comfort band to limit
-        # optimization aggressiveness when the model has limited HVAC data.
-        # A wider band lets the optimizer push temps further from midpoint
-        # (more pre-heating/cooling), so shrinking reduces that risk.
-        if self._is_conservative_mode:
-            band = comfort[1] - comfort[0]
-            margin = band * 0.1  # shrink by 10% from each side = inner 80%
-            comfort = (comfort[0] + margin, comfort[1] - margin)
-        elif self._is_learning_active():
-            # Learning mode conservatism: use inner 60% of band (only when
-            # NOT in conservative activation — conservative has its own widening)
-            band = comfort[1] - comfort[0]
-            margin = band * 0.2  # shrink by 20% from each side
-            comfort = (comfort[0] + margin, comfort[1] - margin)
-
-        return comfort
-
-    @property
-    def learning_active(self) -> bool:
-        """Whether the model is still in learning mode."""
-        return self._is_learning_active()
-
-    def _is_learning_active(self) -> bool:
-        """Check if the model is still in learning mode (not yet controlling).
-
-        Respects the graduated activation tier: if the optimizer has
-        activated (conservative/standard/confident), it is no longer
-        in learning mode even if global EKF confidence is below 50%.
-        """
-        return self._activation_tier == ACTIVATION_TIER_LEARNING
-
-    @property
-    def _activation_tier(self) -> str:
-        """Determine the optimizer's current activation tier (cached per cycle).
-
-        Graduated activation allows the optimizer to provide value sooner
-        by operating conservatively when it has partial data, rather than
-        waiting for full confidence on all parameters.
-
-        Tiers:
-        - learning: baseline not captured, or insufficient data
-        - conservative: baseline captured + good passive drift data + some HVAC obs
-        - standard: global EKF confidence >= 50% or mode-specific readiness
-        - confident: global EKF >= 70% or profiler per-mode >= 70%
-        """
-        if self._cached_activation_tier is not None:
-            return self._cached_activation_tier
-
-        tier = self._compute_activation_tier()
-        self._cached_activation_tier = tier
-        return tier
-
-    def _compute_activation_tier(self) -> str:
-        """Compute the activation tier (called once per cycle, cached by property).
-
-        Profiler-primary: the profiler is the main confidence signal.
-        The EKF confidence is checked as a secondary signal.
-        Baseline capture is no longer required -- the profiler bootstraps
-        from recorder history and can produce a model within minutes.
-        """
-        profiler_conf = self.profiler.confidence()
-
-        # Confident: profiler has broad coverage or strong EKF
-        if profiler_conf >= 0.7 or self.estimator.confidence >= 0.7:
-            return ACTIVATION_TIER_CONFIDENT
-
-        # Standard: profiler has moderate coverage or mode-specific readiness
-        current_mode = self.thermostat.get_active_mode()
-        profiler_mode = "heat_1" if current_mode == "heat" else "cool_1"
-        profiler_mode_conf = self.profiler.confidence(profiler_mode)
-        if profiler_conf >= 0.5 or profiler_mode_conf >= 0.5:
-            return ACTIVATION_TIER_STANDARD
-
-        # Conservative: good passive drift data + some active mode observations
-        drift_conf = self.profiler.confidence("resist")
-        mode_obs = self.profiler.mode_observation_count(profiler_mode)
-        if drift_conf >= CONSERVATIVE_DRIFT_CONFIDENCE and mode_obs >= CONSERVATIVE_MIN_MODE_OBS:
-            return ACTIVATION_TIER_CONSERVATIVE
-
-        # Fallback: check if baseline is captured (legacy path)
-        if self.baseline_capture.is_ready and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
-            return ACTIVATION_TIER_STANDARD
-
-        return ACTIVATION_TIER_LEARNING
-
-    @property
-    def _baseline_ready_for_control(self) -> bool:
-        """Optimizer may write setpoints when activation tier is above learning."""
-        return self._activation_tier != ACTIVATION_TIER_LEARNING
-
-    @property
-    def _is_conservative_mode(self) -> bool:
-        """True when operating in conservative mode with wider comfort bands."""
-        return self._activation_tier == ACTIVATION_TIER_CONSERVATIVE
-
-    def _build_profiler_chart_data(self) -> dict:
-        """Build temperature profile chart data for the frontend.
-
-        Returns per-mode bin data (outdoor temp -> mean delta, count) and
-        trendlines for rendering a BeeStat-style observation coverage chart.
-        """
-        profile = self.profiler.to_profile_data()
-        chart = {}
-        for mode in ("cool_1", "heat_1", "auxiliary_heat_1", "resist"):
-            coverage = self.profiler.bin_coverage(mode)
-            temp_range = self.profiler.observed_temp_range(mode)
-            trendline = None
-            if profile["temperature"].get(mode) is not None:
-                trendline = profile["temperature"][mode].get("linear_trendline")
-            chart[mode] = {
-                "bins": coverage["bins"],
-                "total_observations": coverage["total_observations"],
-                "temp_range": list(temp_range) if temp_range else None,
-                "trendline": trendline,
-            }
-        chart["balance_points"] = profile.get("balance_point", {})
-        return chart
-
-    def _get_calibration_status(self) -> str:
-        """Human-readable coefficient calibration status."""
-        cal = self.coeff_calibrator
-        n_cond = len(self.estimator._conditioned_innovations)
-        if cal._first_innovation_time is None:
-            return "waiting_for_data"
-        hours_elapsed = (
-            datetime.now(timezone.utc) - cal._first_innovation_time
-        ).total_seconds() / 3600
-        if hours_elapsed < 72:
-            hours_left = round(72 - hours_elapsed)
-            return f"collecting_data ({hours_left}h until first calibration)"
-        if n_cond < 200:
-            return f"collecting_samples ({n_cond}/200 innovations)"
-        return "active"
-
-    def _update_accuracy_tier(self) -> None:
-        """Update the savings accuracy tier based on baseline and model confidence."""
-        baseline_conf = self.baseline_capture.confidence
-        model_conf = self.estimator.confidence
-        profiler_conf = self.profiler.confidence()
-
-        if baseline_conf >= 0.7 and model_conf >= 0.5:
-            tier = TIER_CALIBRATED
-        elif baseline_conf >= 0.3 and model_conf >= 0.3:
-            tier = TIER_SIMULATED
-        elif self.baseline_capture.is_ready:
-            tier = TIER_ESTIMATED
-        elif profiler_conf >= 0.5 or model_conf > 0:
-            tier = TIER_PROJECTED
-        else:
-            tier = TIER_LEARNING
-
-        # Fire events on tier changes and milestones
-        if tier != self._last_accuracy_tier:
-            self._fire_event(EVENT_ACCURACY_TIER_CHANGED, {
-                "previous_tier": self._last_accuracy_tier,
-                "new_tier": tier,
-                "model_confidence": round(model_conf * 100, 1),
-                "baseline_confidence": round(baseline_conf * 100, 1),
-            })
-            self._last_accuracy_tier = tier
-
-        if (
-            not self._baseline_complete_fired
-            and self.baseline_capture.is_ready
-        ):
-            self._baseline_complete_fired = True
-            self._fire_event(EVENT_BASELINE_COMPLETE, {
-                "sample_days": self.baseline_capture.sample_days,
-            })
-
-        self.savings_tracker.set_accuracy_tier(tier)
-
-        # Wire counterfactual simulator into savings tracker when ready
-        if tier in (TIER_SIMULATED, TIER_CALIBRATED):
-            self.savings_tracker.set_counterfactual(self.counterfactual)
-
-    def _try_seed_ekf_from_profiler(self) -> None:
-        """Seed EKF parameters from profiler data when profiler is confident but EKF is not."""
-        if self.estimator._profiler_seeded:
-            return
-        if self.estimator.confidence >= 0.3:
-            return  # EKF already has reasonable confidence
-        if self.profiler.confidence("resist") < 0.7:
-            return  # profiler not ready
-
-        profile = self.profiler.to_profile_data()
-        resist_data = profile["temperature"].get("resist")
-        if resist_data is None or resist_data.get("linear_trendline") is None:
-            return
-
-        resist_trend = resist_data["linear_trendline"]
-        t_ref = 75.0
-        resist_delta_ref = resist_trend["slope"] * t_ref + resist_trend["intercept"]
-
-        cool_delta_ref = None
-        cool_data = profile["temperature"].get("cool_1")
-        if cool_data and cool_data.get("linear_trendline"):
-            ct = cool_data["linear_trendline"]
-            cool_delta_ref = ct["slope"] * t_ref + ct["intercept"]
-
-        heat_delta_ref = None
-        heat_data = profile["temperature"].get("heat_1")
-        if heat_data and heat_data.get("linear_trendline"):
-            ht = heat_data["linear_trendline"]
-            heat_delta_ref = ht["slope"] * t_ref + ht["intercept"]
-
-        self.estimator.inject_profiler_priors(
-            resist_slope=resist_trend["slope"],
-            resist_intercept=resist_trend["intercept"],
-            cool_delta_at_ref=cool_delta_ref,
-            heat_delta_at_ref=heat_delta_ref,
-            resist_delta_at_ref=resist_delta_ref,
-        )
-
-    def _check_model_progress(self) -> None:
-        """Create or clear a repair issue if the model seems stuck."""
-        days = self.baseline_capture.sample_days
-        confidence = self.estimator.confidence
-        if days >= 7 and confidence < 0.15:
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                "model_not_progressing",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="model_not_progressing",
-                translation_placeholders={
-                    "days": str(days),
-                    "confidence": f"{confidence * 100:.0f}%",
-                },
-            )
-        elif confidence >= 0.15:
-            ir.async_delete_issue(self.hass, DOMAIN, "model_not_progressing")
-
-    def _apply_rate_limit(self, target: float, current: float | None) -> float:
-        """Limit setpoint change to max_setpoint_change_per_hour per write cycle.
-
-        Prevents jarring temperature swings by ramping the setpoint gradually.
-        """
-        if current is None:
-            return target
-        max_change = self._max_setpoint_change_per_hour
-        diff = target - current
-        if abs(diff) <= max_change:
-            return target
-        # Clamp to max change in the desired direction
-        return current + max_change if diff > 0 else current - max_change
-
-    def _check_dwell_time(self, now: datetime) -> bool:
-        """Enforce minimum dwell time between setpoint writes (15 min)."""
-        if self._last_written_setpoint_time is None:
-            return True
-        elapsed = (now - self._last_written_setpoint_time).total_seconds()
-        return elapsed >= self._min_dwell_seconds
-
-    def _get_current_entry(self, now: datetime) -> ScheduleEntry | None:
-        schedule = self.strategic.schedule
-        if not schedule:
-            return None
-        for entry in schedule.entries:
-            if entry.start_time <= now < entry.end_time:
-                return entry
-        return None
-
-    def _get_next_entry(self, now: datetime) -> ScheduleEntry | None:
-        schedule = self.strategic.schedule
-        if not schedule:
-            return None
-        for entry in schedule.entries:
-            if entry.start_time > now:
-                return entry
-        return None
-
-    def _classify_phase(
-        self, entry: ScheduleEntry, indoor_temp: float | None = None,
-    ) -> str:
-        """Determine phase from schedule entry reason text and current conditions."""
-        from .const import PHASE_COASTING, PHASE_MAINTAINING, PHASE_PRE_COOLING, PHASE_PRE_HEATING
-        reason = entry.reason.lower()
-
-        # Override: if indoor temp already at or beyond the target, the HVAC
-        # would not actually run -- label as maintaining, not pre-heating/cooling.
-        if indoor_temp is not None:
-            if "pre-heating" in reason and indoor_temp >= entry.target_temp - 0.5:
-                return PHASE_MAINTAINING
-            if "pre-cooling" in reason and indoor_temp <= entry.target_temp + 0.5:
-                return PHASE_MAINTAINING
-
-        if "pre-cooling" in reason:
-            return PHASE_PRE_COOLING
-        if "pre-heating" in reason:
-            return PHASE_PRE_HEATING
-        if "coasting" in reason:
-            return PHASE_COASTING
-        return PHASE_MAINTAINING
-
-    def _is_forecast_stale(self) -> bool:
-        last = self._last_forecast_time
-        if not last:
-            # No forecast has ever been fetched — not stale, just needs first fetch.
-            # Returning True here would immediately enter safe_mode on startup.
-            return False
-        elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 3600
-        return elapsed >= DEFAULT_STALE_FORECAST_HOURS
-
-    def _should_persist_learning(self, now: datetime) -> bool:
-        if self._last_learning_persist is None:
-            return True
-        elapsed = (now - self._last_learning_persist).total_seconds() / 3600
-        return elapsed >= LEARNING_PERSIST_INTERVAL_HOURS
-
-    def _get_latitude(self) -> float:
-        """Get latitude from HA config or default."""
-        return self.hass.config.latitude or 37.9
-
-    def _describe_next_action(self, entry: ScheduleEntry | None) -> str:
-        if entry is None:
-            return "No upcoming actions"
-        time_str = entry.start_time.strftime("%-I:%M %p")
-        return f"Target {entry.target_temp:.0f}°F at {time_str}"
-
-    def _check_model_alert(self, accuracy_report: dict) -> bool:
-        """Check for model alert and fire event on transition to alert state."""
-        alert = any(
-            accuracy_report[m].get("alert", False) for m in ("cool", "heat", "resist")
-        )
-        if alert and not self._last_model_alert:
-            alerting_modes = [
-                m for m in ("cool", "heat", "resist")
-                if accuracy_report[m].get("alert", False)
-            ]
-            self._fire_event(EVENT_MODEL_ALERT, {
-                "modes": alerting_modes,
-                "corrections": {
-                    m: accuracy_report[m]["correction"] for m in alerting_modes
-                },
-            })
-        self._last_model_alert = alert
-        return alert
-
-    def _compute_net_passive_load(self) -> float | None:
-        """Net passive thermal load on the house (BTU/hr).
-
-        Sum of all non-HVAC, non-coupling heat flows: envelope, solar,
-        internal gains, boundary zones, appliances, and aux resistive heat.
-        Positive = house gaining heat, negative = losing heat.
-        """
-        comps = self.estimator.thermal_load_components
-        if not comps:
-            return None
-        return (
-            comps.get("q_env", 0.0)
-            + comps.get("q_solar", 0.0)
-            + comps.get("q_internal", 0.0)
-            + comps.get("q_boundary", 0.0)
-            + comps.get("q_appliances", 0.0)
-            + comps.get("q_aux_resistive", 0.0)
-        )
-
-    # ── Event firing ──────────────────────────────────────────────
-
-    @callback
-    def _fire_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
-        """Fire an HA event for automation triggers."""
-        self.hass.bus.async_fire(event_type, data or {})
-
-    # ── Persistence ─────────────────────────────────────────────────
-
-    # Internal schema version for the persisted state dict.
-    # Bump this when the state format changes and add migration logic
-    # in _restore_learning_state(). Separate from HA's STORAGE_VERSION
-    # which controls the on-disk container format.
-    _STATE_SCHEMA_VERSION = 1
-
-    async def _persist_state(self) -> None:
-        """Persist learning data and coordinator state to HA storage."""
-        data = {
-            "_schema_version": self._STATE_SCHEMA_VERSION,
-            "last_optimization_time": (
-                self.strategic.last_optimization_time.isoformat()
-                if self.strategic.last_optimization_time
-                else None
-            ),
-            "phase": self._phase,
-            "active": self._active,
-            "forced_occupancy_mode": (
-                self.occupancy._forced_mode.value
-                if self.occupancy._forced_mode is not None
-                else None
-            ),
-            "model_tracker": self.model_tracker.to_dict(),
-            "solar_adjuster": self.solar_adjuster.to_dict(),
-            "override_tracker": self.override_tracker.to_dict(),
-            "savings_tracker": self.savings_tracker.to_dict(),
-            "thermal_estimator": self.estimator.to_dict(),
-            "baseline_capture": self.baseline_capture.to_dict(),
-            "counterfactual": self.counterfactual.to_dict(),
-            "performance_profiler": self.profiler.to_dict(),
-            "aux_heat_learner": self.aux_heat_learner.to_dict(),
-            "coefficient_store": self.coeff_store.to_dict(),
-            "coefficient_calibrator": self.coeff_calibrator.to_dict(),
-            "_history_bootstrap_completed": self._history_bootstrap_completed,
-            "_bootstrap_retry_count": self._bootstrap_retry_count,
-        }
-        await self._store.async_save(data)
-
-    def _restore_learning_state(self, stored: dict) -> None:
-        """Restore learning data from persisted storage.
-
-        Each component is restored independently with error handling so that
-        a corrupt or incompatible sub-dict doesn't prevent the rest from loading.
-        On failure, the component stays at its default (fresh) state and a
-        warning is logged instead of crashing async_setup().
-        """
-        schema = stored.get("_schema_version", 0)
-        if schema > self._STATE_SCHEMA_VERSION:
-            _LOGGER.warning(
-                "Stored state has schema version %d but we only support up to %d "
-                "— ignoring persisted state to avoid corruption. "
-                "The model will re-learn from scratch.",
-                schema, self._STATE_SCHEMA_VERSION,
-            )
-            return
-        if schema < self._STATE_SCHEMA_VERSION:
-            _LOGGER.info(
-                "Migrating stored state from schema version %d to %d",
-                schema, self._STATE_SCHEMA_VERSION,
-            )
-            # Add migration logic here when _STATE_SCHEMA_VERSION is bumped
-        if stored.get("forced_occupancy_mode") is not None:
-            try:
-                self.occupancy.force_mode(
-                    OccupancyMode(stored["forced_occupancy_mode"])
-                )
-                _LOGGER.debug("Restored forced occupancy mode: %s",
-                              stored["forced_occupancy_mode"])
-            except (ValueError, KeyError, TypeError):
-                _LOGGER.warning("Invalid stored occupancy mode: %s",
-                                stored["forced_occupancy_mode"])
-
-        if "model_tracker" in stored:
-            try:
-                self.model_tracker = ModelTracker.from_dict(stored["model_tracker"])
-                _LOGGER.debug("Restored model tracker state")
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore model tracker — using fresh state",
-                                exc_info=True)
-        if "solar_adjuster" in stored:
-            try:
-                self.solar_adjuster = SolarAdjuster.from_dict(stored["solar_adjuster"])
-                _LOGGER.debug("Restored solar adjuster (coefficient=%.3f)",
-                              self.solar_adjuster.solar_coefficient)
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore solar adjuster — using fresh state",
-                                exc_info=True)
-        if "override_tracker" in stored:
-            try:
-                self.override_tracker = OverrideTracker.from_dict(stored["override_tracker"])
-                _LOGGER.debug("Restored %d override records",
-                              self.override_tracker.record_count)
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore override tracker — using fresh state",
-                                exc_info=True)
-        if "savings_tracker" in stored:
-            try:
-                self.savings_tracker = SavingsTracker.from_dict(stored["savings_tracker"])
-                totals = self.savings_tracker.cumulative_totals()
-                _LOGGER.debug("Restored savings tracker (%.1f kWh saved cumulative)",
-                              totals["kwh_saved"])
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore savings tracker — using fresh state",
-                                exc_info=True)
-        if "coefficient_store" in stored:
-            try:
-                self.coeff_store = CoefficientStore.from_dict(stored["coefficient_store"])
-                _LOGGER.debug(
-                    "Restored coefficient store (%d calibrations)",
-                    self.coeff_store.calibration_count,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore coefficient store — using defaults",
-                                exc_info=True)
-        if "coefficient_calibrator" in stored:
-            try:
-                self.coeff_calibrator = CoefficientCalibrator.from_dict(
-                    stored["coefficient_calibrator"], self.coeff_store,
-                )
-                _LOGGER.debug("Restored coefficient calibrator")
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore coefficient calibrator — using fresh state",
-                                exc_info=True)
-        if "thermal_estimator" in stored:
-            try:
-                self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
-                self.estimator._coeff_store = self.coeff_store
-                self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-                _LOGGER.info(
-                    "Restored Kalman filter (%d observations, confidence=%.0f%%)",
-                    self.estimator._n_obs,
-                    self.estimator.confidence * 100,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning(
-                    "Failed to restore thermal estimator — using fresh state. "
-                    "The model will re-learn from scratch.",
-                    exc_info=True,
-                )
-        if "baseline_capture" in stored:
-            try:
-                self.baseline_capture = BaselineCapture.from_dict(stored["baseline_capture"])
-                _LOGGER.debug(
-                    "Restored baseline capture (%d days, confidence=%.0f%%)",
-                    self.baseline_capture.sample_days,
-                    self.baseline_capture.confidence * 100,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore baseline capture — using fresh state",
-                                exc_info=True)
-        if "counterfactual" in stored:
-            try:
-                self.counterfactual = CounterfactualSimulator.from_dict(stored["counterfactual"])
-                _LOGGER.debug(
-                    "Restored counterfactual simulator (virtual_temp=%.1f°F)",
-                    self.counterfactual.virtual_indoor_temp,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore counterfactual simulator — using fresh state",
-                                exc_info=True)
-        if "performance_profiler" in stored:
-            try:
-                self.profiler = PerformanceProfiler.from_dict(stored["performance_profiler"])
-                _LOGGER.debug(
-                    "Restored performance profiler (%d observations, confidence=%.0f%%)",
-                    self.profiler.total_observations,
-                    self.profiler.confidence() * 100,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore performance profiler — using fresh state",
-                                exc_info=True)
-        if "aux_heat_learner" in stored:
-            try:
-                self.aux_heat_learner = AuxHeatLearner.from_dict(
-                    stored["aux_heat_learner"],
-                    default_hp_watts=self._power_default_watts,
-                )
-                _LOGGER.debug(
-                    "Restored aux heat learner (%d events, threshold=%.1f°F, hp_watts=%.0fW)",
-                    self.aux_heat_learner.event_count,
-                    self.aux_heat_learner.threshold_f,
-                    self.aux_heat_learner.learned_hp_watts,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore aux heat learner — using fresh state",
-                                exc_info=True)
-
-    async def async_try_history_bootstrap_if_needed(self) -> None:
-        """Public entry point: attempt history bootstrap if not already done.
-
-        Called from the async_at_started callback in __init__.py where the
-        recorder is guaranteed to be ready.
-        """
-        if self._history_bootstrap_completed:
-            _LOGGER.debug("History bootstrap already completed — skipping")
-            return
-        if self._bootstrap_retry_unsub is not None:
-            _LOGGER.debug("History bootstrap retry already scheduled — skipping")
-            return
-        await self._try_history_bootstrap()
-
-    def _schedule_bootstrap_retry(self) -> None:
-        """Schedule a delayed bootstrap retry if retries remain."""
-        from .const import MAX_BOOTSTRAP_RETRIES, BOOTSTRAP_RETRY_DELAY_SECONDS
-
-        if self._bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES:
-            _LOGGER.warning(
-                "History bootstrap: exhausted %d retries, giving up. "
-                "Baseline will complete via live observation.",
-                MAX_BOOTSTRAP_RETRIES,
-            )
-            self._history_bootstrap_completed = True
-            return
-
-        async def _retry_callback(_now) -> None:
-            self._bootstrap_retry_unsub = None
-            await self._try_history_bootstrap()
-
-        from homeassistant.helpers.event import async_call_later
-
-        self._bootstrap_retry_unsub = async_call_later(
-            self.hass, BOOTSTRAP_RETRY_DELAY_SECONDS, _retry_callback
-        )
-        _LOGGER.info(
-            "History bootstrap: baseline not ready, retry %d/%d scheduled in 24h",
-            self._bootstrap_retry_count + 1, MAX_BOOTSTRAP_RETRIES,
-        )
-
-    async def _try_history_bootstrap(self) -> None:
-        """Attempt to bootstrap learning subsystems from recorder history.
-
-        Batch-replays up to 10 days of historical thermostat/sensor data
-        through the EKF to achieve meaningful model convergence immediately.
-        """
-        from .learning.history_bootstrap import async_bootstrap_from_history
-
-        result = await async_bootstrap_from_history(
-            hass=self.hass,
-            climate_entity_id=self.climate_entity_id,
-            outdoor_temp_entities=self.sensor_hub._outdoor_temp_entities,
-            weather_entity_ids=self._weather_entity_ids,
-            wind_speed_entity=getattr(self.sensor_hub, "_wind_speed_entity", None),
-            humidity_entities=self.sensor_hub._outdoor_humidity_entities,
-            estimator=self.estimator,
-            baseline_capture=self.baseline_capture,
-            profiler=self.profiler,
-            max_days=DEFAULT_HISTORY_BOOTSTRAP_DAYS,
-            indoor_temp_entities=self.sensor_hub._indoor_temp_entities,
-            attic_temp_entity=getattr(self.sensor_hub, "_attic_temp_entity", None),
-        )
-
-        self._history_bootstrap_result = result.reason if not result.success else "ok"
-
-        if result.success:
-            # Rebuild dependent objects with updated estimator state
-            self.estimator._coeff_store = self.coeff_store
-            self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-
-            # Reset profiler tracking so the first live cycle starts clean
-            # (avoids perpetual skipped_interval from stale bootstrap timestamp)
-            self.profiler._previous_indoor_temp = None
-            self.profiler._previous_timestamp = None
-
-            _LOGGER.info(
-                "History bootstrap complete: %d EKF observations "
-                "(confidence=%.0f%%), baseline %s (%d obs), profiler %d obs",
-                result.ekf_observations,
-                result.final_confidence * 100,
-                "ready" if self.baseline_capture.is_ready else "not ready",
-                result.baseline_observations,
-                result.profiler_observations,
-            )
-
-            if self.baseline_capture.is_ready:
-                self._history_bootstrap_completed = True
-            else:
-                # EKF benefited but baseline needs more days — schedule retry
-                self._bootstrap_retry_count += 1
-                self._schedule_bootstrap_retry()
-
-            # Persist immediately (includes bootstrap flag + retry count)
-            await self._persist_state()
-        else:
-            _LOGGER.warning("History bootstrap failed: %s", result.reason)
-            self._bootstrap_retry_count += 1
-            self._schedule_bootstrap_retry()
-            await self._persist_state()
-
-    # ── HVAC state helpers ──────────────────────────────────────────
-
-    def _is_hvac_running(self, thermo_state) -> bool:
-        """Check if the HVAC is currently running (actively heating/cooling)."""
-        if thermo_state is None or not thermo_state.available:
-            return False
-        action = getattr(thermo_state, "hvac_action", None)
-        if action:
-            return action in ("heating", "cooling")
-        # Fallback: if no hvac_action, check if mode is not idle/off
-        mode = getattr(thermo_state, "hvac_mode", None)
-        return mode is not None and mode not in ("off", "fan_only")
-
-    def _is_aux_heat_running(self, thermo_state) -> bool:
-        """Check if auxiliary/emergency heat is currently running."""
-        # Priority 1: User-provided override entity
-        if self._aux_heat_override_entity_id:
-            state = self.hass.states.get(self._aux_heat_override_entity_id)
-            if state and state.state not in ("unavailable", "unknown"):
-                return state.state == "on"
-            # Override unavailable — fall through
-
-        # Priority 2: Native duct temperature detection
-        if self._duct_temp_entity:
-            is_heating = (
-                thermo_state is not None
-                and thermo_state.available
-                and getattr(thermo_state, "hvac_action", None) == "heating"
-            )
-            if is_heating:
-                duct_result = self._detect_aux_heat_from_duct()
-                if duct_result is not None:
-                    return duct_result
-
-        # Priority 3: Thermostat hvac_action
-        if thermo_state is None or not thermo_state.available:
-            return False
-        action = getattr(thermo_state, "hvac_action", None)
-        if action:
-            return action in ("aux_heating", "emergency_heating")
-        # Priority 4: Thermostat aux_heat attribute
-        attrs = getattr(thermo_state, "attributes", {})
-        return bool(attrs.get("aux_heat", False))
-
-    def _detect_aux_heat_from_duct(self) -> bool | None:
-        """Detect aux heat from supply duct temperature and rate of change.
-
-        Returns True if aux heat is likely running, False if not,
-        None if insufficient data or sensor unavailable.
-        """
-        reading = self.sensor_hub.read_duct_temp()
-        if reading is None or reading.stale:
-            return None
-
-        now_ts = reading.timestamp.timestamp()
-        duct_temp = reading.value
-
-        # Append to ring buffer, trim to last 5 readings
-        self._duct_temp_buffer.append((now_ts, duct_temp))
-        if len(self._duct_temp_buffer) > 5:
-            self._duct_temp_buffer = self._duct_temp_buffer[-5:]
-
-        # High absolute temperature = almost certainly resistive heat
-        if duct_temp >= DEFAULT_DUCT_AUX_THRESHOLD_F:
-            return True
-
-        # Moderate temperature + rapid rise = aux heat starting up
-        if duct_temp >= DEFAULT_DUCT_AUX_RATE_THRESHOLD_F and len(self._duct_temp_buffer) >= 2:
-            oldest_ts, oldest_temp = self._duct_temp_buffer[0]
-            elapsed_min = (now_ts - oldest_ts) / 60.0
-            if elapsed_min > 0:
-                rate = (duct_temp - oldest_temp) / elapsed_min
-                if rate >= DEFAULT_DUCT_AUX_RATE_MIN:
-                    return True
-
-        return False
-
-    # ── Diagnostic helpers ─────────────────────────────────────────
-
-    def _outdoor_sensor_diverges_from_forecast(self) -> bool:
-        """Check if standalone outdoor sensor diverges from forecast snapshot.
-
-        Only triggers when outdoor temp entities are configured and the reading
-        differs from the forecast by more than the deviation threshold.
-        """
-        if not self.sensor_hub._outdoor_temp_entities:
-            return False
-        snapshot = self.strategic.forecast_snapshot
-        if not snapshot:
-            return False
-
-        # Read from standalone sensor only (not forecast fallback)
-        reading = self.sensor_hub._read_multi_temp(
-            self.sensor_hub._outdoor_temp_entities, "Outdoor temp"
-        )
-        if reading is None or reading.stale:
-            return False
-
-        now = self.sensor_hub._now()
-        closest = min(snapshot, key=lambda pt: abs((pt.time - now).total_seconds()))
-        if abs((closest.time - now).total_seconds()) > 3600:
-            return False
-
-        from .const import DEFAULT_FORECAST_DEVIATION_THRESHOLD
-        deviation = abs(reading.value - closest.outdoor_temp)
-        if deviation > DEFAULT_FORECAST_DEVIATION_THRESHOLD:
-            _LOGGER.debug(
-                "Outdoor sensor (%.1f°F) diverges from forecast (%.1f°F) by %.1f°F",
-                reading.value, closest.outdoor_temp, deviation,
-            )
-            return True
-        return False
-
-    def _is_sensor_stale(self) -> bool:
-        """Check if the thermostat has reported identical temps for 24+ hours."""
-        if len(self._temp_history) < 288:  # need at least 24h of data
-            return False
-        # Check if all readings within ±0.1°F of first reading
-        ref = self._temp_history[0]
-        return all(abs(t - ref) <= 0.1 for t in self._temp_history)
-
-    def _get_last_tactical_correction(self) -> float | None:
-        """Get the last tactical correction applied (°F)."""
-        if not hasattr(self, "_last_tactical_correction"):
-            return None
-        return self._last_tactical_correction
-
-    def _compute_forecast_deviation(self) -> float | None:
-        """Max deviation between current forecast snapshot and optimization snapshot."""
-        if not self.strategic._last_forecast_snapshot:
-            return None
-        try:
-            current = self.strategic._last_forecast_snapshot
-            # If we have both snapshots, compare them
-            if not hasattr(self.strategic, "_optimization_forecast_snapshot"):
-                return None
-            opt_snapshot = self.strategic._optimization_forecast_snapshot
-            if not opt_snapshot:
-                return None
-            deviations = []
-            for i in range(min(len(current), len(opt_snapshot), 6)):
-                deviations.append(abs(current[i].outdoor_temp - opt_snapshot[i].outdoor_temp))
-            return max(deviations) if deviations else None
-        except Exception:
-            return None
-
-    def _build_schedule_detail(self, schedule) -> list[dict] | None:
-        """Build a list of schedule entries for the schedule sensor's attributes."""
-        if not schedule or not schedule.entries:
-            return None
-        return [
-            {
-                "start": entry.start_time.isoformat(),
-                "end": entry.end_time.isoformat(),
-                "target_temp": entry.target_temp,
-                "mode": entry.mode,
-                "reason": entry.reason,
-            }
-            for entry in schedule.entries
-        ]
-
-    def _build_forecast_detail(self, schedule) -> list[dict] | None:
-        """Build forecast simulation points for the schedule sensor's attributes."""
-        if not schedule or not schedule.simulation:
-            return None
-
-        # Build comfort bounds lookup from enriched forecast points
-        comfort_bounds: dict[int, tuple[float, float]] = {}
-        snapshot = self.strategic.forecast_snapshot
-        if snapshot:
-            for pt in snapshot:
-                if pt.comfort_min is not None and pt.comfort_max is not None:
-                    comfort_bounds[int(pt.time.timestamp()) // 3600] = (
-                        round(pt.comfort_min, 1),
-                        round(pt.comfort_max, 1),
-                    )
-
-        # Subsample to one point per hour (optimizer uses 5-min
-        # steps producing ~288 points).
-        result = []
-        seen_hours: set[int] = set()
-        for pt in schedule.simulation:
-            hour_key = int(pt.time.timestamp()) // 3600
-            if hour_key in seen_hours:
-                continue
-            seen_hours.add(hour_key)
-            bounds = comfort_bounds.get(hour_key)
-            entry: dict = {
-                "time": pt.time.isoformat(),
-                "indoor": float(round(pt.indoor_temp, 1)),
-                "outdoor": float(round(pt.outdoor_temp, 1)),
-                "hvac": bool(pt.hvac_running),
-            }
-            if bounds:
-                entry["comfort_min"] = bounds[0]
-                entry["comfort_max"] = bounds[1]
-            result.append(entry)
-        return result
-
-    def _build_weather_forecast(self) -> list[dict] | None:
-        """Build simplified weather forecast for the panel (outdoor temps only)."""
-        forecast = self._last_good_forecast
-        if not forecast:
-            return None
-        result = []
-        for pt in forecast[:24]:
-            result.append({
-                "time": pt.time.isoformat(),
-                "outdoor": round(pt.outdoor_temp, 1),
-                "humidity": round(pt.humidity, 0) if pt.humidity else None,
-                "cloud_cover": round(pt.cloud_cover, 2) if pt.cloud_cover else None,
-            })
-        return result or None
-
-    # ── Data for sensor entities ────────────────────────────────────
-
-    def _build_data(self, thermo_state=None) -> dict[str, Any]:
-        """Build coordinator data dict for sensor entities."""
-        now = datetime.now(timezone.utc)
-        schedule = self.strategic.schedule
-        current_entry = self._get_current_entry(now)
-        next_entry = self._get_next_entry(now)
-
-        # Tactical stats (fall back to EKF innovations when tactical isn't active)
-        tactical_mae = self.tactical.mean_absolute_error
-        tactical_bias = self.tactical.mean_signed_error
-        if tactical_mae is None and self.estimator._innovations:
-            innovations = self.estimator._innovations
-            tactical_mae = round(
-                sum(abs(v) for _, v in innovations) / len(innovations), 2
-            )
-            tactical_bias = round(
-                sum(v for _, v in innovations) / len(innovations), 2
-            )
-
-        # Model tracker report
-        accuracy_report = self.model_tracker.get_accuracy_report()
-
-        # Override stats
-        override_stats = self.override_tracker.get_stats()
-
-        # Savings
-        today_savings = self.savings_tracker.today_report(tz=dt_util.DEFAULT_TIME_ZONE)
-        cumulative = self.savings_tracker.cumulative_totals()
-
-        # Effective HVAC capacity at current outdoor temp
-        _outdoor_info = self.sensor_hub.get_outdoor_temp_info(
-            self.strategic.forecast_snapshot
-        )
-        _outdoor_val = _outdoor_info.get("value") if _outdoor_info else None
-        _eff_cool = (
-            self.estimator.cooling_capacity(_outdoor_val)
-            if _outdoor_val is not None and self.estimator._n_obs > 0
-            else None
-        )
-        _eff_heat = (
-            self.estimator.heating_capacity(_outdoor_val)
-            if _outdoor_val is not None and self.estimator._n_obs > 0
-            else None
-        )
-
-        return {
-            # Core state
-            "phase": self._phase,
-            "active": self._active and not self._paused and not self.watchdog.is_override_active,
-            "monitor_only": self._monitor_only,
-            "override_detected": self.watchdog.is_override_active,
-            "baseline_only_mode": not self._baseline_ready_for_control,
-            "activation_tier": self._activation_tier,
-            "baseline_ready": self.baseline_capture.is_ready,
-            "sensor_stale": self._is_sensor_stale(),
-            "aux_heat_active": self._is_aux_heat_running(thermo_state),
-
-            # Schedule
-            "target_setpoint": current_entry.target_temp if current_entry else None,
-            "next_action": self._describe_next_action(next_entry),
-            "schedule_entries": len(schedule.entries) if schedule else 0,
-            "savings_pct": (
-                schedule.savings_pct if schedule
-                and self.savings_tracker.accuracy_tier != TIER_LEARNING
-                else None
-            ),
-            "baseline_runtime": schedule.baseline_runtime_minutes if schedule else None,
-            "optimized_runtime": schedule.optimized_runtime_minutes if schedule else None,
-            "last_optimization": (
-                self.strategic.last_optimization_time.isoformat()
-                if self.strategic.last_optimization_time else None
-            ),
-            "mode": self.strategic.mode,
-
-            # Thermostat
-            "current_indoor_temp": thermo_state.indoor_temp if thermo_state else None,
-            "weighted_indoor_temp": getattr(self, "_effective_indoor_temp", None),
-            "humidity": thermo_state.humidity if thermo_state else None,
-
-            # Thermostat blend mitigation diagnostics
-            "thermostat_blend_suspected": getattr(self, "_thermostat_blend_suspected", False),
-            "thermostat_blend_mode": self._blend_mode,
-            "cross_sensor_spread_f": getattr(self, "_cross_sensor_spread_f", 0.0),
-            "indoor_thermo_excluded": (
-                getattr(self, "_thermostat_blend_suspected", False)
-                and self._blend_mode != BLEND_MODE_NONE
-            ),
-
-            # Humidity squelch diagnostics
-            "humidity_squelch_active": bool(self.sensor_hub.squelched_entities),
-            "squelched_entities": self.sensor_hub.squelched_entities,
-
-            # Apparent temperature (humidity-adjusted)
-            "apparent_temperature": self._current_apparent_temp,
-            "indoor_humidity": self._current_indoor_humidity,
-
-            # Room-aware sensing (None if not configured)
-            "area_occupancy": (
-                self.area_manager.get_diagnostics()
-                if self.area_manager is not None else None
-            ),
-
-            # Tactical
-            "tactical_correction": self._get_last_tactical_correction(),
-            "tactical_state": self.tactical.state.value,
-            "prediction_error": (
-                self.tactical.error_history[-1][1]
-                if self.tactical.error_history
-                else (
-                    round(self.estimator._innovations[-1][1], 2)
-                    if self.estimator._innovations else None
-                )
-            ),
-            "predicted_indoor_temp": (
-                round(self.estimator._last_predicted_temp, 2)
-                if self.estimator._last_predicted_temp is not None
-                else None
-            ),
-            "model_accuracy_mae": tactical_mae,
-            "model_bias": tactical_bias,
-
-            # Learning
-            "model_corrections": {
-                mode: accuracy_report[mode]["correction"]
-                for mode in ("cool", "heat", "resist")
-            },
-            "model_alert": self._check_model_alert(accuracy_report),
-            "solar_coefficient": self.solar_adjuster.solar_coefficient,
-
-            # Kalman filter / adaptive model
-            "kalman_confidence": self.estimator.confidence,
-            "kalman_parameter_confidence": self.estimator.parameter_confidence,
-            "kalman_learning_needs": self.estimator.learning_needs,
-            "kalman_learning_rate": self.estimator.learning_rate,
-            "kalman_r_value": self.estimator.R_value,
-            "kalman_thermal_mass": self.estimator.thermal_mass,
-            "kalman_cooling_capacity": float(self.estimator.x[6]),
-            "kalman_heating_capacity": float(self.estimator.x[7]),
-            "effective_cooling_capacity": _eff_cool,
-            "effective_heating_capacity": _eff_heat,
-            "kalman_mass_temp": self.estimator.T_mass,
-            "kalman_observations": self.estimator._n_obs,
-            "using_adaptive_model": (
-                self._use_adaptive
-                and self._activation_tier != ACTIVATION_TIER_LEARNING
-            ),
-            "learning_active": self._is_learning_active(),
-            "initialization_mode": self._initialization_mode,
-            "history_bootstrap_completed": self._history_bootstrap_completed,
-            "history_bootstrap_result": self._history_bootstrap_result,
-            "bootstrap_retry_count": self._bootstrap_retry_count,
-
-            # Thermal load breakdown (BTU/hr components from EKF)
-            "thermal_load_components": self.estimator.thermal_load_components,
-            "house_thermal_load_btu": self._compute_net_passive_load(),
-
-            # Coefficient calibration (slow outer loop)
-            "coefficient_calibration_status": self._get_calibration_status(),
-            "coefficient_multipliers": self.coeff_store.multipliers,
-            "coefficient_confidence": self.coeff_store.all_confidence,
-            "coefficient_proposed": self.coeff_calibrator.proposed_multipliers,
-            "coefficient_calibration_count": self.coeff_store.calibration_count,
-            "coefficient_last_calibration": (
-                self.coeff_store.last_calibration.isoformat()
-                if self.coeff_store.last_calibration else None
-            ),
-            "coefficient_experiments_detected": len(self.coeff_calibrator.last_experiments),
-
-            # Overrides
-            "override_count_30d": override_stats.get("total_overrides_30d", 0),
-            "override_pattern": override_stats.get("top_pattern"),
-
-            # Occupancy
-            "occupancy_mode": self.occupancy.get_effective_mode(
-                self._occupancy_timeline or None
-            ).value,
-
-            # Diagnostics
-            "forecast_age_minutes": (
-                round((now - self._last_forecast_time).total_seconds() / 60.0, 1)
-                if self._last_forecast_time else None
-            ),
-            "forecast_deviation": self._compute_forecast_deviation(),
-            "schedule_detail": self._build_schedule_detail(schedule),
-            "forecast_detail": self._build_forecast_detail(schedule),
-
-            # SensorHub diagnostics
-            "outdoor_temp_info": _outdoor_info,
-            "indoor_temp_info": self.sensor_hub.get_indoor_temp_info(
-                thermo_state.indoor_temp if thermo_state else None
-            ),
-
-            # Savings tracking — suppress unreliable values during learning
-            # (tracker still records internally so data is ready when tier upgrades)
-            "savings_kwh_today": (
-                today_savings.total_saved_kwh
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "savings_cost_today": (
-                today_savings.total_saved_cost
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "savings_co2_today_grams": (
-                today_savings.total_saved_co2_grams
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "baseline_kwh_today": today_savings.total_baseline_kwh,
-            "actual_kwh_today": today_savings.total_actual_kwh,
-            "actual_kwh_cumulative": cumulative["kwh_actual"],
-            "worst_case_kwh_today": today_savings.total_worst_case_kwh,
-            "savings_kwh_cumulative": (
-                cumulative["kwh_saved"]
-                if self.savings_tracker.accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED)
-                else 0.0 if self.savings_tracker.accuracy_tier == TIER_PROJECTED
-                else None
-            ),
-            "savings_cost_cumulative": (
-                cumulative["cost_saved"]
-                if self.savings_tracker.accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED)
-                else 0.0 if self.savings_tracker.accuracy_tier == TIER_PROJECTED
-                else None
-            ),
-            "savings_co2_cumulative_grams": (
-                cumulative["co2_saved_grams"]
-                if self.savings_tracker.accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED)
-                else 0.0 if self.savings_tracker.accuracy_tier == TIER_PROJECTED
-                else None
-            ),
-
-            # Counterfactual digital twin — decomposed savings
-            "runtime_savings_kwh_today": (
-                today_savings.total_runtime_savings_kwh
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "cop_savings_kwh_today": (
-                today_savings.total_cop_savings_kwh
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "rate_arbitrage_savings_today": (
-                today_savings.total_rate_arbitrage_savings
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "carbon_shift_savings_today": (
-                today_savings.total_saved_co2_grams - sum(
-                    h.saved_co2_grams or 0 for h in today_savings.hours
-                    if h.runtime_savings_kwh > 0
-                ) if today_savings.total_saved_co2_grams
-                and self.savings_tracker.accuracy_tier != TIER_LEARNING
-                else None
-            ),
-
-            # COP comparison
-            "baseline_avg_cop": (
-                today_savings.avg_baseline_cop
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "optimized_avg_cop": today_savings.avg_actual_cop,
-            "cop_improvement_pct": (
-                round(
-                    (today_savings.avg_actual_cop - today_savings.avg_baseline_cop)
-                    / today_savings.avg_baseline_cop * 100,
-                    1,
-                )
-                if today_savings.avg_actual_cop and today_savings.avg_baseline_cop
-                and today_savings.avg_baseline_cop > 0
-                and self.savings_tracker.accuracy_tier != TIER_LEARNING
-                else None
-            ),
-
-            # Comfort comparison
-            "comfort_hours_gained": (
-                today_savings.comfort_hours_gained
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "baseline_comfort_violations": (
-                today_savings.baseline_comfort_violations
-                if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
-            ),
-            "baseline_avg_indoor_temp": (
-                round(
-                    sum(
-                        h.baseline_indoor_temp for h in today_savings.hours
-                        if h.baseline_indoor_temp is not None
-                    ) / max(1, sum(
-                        1 for h in today_savings.hours
-                        if h.baseline_indoor_temp is not None
-                    )),
-                    1,
-                )
-                if any(h.baseline_indoor_temp is not None for h in today_savings.hours)
-                and self.savings_tracker.accuracy_tier != TIER_LEARNING
-                else None
-            ),
-
-            # Baseline confidence and accuracy tier
-            "baseline_confidence": round(self.baseline_capture.confidence * 100, 0),
-            "baseline_sample_days": self.baseline_capture.sample_days,
-            "baseline_capture_method": (
-                self.baseline_capture.template.capture_method
-                if self.baseline_capture.template else None
-            ),
-            "baseline_days_remaining": self.baseline_capture.days_remaining,
-            "savings_accuracy_tier": self.savings_tracker.accuracy_tier,
-            "savings_is_projected": self.savings_tracker.accuracy_tier == TIER_PROJECTED,
-
-            # Performance profiler
-            "profiler_confidence": round(self.profiler.confidence() * 100, 0),
-            "profiler_active": self.profiler.confidence() >= 0.7,
-            "profiler_observations": self.profiler.total_observations,
-            "profiler_status": self._last_profiler_status,
-            "profiler_mode_detail": {
-                mode: {
-                    "confidence": round(
-                        self.profiler.confidence(mode) * 100, 0
-                    ),
-                    "observations": sum(
-                        acc.count
-                        for acc in self.profiler._bins[mode].values()
-                    ),
-                }
-                for mode in ("cool_1", "heat_1", "auxiliary_heat_1", "resist")
-                if self.profiler._bins[mode]
-            },
-
-            # Temperature profile chart data (per-mode bin coverage + trendlines)
-            "profiler_chart_data": self._build_profiler_chart_data(),
-
-            # Calendar occupancy / pre-conditioning
-            "occupancy_forecast_source": (
-                "calendar" if self.calendar_occupancy and self._occupancy_timeline
-                else "reactive"
-            ),
-            "occupancy_timeline_segments": len(self._occupancy_timeline),
-            "next_occupancy_transition": self._next_transition_info(),
-            "precondition_status": self._precondition_status(),
-            "precondition_plan": self._precondition_plan_info(),
-
-            # Source health diagnostics
-            "source_health": self._build_source_health(thermo_state),
-
-            # Environment context for panel
-            "electricity_rate": self.sensor_hub.read_electricity_rate(),
-            "co2_intensity": self.sensor_hub.read_co2_intensity(),
-            "wind_speed_mph": (
-                r.value if (r := self.sensor_hub.read_wind_speed(
-                    self.strategic.forecast_snapshot
-                )) else None
-            ),
-            "solar_irradiance": (
-                r.value if (r := self.sensor_hub.read_solar_irradiance())
-                else None
-            ),
-            "grid_import_watts": (
-                r.value if (r := self.sensor_hub.read_grid_import())
-                else None
-            ),
-
-            # Weather forecast for panel (enables chart during learning)
-            "weather_forecast": self._build_weather_forecast(),
-
-            # Auxiliary appliances
-            "appliance_thermal_load_btu": self.appliance_manager.total_thermal_impact_btu(),
-            "appliance_diagnostics": self.appliance_manager.get_diagnostics(),
-
-            # Aux heat learner
-            "aux_heat_threshold_f": (
-                self.aux_heat_learner.threshold_f
-                if self.aux_heat_learner.is_learned else None
-            ),
-            "aux_heat_threshold_learned": self.aux_heat_learner.is_learned,
-            "aux_heat_event_count": self.aux_heat_learner.event_count,
-            "aux_heat_learned_hp_watts": (
-                round(self.aux_heat_learner.learned_hp_watts)
-                if self.aux_heat_learner.hp_watts_learned else None
-            ),
-            "aux_heat_kwh_today": today_savings.total_aux_heat_kwh,
-            "avoided_aux_heat_kwh_today": today_savings.total_avoided_aux_kwh,
-
-            # Profile control
-            "profile_control": {
-                "enabled": self._profile_adapter is not None,
-                "current_profile": (
-                    self._profile_adapter.current_profile
-                    if self._profile_adapter else None
-                ),
-                "last_set_profile": self._last_profile_mode,
-                "entity": (
-                    self._profile_adapter.target_entity_id
-                    if self._profile_adapter else None
-                ),
-            },
-        }
-
-    def _next_transition_info(self) -> dict[str, str] | None:
-        """Get info about the next occupancy transition from the timeline."""
-        if not self._occupancy_timeline or not self.calendar_occupancy:
-            return None
-        for direction in [("away", "home"), ("home", "away")]:
-            t = self.calendar_occupancy.get_next_transition(
-                self._occupancy_timeline, direction[0], direction[1]
-            )
-            if t is not None:
-                return {
-                    "time": t.isoformat(),
-                    "type": f"{direction[0]}_to_{direction[1]}",
-                }
-        return None
-
-    def _precondition_status(self) -> str:
-        """Return pre-conditioning status string."""
-        if self._precondition_plan is None:
-            return "idle" if self.calendar_occupancy else "not_configured"
-        if self._phase == PHASE_PRECONDITIONING:
-            return "active"
-        if self._departure_detected:
-            return "departure_detected"
-        return "scheduled"
-
-    def _precondition_plan_info(self) -> dict[str, Any] | None:
-        """Serialize the current pre-conditioning plan for sensors."""
-        plan = self._precondition_plan
-        if plan is None:
-            return None
-        return {
-            "scheduled_start": plan.start_time.isoformat(),
-            "arrival_time": plan.arrival_time.isoformat(),
-            "arrival_source": plan.arrival_source,
-            "estimated_runtime_minutes": plan.estimated_runtime_minutes,
-            "estimated_energy_kwh": plan.estimated_energy_kwh,
-            "estimated_cost": plan.estimated_cost,
-            "temperature_gap": plan.temperature_gap,
-            "should_start_now": plan.should_start_now,
-        }
-
-    def _build_source_health(self, thermo_state=None) -> dict[str, Any]:
-        """Build source health diagnostics for the SourceHealthSensor."""
-        sources: dict[str, dict[str, Any]] = {}
-        healthy_count = 0
-        total_count = 0
-
-        # Weather sources
-        for i, entity_id in enumerate(self._weather_entity_ids):
-            key = "weather_primary" if i == 0 else f"weather_fallback_{i}"
-            total_count += 1
-            state = self.hass.states.get(entity_id)
-            if state and state.state not in ("unknown", "unavailable"):
-                status = "ok"
-                if self._last_forecast_source == entity_id:
-                    status = "active"
-                healthy_count += 1
-            else:
-                status = "unavailable"
-            sources[key] = {"entity_id": entity_id, "status": status}
-
-        # Thermostat
-        total_count += 1
-        if thermo_state and thermo_state.available:
-            sources["thermostat"] = {
-                "entity_id": self.climate_entity_id,
-                "status": "ok",
-                "unavailable_count": self._thermostat_unavailable_count,
-            }
-            healthy_count += 1
-        else:
-            sources["thermostat"] = {
-                "entity_id": self.climate_entity_id,
-                "status": "unavailable",
-                "unavailable_count": self._thermostat_unavailable_count,
-            }
-
-        # Outdoor temp provenance
-        total_count += 1
-        outdoor_temp = self.sensor_hub.read_outdoor_temp(
-            forecast_snapshot=self.strategic.forecast_snapshot
-        )
-        if outdoor_temp:
-            sources["outdoor_temp"] = {
-                "source": outdoor_temp.source,
-                "stale": outdoor_temp.stale,
-                "status": "stale" if outdoor_temp.stale else "ok",
-            }
-            if not outdoor_temp.stale:
-                healthy_count += 1
-        else:
-            sources["outdoor_temp"] = {"source": "none", "stale": True, "status": "unavailable"}
-
-        # Outdoor humidity provenance
-        total_count += 1
-        outdoor_humidity = self.sensor_hub.read_outdoor_humidity(
-            forecast_snapshot=self.strategic.forecast_snapshot
-        )
-        if outdoor_humidity:
-            sources["outdoor_humidity"] = {
-                "source": outdoor_humidity.source,
-                "stale": outdoor_humidity.stale,
-                "status": "stale" if outdoor_humidity.stale else "ok",
-            }
-            if not outdoor_humidity.stale:
-                healthy_count += 1
-        else:
-            sources["outdoor_humidity"] = {"source": "none", "stale": True, "status": "unavailable"}
-
-        # Power provenance (diagnostic snapshot — no mode context needed)
-        total_count += 1
-        power = self.sensor_hub.read_power_draw()  # legacy fallback OK for diagnostics
-        if power is not None:
-            sources["power"] = {"status": "ok", "value": power}
-            healthy_count += 1
-        else:
-            sources["power"] = {"status": "unavailable", "value": None}
-
-        return {
-            "healthy": healthy_count,
-            "total": total_count,
-            "status": "healthy" if healthy_count == total_count else "degraded",
-            "sources": sources,
-        }
