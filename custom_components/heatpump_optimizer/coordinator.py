@@ -2553,8 +2553,14 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
         The EKF confidence is checked as a secondary signal.
         Baseline capture is no longer required -- the profiler bootstraps
         from recorder history and can produce a model within minutes.
+
+        All profiler confidence reads here are raw (unsmoothed).  The
+        displayed overall confidence is smoothed with a bounded high-water
+        mark for a calm UI; behavior must never inherit that smoothing, or
+        stale confidence would keep the optimizer aggressive after a season
+        change, an HVAC repair, insulation work, or a partial model reset.
         """
-        profiler_conf = self.profiler.confidence()
+        profiler_conf = self.profiler.confidence(raw=True)
 
         # Confident: profiler has broad coverage or strong EKF
         if profiler_conf >= 0.7 or self.estimator.confidence >= 0.7:
@@ -2586,7 +2592,13 @@ class HeatPumpOptimizerCoordinator(DataUpdateCoordinator):
 
     @property
     def _is_conservative_mode(self) -> bool:
-        """True when operating in conservative mode with wider comfort bands."""
+        """True when the model has limited data and optimization is restrained.
+
+        Conservative activation *narrows* the optimizer's working band to the
+        inner 80% of the configured comfort range.  A wider band lets the
+        optimizer push setpoints further from the midpoint, so narrowing is
+        what makes it less aggressive.  See _active_comfort_range().
+        """
         return self._activation_tier == ACTIVATION_TIER_CONSERVATIVE
 
     def _build_profiler_chart_data(self) -> dict:

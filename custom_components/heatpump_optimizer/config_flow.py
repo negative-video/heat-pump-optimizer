@@ -2101,7 +2101,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         else:
             summary = (
                 "No appliances configured yet. Appliances like water heaters, "
-                "dryers, and space heaters affect your home's temperature — "
+                "dryers, and space heaters affect your home's temperature; "
                 "adding them helps the optimizer predict thermal loads more accurately."
             )
 
@@ -2151,23 +2151,23 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         preset_options = [
             selector.SelectOptionDict(
                 value="hpwh",
-                label="Heat pump water heater — 350W, cools your home (-9.14 BTU/W)",
+                label="Heat pump water heater (350W, cools your home, -9.14 BTU/W)",
             ),
             selector.SelectOptionDict(
                 value="electric_dryer",
-                label="Electric dryer (vented) — 5,000W, partial heating",
+                label="Electric dryer, vented (5,000W, partial heating)",
             ),
             selector.SelectOptionDict(
                 value="space_heater",
-                label="Space heater — 1,500W, heats your home",
+                label="Space heater (1,500W, heats your home)",
             ),
             selector.SelectOptionDict(
                 value="media_center",
-                label="Media center / gaming PC — 300W, heats your home",
+                label="Media center or gaming PC (300W, heats your home)",
             ),
             selector.SelectOptionDict(
                 value="custom",
-                label="Custom — enter your own values",
+                label="Custom (enter your own values)",
             ),
         ]
 

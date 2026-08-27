@@ -1457,8 +1457,8 @@ function renderLearningProgressCards(states) {
   if (hasValue(thermalMass)) {
     const tm = Number(thermalMass.state);
     let lbl, cls;
-    if (tm >= 4000) { lbl = "High — holds temp well"; cls = "quality-good"; }
-    else if (tm < 1500) { lbl = "Light — responds fast"; cls = "quality-neutral"; }
+    if (tm >= 4000) { lbl = "High, holds temp well"; cls = "quality-good"; }
+    else if (tm < 1500) { lbl = "Light, responds fast"; cls = "quality-neutral"; }
     else { lbl = "Moderate"; cls = "quality-medium"; }
     massLine = `<div class="lp-param"><span class="lp-param-label">Thermal Mass</span><span class="lp-param-val">${(tm / 1000).toFixed(1)}k BTU/\u00b0F</span><span class="lp-param-qual ${cls}">${lbl}</span></div>`;
   }
