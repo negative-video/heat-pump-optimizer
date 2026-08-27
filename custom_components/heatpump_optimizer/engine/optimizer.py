@@ -1,12 +1,19 @@
-"""Schedule optimizer that minimizes runtime by shifting HVAC load to efficient hours.
+"""Schedule optimizer: energy-scored hours, flat-default gated planning.
 
-Two approaches:
-1. Work-based analysis: Given actual runtime per hour, calculate how much less
-   runtime would be needed if that work were done at a more efficient hour.
-2. Simulation-based: Generate setpoint schedules and simulate forward.
+Planning lives in :mod:`.schedule_planner`. This module owns hour scoring,
+the public ``optimize_setpoints`` entry point, and display helpers.
 
-The work-based approach is more reliable because it doesn't depend on simulation
-accuracy. It directly uses the performance model delta ratios.
+Two historical mistakes are corrected here and should not be reintroduced:
+
+* Hours used to be scored as ``1 / |net_delta|``. The net delta conflates the
+  machine's output with the envelope load arriving at the same time, so it
+  overstates the spread between mild and extreme hours by roughly the ratio of
+  the net spread to the gross spread. Scoring now uses
+  ``PerformanceModel.energy_per_degree_kwh`` -- kWh per degree of delivered
+  forcing -- which is an energy quantity, not a needle-speed ratio.
+* Setpoints used to be derived by mapping each hour's efficiency percentile
+  onto the comfort band. See :mod:`.schedule_planner` for why that was wrong
+  and what replaced it.
 """
 
 from __future__ import annotations
@@ -22,15 +29,34 @@ from .data_types import (
     ScheduleEntry,
 )
 from .performance_model import PerformanceModel
+from .schedule_planner import SchedulePlanner
 from .thermal_simulator import ThermalSimulator
+
+# Stand-in score for an hour where the equipment delivers no usable forcing.
+# Large enough to rank last, finite so min-max normalization still works.
+_UNUSABLE_HOUR_SCORE = 1e6
+
+_WORK_REDISTRIBUTION_DISCLAIMER = (
+    "theoretical upper bound, not achievable: assumes HVAC work is conserved "
+    "when moved between hours, which it is not"
+)
 
 
 class ScheduleOptimizer:
-    """Finds optimal runtime distribution based on efficiency ratios."""
+    """Scores hours by energy cost and plans schedules over the simulator."""
 
     def __init__(self, model: PerformanceModel, simulator: ThermalSimulator):
         self.model = model
         self.simulator = simulator
+
+    @property
+    def planner(self) -> SchedulePlanner:
+        """Planner bound to the optimizer's *current* model and simulator.
+
+        The coordinator hot-swaps ``self.model`` when the active model
+        changes, so the planner is built per call rather than cached.
+        """
+        return SchedulePlanner(self.model, self.simulator)
 
     def score_hours(
         self,
@@ -38,13 +64,15 @@ class ScheduleOptimizer:
         mode: str,
         weights: OptimizationWeights | None = None,
     ) -> list[HourScore]:
-        """Score each hour in the forecast by HVAC efficiency.
+        """Score each hour in the forecast by the energy cost of running it.
 
         Lower score = better time to run HVAC.
 
-        For cooling: score = 1 / |cooling_delta(outdoor_temp)|
-          75°F outdoor: score = 1/3.36 = 0.30 (good - run now)
-          96°F outdoor: score = 1/0.66 = 1.52 (bad - avoid running)
+        ``efficiency_score`` is kWh per °F of delivered indoor forcing:
+        ``power_kW / |gross_hvac_rate|``. Because the envelope load has been
+        subtracted out of the rate, a hot afternoon hour is only penalized to
+        the extent the equipment actually costs more to run, not to the extent
+        the house is fighting back.
         """
         if weights is None:
             weights = OptimizationWeights()
@@ -68,12 +96,12 @@ class ScheduleOptimizer:
         for hour in sorted(hourly_temps.keys()):
             avg_temp = sum(hourly_temps[hour]) / len(hourly_temps[hour])
 
-            if mode == "cool":
-                delta = abs(self.model.cooling_delta(avg_temp))
-                efficiency_score = 1.0 / max(delta, 0.01)
-            elif mode == "heat":
-                delta = max(self.model.heating_delta(avg_temp), 0.01)
-                efficiency_score = 1.0 / delta
+            if mode in ("cool", "heat"):
+                efficiency_score = self.model.energy_per_degree_kwh(mode, avg_temp)
+                if efficiency_score == float("inf"):
+                    # No usable forcing at this temperature. Rank it last
+                    # rather than poisoning the min-max normalization.
+                    efficiency_score = _UNUSABLE_HOUR_SCORE
             else:
                 efficiency_score = 1.0
 
@@ -138,19 +166,33 @@ class ScheduleOptimizer:
 
         return scores
 
-    # ── Work-based optimizer ───────────────────────────────────────
+    # ── Work-redistribution analysis (DIAGNOSTICS ONLY) ────────────
 
-    def analyze_runtime_efficiency(
+    def analyze_runtime_efficiency_theoretical_bound(
         self,
         hourly_runtime: dict[int, float],
         hourly_outdoor_temp: dict[int, float],
         mode: str,
     ) -> dict:
-        """Analyze actual runtime and calculate savings from optimal redistribution.
+        """Theoretical upper bound on redistribution savings. NOT achievable.
 
-        This is the most reliable optimization method: it takes actual runtime
-        per hour and calculates how much runtime would be needed if the same
-        "cooling work" were done at the most efficient hours.
+        Do not wire this into savings displays, sensors, or any control
+        decision. It was the project's headline savings number and it is
+        physically unsound in two independent ways:
+
+        1. It measures "work" as ``runtime x net_delta``. The net delta
+           includes the envelope load, so hours where the house is fighting
+           back score as low-capacity hours and the spread is inflated.
+        2. Work is not conserved under redistribution. The afternoon envelope
+           gain arrives whether or not the compressor ran that morning. Only
+           the fraction the thermal mass can buffer inside the comfort band is
+           shiftable, and pre-conditioning *adds* load, because a colder or
+           warmer house exchanges heat with outside faster all day.
+
+        A closed-loop replay against this house's own data showed trajectory
+        simulation losing energy exactly where this arithmetic predicts large
+        wins. Every real benefit decision compares simulated total energy
+        instead -- see :mod:`.schedule_planner`.
 
         Args:
             hourly_runtime: {hour_of_day: minutes_of_runtime}
@@ -158,8 +200,7 @@ class ScheduleOptimizer:
             mode: "cool" or "heat"
 
         Returns:
-            Dict with actual_runtime, theoretical_min_runtime, savings_pct,
-            and per-hour breakdown.
+            Dict with the bound plus a ``disclaimer`` key.
         """
         if mode == "cool":
             get_delta = lambda t: abs(self.model.cooling_delta(t))
@@ -189,6 +230,7 @@ class ScheduleOptimizer:
 
         if total_work == 0 or total_actual_runtime == 0:
             return {
+                "disclaimer": _WORK_REDISTRIBUTION_DISCLAIMER,
                 "actual_runtime_minutes": 0,
                 "theoretical_min_runtime_minutes": 0,
                 "savings_pct": 0,
@@ -251,6 +293,7 @@ class ScheduleOptimizer:
                 })
 
         return {
+            "disclaimer": _WORK_REDISTRIBUTION_DISCLAIMER,
             "actual_runtime_minutes": round(total_actual_runtime, 1),
             "theoretical_min_runtime_minutes": round(theoretical_min_minutes, 1),
             "redistributed_runtime_minutes": round(redistributed_runtime, 1),
@@ -272,11 +315,22 @@ class ScheduleOptimizer:
         mode: str,
         weights: OptimizationWeights | None = None,
     ) -> OptimizedSchedule:
-        """Generate an optimized setpoint schedule using simulation.
+        """Plan a setpoint schedule and price it against the flat baseline.
 
-        This approach generates variable setpoints (pre-cool during efficient
-        hours, coast during inefficient hours) and simulates forward to
-        estimate runtime.
+        The baseline is the flat schedule -- what a plain thermostat sitting
+        at the comfort-band edge would have done -- not a midpoint setpoint.
+        That is the only comparison that means anything, and since the planner
+        ships flat on most days, the honestly reported saving on most days is
+        0.0%. A scheduler that always claims a win is a scheduler nobody can
+        audit.
+
+        There is no narrow-the-band-and-retry fallback any more. Overshoot is
+        handled inside the planner's candidate search: if a plan leaves the
+        band, a candidate with earlier or deeper pre-conditioning outranks it.
+        If nothing avoids a real excursion (undersized equipment, extreme
+        weather) the least-bad plan ships and says so through
+        ``comfort_violations`` / ``comfort_excursion_degree_minutes``, instead
+        of silently redefining what the occupant asked for.
 
         If forecast points carry per-hour comfort_min/comfort_max (stamped by
         the strategic controller from a calendar occupancy timeline), those
@@ -285,60 +339,41 @@ class ScheduleOptimizer:
         if weights is None:
             weights = OptimizationWeights()
 
-        comfort_min, comfort_max = comfort_range
-        hour_scores = self.score_hours(forecast, mode, weights)
-
-        # Build per-hour comfort ranges from forecast annotations (if present)
         per_hour_comfort = self._extract_per_hour_comfort(forecast)
 
-        # Baseline: constant midpoint (use per-hour midpoints when available)
-        midpoint = (comfort_min + comfort_max) / 2
-        baseline_sim = self.simulator.simulate_constant_setpoint(
-            current_indoor_temp, forecast, midpoint, mode
-        )
-        baseline_runtime = self.simulator.total_runtime(baseline_sim)
+        # Hour scoring still runs: it drives the diagnostics/display path and
+        # defines the schedule's hour grid. It no longer *derives* setpoints.
+        hour_scores = self.score_hours(forecast, mode, weights)
+        hour_keys = [hs.hour for hs in hour_scores]
 
-        # Optimized: variable setpoints
-        optimized_entries = self._build_schedule(
-            hour_scores, comfort_range, mode, per_hour_comfort
+        result = self.planner.plan(
+            current_indoor_temp,
+            forecast,
+            comfort_range,
+            mode,
+            hours=hour_keys,
+            per_hour_comfort=per_hour_comfort,
         )
-        optimized_sim = self.simulator.simulate(
-            current_indoor_temp, forecast, optimized_entries
-        )
-        optimized_runtime = self.simulator.total_runtime(optimized_sim)
-
-        violations = self.simulator.comfort_violations(
-            optimized_sim, comfort_min, comfort_max
-        )
-
-        # Fallback if comfort violated
-        if violations > 0:
-            narrowed = (
-                (comfort_min + midpoint) / 2,
-                (comfort_max + midpoint) / 2,
-            )
-            optimized_entries = self._build_schedule(
-                hour_scores, narrowed, mode
-            )
-            optimized_sim = self.simulator.simulate(
-                current_indoor_temp, forecast, optimized_entries
-            )
-            optimized_runtime = self.simulator.total_runtime(optimized_sim)
-            violations = self.simulator.comfort_violations(
-                optimized_sim, comfort_min, comfort_max
-            )
+        chosen = result.chosen
+        flat = result.flat
 
         savings_pct = 0.0
-        if baseline_runtime > 0:
-            savings_pct = (baseline_runtime - optimized_runtime) / baseline_runtime * 100
+        if flat.energy_kwh > 0:
+            savings_pct = (
+                (flat.energy_kwh - chosen.energy_kwh) / flat.energy_kwh * 100
+            )
 
         return OptimizedSchedule(
-            entries=optimized_entries,
-            baseline_runtime_minutes=baseline_runtime,
-            optimized_runtime_minutes=optimized_runtime,
+            entries=chosen.entries,
+            baseline_runtime_minutes=flat.runtime_minutes,
+            optimized_runtime_minutes=chosen.runtime_minutes,
             savings_pct=savings_pct,
-            comfort_violations=violations,
-            simulation=optimized_sim,
+            comfort_violations=chosen.violations,
+            simulation=chosen.simulation,
+            comfort_excursion_degree_minutes=chosen.excursion_degree_minutes,
+            plan_label=chosen.label,
+            baseline_kwh=flat.energy_kwh,
+            optimized_kwh=chosen.energy_kwh,
         )
 
     @staticmethod
@@ -359,87 +394,13 @@ class ScheduleOptimizer:
                     per_hour[hour_key] = (pt.comfort_min, pt.comfort_max)
         return per_hour
 
-    def _build_schedule(
-        self,
-        hour_scores: list[HourScore],
-        comfort_range: tuple[float, float],
-        mode: str,
-        per_hour_comfort: dict[datetime, tuple[float, float]] | None = None,
-    ) -> list[ScheduleEntry]:
-        """Build setpoint schedule from hour scores.
-
-        When per_hour_comfort is provided, each hour uses its own comfort
-        band (wider during AWAY, tighter during HOME). Otherwise, the single
-        comfort_range applies uniformly.
-        """
-        if not hour_scores:
-            return []
-
-        comfort_min, comfort_max = comfort_range
-
-        ranked = sorted(hour_scores, key=lambda s: s.combined_score)
-        n = len(ranked)
-        score_percentiles = {hs.hour: i / max(n - 1, 1) for i, hs in enumerate(ranked)}
-
-        # Balance point for per-hour suppression: don't schedule heating
-        # when passive drift is positive (outdoor above balance point), or
-        # cooling when passive drift is negative (outdoor below balance point).
-        bp = getattr(self.model, "resist_balance_point", None) or 50.0
-        _BP_MARGIN = 2.0  # avoid flip-flopping right at the balance point
-
-        entries = []
-        for hs in hour_scores:
-            pct = score_percentiles[hs.hour]
-
-            # Use per-hour comfort if available, otherwise global range
-            if per_hour_comfort and hs.hour in per_hour_comfort:
-                h_min, h_max = per_hour_comfort[hs.hour]
-            else:
-                h_min, h_max = comfort_min, comfort_max
-            h_band = h_max - h_min
-
-            # Per-hour suppression: when outdoor temp is on the wrong side
-            # of the balance point, the house is drifting in the direction
-            # that HVAC would push it -- scheduling HVAC is counterproductive.
-            suppress = False
-            if mode == "heat" and hs.outdoor_temp > bp + _BP_MARGIN:
-                suppress = True  # house warming passively, don't heat
-            elif mode == "cool" and hs.outdoor_temp < bp - _BP_MARGIN:
-                suppress = True  # house cooling passively, don't cool
-
-            if suppress:
-                target = h_min if mode == "heat" else h_max
-                target = round(target * 2) / 2
-                action = "coasting"
-            elif mode == "cool":
-                target = h_min + pct * h_band
-                target = round(target * 2) / 2
-                action = "pre-cooling" if pct < 0.33 else ("maintaining" if pct < 0.67 else "coasting")
-            elif mode == "heat":
-                target = h_max - pct * h_band
-                target = round(target * 2) / 2
-                action = "pre-heating" if pct < 0.33 else ("maintaining" if pct < 0.67 else "coasting")
-            else:
-                target = (h_min + h_max) / 2
-                target = round(target * 2) / 2
-                action = "maintaining"
-
-            entries.append(
-                ScheduleEntry(
-                    start_time=hs.hour,
-                    end_time=hs.hour + timedelta(hours=1),
-                    target_temp=target,
-                    mode=mode,
-                    reason=f"{hs.outdoor_temp:.0f}°F outdoor: {action} (target {target:.1f}°F)",
-                )
-            )
-
-        entries.sort(key=lambda e: e.start_time)
-
-        # Apply switching penalty: smooth out gratuitous oscillation
-        entries = self._smooth_switching(entries)
-
-        return entries
+    # ``_build_schedule`` used to live here. It ranked hours by efficiency,
+    # converted rank to a percentile, and mapped the percentile linearly onto
+    # the comfort band -- unconditionally, every day, in both directions. It
+    # has been deleted rather than demoted to a candidate generator, because
+    # its output was never a hypothesis worth testing: a full-band swing on a
+    # moderate day loses energy and reads as a broken thermostat. See
+    # engine/schedule_planner.py for what replaced it.
 
     @staticmethod
     def _smooth_switching(
@@ -453,6 +414,12 @@ class ScheduleOptimizer:
         ``threshold`` (°F), the later entry is nudged toward the earlier
         one proportionally to ``weight``. This is a soft penalty — large
         efficiency-driven changes still pass through.
+
+        No longer applied to planner output. A searched pre-conditioning
+        window is a single deliberate step in and a single step back out;
+        smoothing it would blunt exactly the depth the search chose. Kept
+        because a future planner variant with finer-grained entries may want
+        it, and because it is cheap and self-contained.
         """
         if len(entries) < 2 or weight <= 0:
             return entries

@@ -79,3 +79,116 @@ def _nws_heat_index(temp_f: float, humidity_pct: float) -> float:
         hi += adjustment
 
     return hi
+
+
+# ── Effective comfort band derivation ────────────────────────────────
+
+# Absolute floor on the optimizer's working band. Below this the planner has
+# no room to do anything but chatter, and every "safety" narrowing layer that
+# pushed it lower was making control worse, not safer.
+COMFORT_BAND_MIN_WIDTH_F = 2.0
+
+# Fraction shrunk from EACH side per activation tier. These used to be
+# scattered across three modules and compounded silently.
+TIER_NARROWING = {
+    "learning": 0.20,       # inner 60%
+    "conservative": 0.10,   # inner 80%
+    "standard": 0.0,
+    "confident": 0.0,
+}
+
+
+def derive_effective_comfort_band(
+    base: tuple[float, float],
+    *,
+    override_shift: float = 0.0,
+    demand_response_delta: float = 0.0,
+    constraints=(),
+    safety_limits: tuple[float, float] | None = None,
+    humidity_band: tuple[float, float] | None = None,
+    tier: str | None = None,
+    min_width: float = COMFORT_BAND_MIN_WIDTH_F,
+) -> tuple[float, float]:
+    """Derive the band the optimizer may actually work in, in one place.
+
+    The narrowing layers used to live in three modules (coordinator comfort
+    selection, shoulder-day handling, and an optimizer retry fallback) and
+    compounded invisibly, so a nominal 6F band could collapse to 1-2F without
+    anything logging that it had happened. This function fixes the ordering
+    and enforces a floor.
+
+    Order of application, widest influence first:
+
+    1. ``override_shift`` -- learned occupant preference, shifts both edges.
+    2. ``demand_response_delta`` -- widens both edges (a grid event buys
+       tolerance, it does not remove it). The band after steps 1-2 is the
+       occupant-sanctioned outer bound; nothing later may exceed it.
+    3. ``humidity_band`` -- a pre-computed apparent-temperature correction,
+       applied as an intersection with the current band.
+    4. ``tier`` -- activation-tier narrowing.
+    5. Floor: if steps 3-4 left the band narrower than ``min_width``, it is
+       reopened symmetrically toward the step-2 bounds. Heuristic caution
+       layers do not get to strangle the planner.
+    6. ``constraints`` -- explicit external min_temp/max_temp requests.
+       These are deliberate and *are* allowed to narrow past ``min_width``.
+    7. ``safety_limits`` -- absolute guardrails, never exceeded.
+
+    Returns the effective ``(min, max)``. If the inputs are contradictory the
+    band is returned collapsed rather than inverted.
+    """
+    lo, hi = float(base[0]), float(base[1])
+
+    if override_shift:
+        lo += override_shift
+        hi += override_shift
+
+    if demand_response_delta:
+        lo -= demand_response_delta
+        hi += demand_response_delta
+
+    outer_lo, outer_hi = lo, hi
+
+    if humidity_band is not None:
+        lo = max(lo, humidity_band[0])
+        hi = min(hi, humidity_band[1])
+
+    fraction = TIER_NARROWING.get(tier or "", 0.0)
+    if fraction > 0 and hi > lo:
+        margin = (hi - lo) * fraction
+        lo += margin
+        hi -= margin
+
+    # Reopen toward the occupant-sanctioned bounds if the heuristic layers
+    # compounded into an unplannable sliver. This is the check the old
+    # scattered narrowing had nowhere to live.
+    if hi - lo < min_width:
+        deficit = min_width - (hi - lo)
+        room_lo = lo - outer_lo
+        room_hi = outer_hi - hi
+        take_lo = min(deficit / 2.0, max(0.0, room_lo))
+        take_hi = min(deficit - take_lo, max(0.0, room_hi))
+        # Anything the high side could not absorb goes back to the low side.
+        take_lo = min(deficit - take_hi, max(0.0, room_lo))
+        lo -= take_lo
+        hi += take_hi
+
+    # Explicit constraints are honored even when they squeeze hard: an
+    # external integration asking for "never above 74" means it.
+    for constraint in constraints or ():
+        ctype = constraint.get("type")
+        value = constraint.get("value")
+        if value is None:
+            continue
+        if ctype == "min_temp":
+            lo = max(lo, float(value))
+        elif ctype == "max_temp":
+            hi = min(hi, float(value))
+
+    if safety_limits is not None:
+        lo = max(lo, safety_limits[0])
+        hi = min(hi, safety_limits[1])
+
+    if hi < lo:
+        return (lo, lo)
+
+    return (lo, hi)

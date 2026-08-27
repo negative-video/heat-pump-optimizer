@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta, timezone
 
 from ..adapters.occupancy import OccupancyAdapter, OccupancyMode
-from ..engine.comfort import calculate_apparent_temperature
+from ..engine.comfort import (
+    COMFORT_BAND_MIN_WIDTH_F,
+    calculate_apparent_temperature,
+)
 from ..engine.data_types import (
     ForecastPoint,
     OccupancyForecastPoint,
@@ -19,6 +22,7 @@ from ..engine.data_types import (
     OptimizedSchedule,
 )
 from ..engine.optimizer import ScheduleOptimizer
+from ..engine.schedule_planner import SATURATION_EXCURSION_DEGREE_MINUTES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -135,9 +139,23 @@ class StrategicPlanner:
         # Check for shoulder day (needs both heat and cool)
         is_shoulder = self._is_shoulder_day(forecast, comfort_cool, comfort_heat)
         if is_shoulder:
-            _LOGGER.info("Shoulder day detected — using conservative optimization")
-            midpoint = (comfort[0] + comfort[1]) / 2
-            comfort = (midpoint - 1.5, midpoint + 1.5)
+            shoulder = self._build_shoulder_schedule(
+                indoor_temp, forecast, comfort_cool, comfort_heat, mode
+            )
+            if shoulder is not None:
+                self._current_schedule = shoulder
+                self._current_mode = mode
+                self._last_forecast_snapshot = list(forecast)
+                self._last_optimization_time = datetime.now(timezone.utc)
+                if occupancy_timeline is not None:
+                    self._last_occupancy_hash = self._hash_occupancy_timeline(
+                        occupancy_timeline
+                    )
+                return shoulder
+            _LOGGER.info(
+                "Shoulder day, but the dual-setpoint plan leaves the comfort "
+                "band -- falling through to gated single-mode planning",
+            )
 
         # Stamp per-hour comfort on forecast points from occupancy timeline
         if occupancy_timeline and not is_shoulder:
@@ -177,6 +195,83 @@ class StrategicPlanner:
         )
 
         return schedule
+
+    def _build_shoulder_schedule(
+        self,
+        indoor_temp: float,
+        forecast: list[ForecastPoint],
+        comfort_cool: tuple[float, float],
+        comfort_heat: tuple[float, float],
+        mode: str,
+    ) -> OptimizedSchedule | None:
+        """Flat dual-setpoint schedule for a shoulder day.
+
+        In central Virginia a shoulder day is most of March-April and most of
+        October-November, so whatever happens here happens for months at a
+        time. The old handling clamped comfort to midpoint +/- 1.5F and then
+        ran a single detected mode, re-detected every cycle. Mode flips forced
+        re-optimization, and heat targets and cool targets ended up
+        interleaved within one day across a 15F span. Stacked on the other
+        narrowing layers it left roughly a 3F slot to plan in.
+
+        The natural representation for a heat_cool thermostat is a pair:
+        a heat floor it must not fall below and a cool ceiling it must not
+        rise above, both flat. The thermostat arbitrates between them at
+        hardware speed with no help from us, which is strictly better than
+        re-deciding a single mode every cycle from an 8-point forecast.
+
+        Returns None when the dual-setpoint plan cannot hold the band, in
+        which case the caller falls back to gated single-mode planning.
+        """
+        heat_floor = comfort_heat[0]
+        cool_ceiling = comfort_cool[1]
+
+        if cool_ceiling - heat_floor < COMFORT_BAND_MIN_WIDTH_F:
+            midpoint = (heat_floor + cool_ceiling) / 2
+            heat_floor = midpoint - COMFORT_BAND_MIN_WIDTH_F / 2
+            cool_ceiling = midpoint + COMFORT_BAND_MIN_WIDTH_F / 2
+
+        planner = self.optimizer.planner
+        hour_keys = sorted({
+            pt.time.replace(minute=0, second=0, microsecond=0) for pt in forecast
+        })
+        if not hour_keys:
+            return None
+
+        entries = planner.build_dual_setpoint_schedule(
+            hour_keys, forecast, heat_floor, cool_ceiling, mode
+        )
+        candidate = planner.evaluate(
+            "shoulder dual setpoint",
+            entries,
+            indoor_temp,
+            forecast,
+            (heat_floor, cool_ceiling),
+        )
+
+        if candidate.excursion_degree_minutes > SATURATION_EXCURSION_DEGREE_MINUTES:
+            return None
+
+        _LOGGER.info(
+            "Shoulder day: dual setpoint heat %.1fF / cool %.1fF, flat "
+            "(%.1f min runtime, %.2f kWh)",
+            heat_floor, cool_ceiling,
+            candidate.runtime_minutes, candidate.energy_kwh,
+        )
+
+        return OptimizedSchedule(
+            entries=entries,
+            baseline_runtime_minutes=candidate.runtime_minutes,
+            optimized_runtime_minutes=candidate.runtime_minutes,
+            savings_pct=0.0,
+            comfort_violations=candidate.violations,
+            simulation=candidate.simulation,
+            comfort_excursion_degree_minutes=candidate.excursion_degree_minutes,
+            plan_label="shoulder dual setpoint",
+            dual_setpoint=True,
+            baseline_kwh=candidate.energy_kwh,
+            optimized_kwh=candidate.energy_kwh,
+        )
 
     def detect_mode(self, forecast: list[ForecastPoint]) -> str:
         """Determine HVAC mode from near-term forecast temperatures.

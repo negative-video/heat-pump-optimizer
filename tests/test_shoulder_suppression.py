@@ -1,10 +1,20 @@
-"""Tests for per-hour heating/cooling suppression and shoulder day detection.
+"""Tests for balance-point phase labeling and shoulder day detection.
 
 Covers:
-- Per-hour suppression of heating when outdoor > balance point
-- Per-hour suppression of cooling when outdoor < balance point
+- Coasting label when outdoor is on the passive side of the balance point
+- Flat-default targets at the comfort band edge appropriate to the mode
 - Enhanced shoulder day detection via balance-point crossing
 - Phase classification override when indoor temp already at target
+
+The suppression tests here used to exercise ScheduleOptimizer._build_schedule,
+which mapped each hour's efficiency percentile onto the comfort band and then
+"suppressed" hours on the wrong side of the balance point back to the band
+edge.  That percentile mapping has been deleted (see engine/schedule_planner
+.py): the schedule is flat at the band edge by default, so every hour now gets
+what only suppressed hours used to get.  What survives is the *labeling*
+distinction -- an hour where the envelope is already drifting the way HVAC
+would push is reported as coasting, not maintaining -- and these tests now
+exercise SchedulePlanner.build_flat_schedule for it.
 """
 
 import os
@@ -29,6 +39,10 @@ sim_mod = load_module(
     "custom_components.heatpump_optimizer.engine.thermal_simulator",
     os.path.join(CC, "engine", "thermal_simulator.py"),
 )
+planner_mod = load_module(
+    "custom_components.heatpump_optimizer.engine.schedule_planner",
+    os.path.join(CC, "engine", "schedule_planner.py"),
+)
 opt_mod = load_module(
     "custom_components.heatpump_optimizer.engine.optimizer",
     os.path.join(CC, "engine", "optimizer.py"),
@@ -44,6 +58,7 @@ ScheduleEntry = dt_mod.ScheduleEntry
 PerformanceModel = perf_mod.PerformanceModel
 ThermalSimulator = sim_mod.ThermalSimulator
 ScheduleOptimizer = opt_mod.ScheduleOptimizer
+SchedulePlanner = planner_mod.SchedulePlanner
 StrategicPlanner = strat_mod.StrategicPlanner
 
 
@@ -79,6 +94,14 @@ def _make_forecast(outdoor_temps):
     ]
 
 
+def _flat_schedule(model, outdoor_temps, comfort, mode):
+    """Build the flat default schedule the planner would emit."""
+    planner = SchedulePlanner(model, ThermalSimulator(model))
+    forecast = _make_forecast(outdoor_temps)
+    hour_keys = [NOW + timedelta(hours=i) for i in range(len(outdoor_temps))]
+    return planner.build_flat_schedule(hour_keys, forecast, comfort, mode)
+
+
 def _model_with_bp(balance_point):
     """Create a PerformanceModel with a specific resist balance point."""
     model = PerformanceModel.from_defaults()
@@ -90,23 +113,23 @@ def _model_with_bp(balance_point):
 # ── Per-hour heating suppression ─────────────────────────────────────
 
 
-class TestPerHourSuppression:
-    """Tests for _build_schedule per-hour balance point suppression."""
+class TestBalancePointLabeling:
+    """Flat-default targets plus coasting/maintaining labels.
 
-    def test_heating_suppressed_above_balance_point(self):
-        """When outdoor > bp + margin, heating should be coasting, not pre-heating."""
+    These replace the old TestPerHourSuppression, which asserted that
+    _build_schedule's percentile mapping got overridden back to the band edge
+    for hours on the wrong side of the balance point.  The percentile mapping
+    is gone, so the band edge is now simply where every hour sits; what
+    remains testable is the label and the edge itself.
+    """
+
+    def test_heating_labeled_coasting_above_balance_point(self):
+        """When outdoor > bp + margin, the hour reads as coasting."""
         model = _model_with_bp(55.0)
-        sim = ThermalSimulator(model)
-        opt = ScheduleOptimizer(model, sim)
-
-        # Shoulder day: cold morning (40F), warm afternoon (70F)
         outdoor = [40, 42, 44, 46, 50, 54, 58, 62, 65, 68, 70, 70,
                    68, 65, 62, 58, 54, 50, 48, 46, 44, 42, 41, 40]
-        scores = _make_hour_scores(outdoor)
+        entries = _flat_schedule(model, outdoor, (62, 70), "heat")
 
-        entries = opt._build_schedule(scores, (62, 70), "heat")
-
-        # Hours where outdoor > 55 + 2 = 57 should be coasting
         for entry in entries:
             hour_idx = int((entry.start_time - NOW).total_seconds() / 3600)
             if outdoor[hour_idx] > 57:
@@ -115,39 +138,25 @@ class TestPerHourSuppression:
                     f"(bp=55, margin=2), got: {entry.reason}"
                 )
 
-    def test_heating_allowed_below_balance_point(self):
-        """When outdoor < bp - margin, heating targets should be assigned normally."""
+    def test_heating_labeled_maintaining_below_balance_point(self):
+        """When outdoor < bp - margin, the hour reads as maintaining."""
         model = _model_with_bp(55.0)
-        sim = ThermalSimulator(model)
-        opt = ScheduleOptimizer(model, sim)
-
-        # All hours below balance point
         outdoor = [30, 32, 34, 36, 38, 40, 42, 44,
                    40, 38, 36, 34, 32, 30, 28, 26,
                    28, 30, 32, 34, 36, 34, 32, 30]
-        scores = _make_hour_scores(outdoor)
+        entries = _flat_schedule(model, outdoor, (62, 70), "heat")
 
-        entries = opt._build_schedule(scores, (62, 70), "heat")
+        assert all("maintaining" in e.reason for e in entries), (
+            "All hours below BP should read as maintaining"
+        )
 
-        # At least some hours should have pre-heating or maintaining
-        reasons = [e.reason for e in entries]
-        has_active = any("pre-heating" in r or "maintaining" in r for r in reasons)
-        assert has_active, "All hours below BP should allow active heating"
-
-    def test_cooling_suppressed_below_balance_point(self):
-        """When outdoor < bp - margin, cooling should be coasting."""
+    def test_cooling_labeled_coasting_below_balance_point(self):
+        """When outdoor < bp - margin, cooling hours read as coasting."""
         model = _model_with_bp(55.0)
-        sim = ThermalSimulator(model)
-        opt = ScheduleOptimizer(model, sim)
-
-        # Shoulder day: warm afternoon needs cooling, but morning is cool
         outdoor = [45, 44, 43, 44, 46, 50, 55, 60, 68, 75, 80, 82,
                    80, 78, 75, 70, 65, 60, 55, 52, 50, 48, 46, 45]
-        scores = _make_hour_scores(outdoor)
+        entries = _flat_schedule(model, outdoor, (72, 78), "cool")
 
-        entries = opt._build_schedule(scores, (72, 78), "cool")
-
-        # Hours where outdoor < 55 - 2 = 53 should be coasting
         for entry in entries:
             hour_idx = int((entry.start_time - NOW).total_seconds() / 3600)
             if outdoor[hour_idx] < 53:
@@ -156,58 +165,39 @@ class TestPerHourSuppression:
                     f"in cool mode (bp=55, margin=2), got: {entry.reason}"
                 )
 
-    def test_suppressed_hours_target_comfort_floor_heat(self):
-        """Suppressed heating hours should target comfort min (coast low)."""
+    def test_heat_mode_targets_comfort_floor(self):
+        """Heating sits at the comfort floor -- every hour, not just coasting ones."""
         model = _model_with_bp(55.0)
-        sim = ThermalSimulator(model)
-        opt = ScheduleOptimizer(model, sim)
+        outdoor = [40] * 12 + [70] * 12
+        entries = _flat_schedule(model, outdoor, (62, 70), "heat")
 
-        outdoor = [40] * 12 + [70] * 12  # morning cold, afternoon warm
-        scores = _make_hour_scores(outdoor)
-
-        entries = opt._build_schedule(scores, (62, 70), "heat")
-
-        # Afternoon hours (warm, suppressed) should target 62 (comfort min)
-        for entry in entries[12:]:
+        for entry in entries:
             assert entry.target_temp == 62.0, (
-                f"Suppressed heating hour should target comfort min 62, "
+                f"Flat heating schedule should target comfort min 62, "
                 f"got {entry.target_temp}"
             )
 
-    def test_suppressed_hours_target_comfort_ceiling_cool(self):
-        """Suppressed cooling hours should target comfort max (coast high)."""
+    def test_cool_mode_targets_comfort_ceiling(self):
+        """Cooling sits at the comfort ceiling -- every hour."""
         model = _model_with_bp(55.0)
-        sim = ThermalSimulator(model)
-        opt = ScheduleOptimizer(model, sim)
+        outdoor = [45] * 12 + [80] * 12
+        entries = _flat_schedule(model, outdoor, (72, 78), "cool")
 
-        outdoor = [45] * 12 + [80] * 12  # morning cool, afternoon hot
-        scores = _make_hour_scores(outdoor)
-
-        entries = opt._build_schedule(scores, (72, 78), "cool")
-
-        # Morning hours (cool, suppressed) should target 78 (comfort max)
-        for entry in entries[:12]:
+        for entry in entries:
             assert entry.target_temp == 78.0, (
-                f"Suppressed cooling hour should target comfort max 78, "
+                f"Flat cooling schedule should target comfort max 78, "
                 f"got {entry.target_temp}"
             )
 
-    def test_no_suppression_without_balance_point(self):
-        """When model has no balance point, no suppression should occur."""
+    def test_no_balance_point_falls_back_to_50f(self):
+        """With bp=None the labeling falls back to a 50F default."""
         model = PerformanceModel.from_defaults()
         model.resist_balance_point = None
-        sim = ThermalSimulator(model)
-        opt = ScheduleOptimizer(model, sim)
-
         outdoor = [40] * 12 + [70] * 12
-        scores = _make_hour_scores(outdoor)
+        entries = _flat_schedule(model, outdoor, (62, 70), "heat")
 
-        entries = opt._build_schedule(scores, (62, 70), "heat")
-
-        # With bp=None -> fallback 50, hours at 70 > 52 are suppressed
-        # but hours at 40 should still get active scheduling
-        morning_reasons = [entries[i].reason for i in range(12)]
-        assert any("pre-heating" in r or "maintaining" in r for r in morning_reasons)
+        assert all("maintaining" in e.reason for e in entries[:12])
+        assert all("coasting" in e.reason for e in entries[12:])
 
 
 # ── Shoulder day detection ───────────────────────────────────────────

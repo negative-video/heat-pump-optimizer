@@ -173,6 +173,10 @@ class DataBuilderMixin:
             ),
             "baseline_runtime": schedule.baseline_runtime_minutes if schedule else None,
             "optimized_runtime": schedule.optimized_runtime_minutes if schedule else None,
+            # Which candidate the planner shipped ("flat" on a normal day) and
+            # whether it handed the thermostat a heat floor / cool ceiling pair.
+            "plan_label": schedule.plan_label if schedule else None,
+            "dual_setpoint": schedule.dual_setpoint if schedule else False,
             "last_optimization": (
                 self.strategic.last_optimization_time.isoformat()
                 if self.strategic.last_optimization_time else None

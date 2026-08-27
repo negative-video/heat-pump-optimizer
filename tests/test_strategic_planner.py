@@ -36,13 +36,50 @@ occupancy_mod = load_module(
 )
 OccupancyMode = occupancy_mod.OccupancyMode
 
+# The real schedule planner is loaded: shoulder-day handling now builds a
+# dual-setpoint schedule through it rather than narrowing a comfort range.
+planner_mod = load_module(
+    "custom_components.heatpump_optimizer.engine.schedule_planner",
+    os.path.join(CC, "engine", "schedule_planner.py"),
+)
+SchedulePlanner = planner_mod.SchedulePlanner
+
+
+class _StubSimulator:
+    """Minimal simulator: enough for the planner to price a schedule."""
+
+    cool_differential = 1.0
+    heat_differential = 1.0
+
+    def simulate(self, *args, **kwargs):
+        return []
+
+    def total_energy_kwh(self, sim):
+        return 0.0
+
+    def total_runtime(self, sim):
+        return 0.0
+
+    def total_aux_runtime(self, sim):
+        return 0.0
+
+    def violation_tolerance(self):
+        return 1.0
+
+
 # Stub the optimizer module to avoid circular engine/__init__.py import
 import types
 optimizer_stub = types.ModuleType("custom_components.heatpump_optimizer.engine.optimizer")
 
+
 class _ScheduleOptimizer:
     def optimize_setpoints(self, *args, **kwargs):
         pass
+
+    @property
+    def planner(self):
+        return SchedulePlanner(MagicMock(), _StubSimulator())
+
 
 optimizer_stub.ScheduleOptimizer = _ScheduleOptimizer
 sys.modules["custom_components.heatpump_optimizer.engine.optimizer"] = optimizer_stub
@@ -92,6 +129,9 @@ def make_mock_optimizer(schedule=None):
             savings_pct=33.3,
         )
     mock.optimize_setpoints.return_value = schedule
+    # spec-ing the mock stubs out `planner` too; give it a real one so
+    # shoulder-day dual-setpoint planning exercises the actual code.
+    mock.planner = SchedulePlanner(MagicMock(), _StubSimulator())
     return mock
 
 
@@ -326,17 +366,38 @@ class TestShoulderDay:
         sp = make_planner()
         assert sp._is_shoulder_day([], COMFORT_COOL, COMFORT_HEAT) is False
 
-    def test_shoulder_narrows_comfort(self):
-        """On shoulder days, comfort range is narrowed."""
+    def test_shoulder_emits_flat_dual_setpoints(self):
+        """On shoulder days, emit a flat heat floor / cool ceiling pair.
+
+        Replaces test_shoulder_narrows_comfort, which asserted the OLD
+        behavior: clamp comfort to midpoint +/- 1.5F and then run a single
+        detected mode.  That was wrong on two counts.  It produced a ~3F
+        operating slot before the other narrowing layers even applied, and a
+        single-mode single-setpoint schedule cannot represent a day that
+        needs heat in the morning and cooling in the afternoon -- which is
+        most of March-April and October-November in this climate.  The
+        thermostat's own heat_cool arbitration handles it natively.
+        """
         mock_opt = make_mock_optimizer()
         sp = make_planner(optimizer=mock_opt, balance_point=50.0)
         forecast = make_forecast([35, 40, 50, 60, 70, 80, 82, 78])
-        sp.optimize(72.0, forecast, COMFORT_COOL, COMFORT_HEAT)
-        # Optimizer should be called with narrowed comfort
-        call_args = mock_opt.optimize_setpoints.call_args
-        comfort_used = call_args[0][2]
-        # Narrowed from (72,78) to midpoint +/- 1.5 = (73.5, 76.5)
-        assert comfort_used[1] - comfort_used[0] == pytest.approx(3.0)
+        schedule = sp.optimize(72.0, forecast, COMFORT_COOL, COMFORT_HEAT)
+
+        # The single-mode optimizer is not consulted at all on a shoulder day.
+        mock_opt.optimize_setpoints.assert_not_called()
+
+        assert schedule is not None
+        assert schedule.dual_setpoint is True
+        assert schedule.entries
+        for entry in schedule.entries:
+            assert entry.is_dual_setpoint
+            assert entry.target_temp_low == pytest.approx(COMFORT_HEAT[0])
+            assert entry.target_temp_high == pytest.approx(COMFORT_COOL[1])
+
+        # Flat: every hour gets the same pair.
+        lows = {e.target_temp_low for e in schedule.entries}
+        highs = {e.target_temp_high for e in schedule.entries}
+        assert len(lows) == 1 and len(highs) == 1
 
 
 # ── Humidity correction ────────────────────────────────────────────

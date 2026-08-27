@@ -109,12 +109,27 @@ class PreconditionPlan:
 
 @dataclass
 class ScheduleEntry:
-    """A time window with a target temperature and HVAC mode."""
+    """A time window with a target temperature and HVAC mode.
+
+    ``target_temp`` is the single-setpoint target the tactical layer and the
+    thermostat writer use.  On shoulder days the planner also fills in
+    ``target_temp_low``/``target_temp_high`` so a heat_cool thermostat can
+    arbitrate between a heat floor and a cool ceiling itself, instead of the
+    integration whipsawing a single setpoint between the two representations.
+    """
     start_time: datetime
     end_time: datetime
     target_temp: float
     mode: str  # "cool", "heat", "off"
     reason: str = ""
+    # Dual setpoint pair (both set, or both None)
+    target_temp_low: float | None = None   # heat floor
+    target_temp_high: float | None = None  # cool ceiling
+
+    @property
+    def is_dual_setpoint(self) -> bool:
+        """Whether this entry carries a heat floor / cool ceiling pair."""
+        return self.target_temp_low is not None and self.target_temp_high is not None
 
 
 @dataclass
@@ -125,6 +140,9 @@ class SimulationPoint:
     outdoor_temp: float
     hvac_running: bool
     cumulative_runtime_minutes: float
+    hvac_mode: str = "off"  # which side ran this step: "cool", "heat", "off"
+    aux_running: bool = False  # electric strip heat staged in
+    cumulative_aux_minutes: float = 0.0
 
 
 @dataclass
@@ -136,6 +154,13 @@ class OptimizedSchedule:
     savings_pct: float
     comfort_violations: int = 0  # should be 0
     simulation: list[SimulationPoint] = field(default_factory=list)
+    # How badly the plan leaves the comfort band, in degree-minutes beyond the
+    # tolerated hysteresis excursion.  0.0 means the plan never really misses.
+    comfort_excursion_degree_minutes: float = 0.0
+    # Which candidate the planner shipped, e.g. "flat" or "pre-cool 4h @ 2.0F".
+    plan_label: str = "flat"
+    # True when entries carry a heat floor / cool ceiling pair (shoulder days).
+    dual_setpoint: bool = False
     # Energy/cost/carbon estimates (populated when power draw and grid data available)
     baseline_kwh: float | None = None
     optimized_kwh: float | None = None

@@ -37,6 +37,7 @@ from .const import (
     PHASE_PRE_COOLING,
     PHASE_PRE_HEATING,
 )
+from .engine.comfort import derive_effective_comfort_band
 from .engine.data_types import ScheduleEntry
 from .savings_tracker import (
     TIER_CALIBRATED,
@@ -57,12 +58,19 @@ class HelpersMixin:
     # ── Helpers ─────────────────────────────────────────────────────
 
     def _active_comfort_range(self) -> tuple[float, float]:
-        """Get the current comfort range accounting for mode, occupancy, demand response, and safety limits."""
+        """Get the current comfort range: occupancy, DR, constraints, safety, tier.
+
+        All narrowing goes through ``derive_effective_comfort_band`` so the
+        layers cannot compound invisibly and the result has a documented
+        minimum width. See engine/comfort.py for the ordering.
+        """
         mode = self.thermostat.get_active_mode()
         base = self.comfort_heat if mode == "heat" else self.comfort_cool
         comfort = self.occupancy.adjust_comfort_range(base, mode)
 
-        # Widen comfort bounds during demand response
+        # Demand response expiry has a side effect, so it is resolved here
+        # rather than inside the pure band derivation.
+        dr_delta = 0.0
         if self._demand_response_active:
             now = datetime.now(timezone.utc)
             if self._demand_response_end and now >= self._demand_response_end:
@@ -72,36 +80,32 @@ class HelpersMixin:
                 _LOGGER.info("Demand response auto-expired — restoring normal comfort")
                 self._fire_event(f"{DOMAIN}_demand_response", {"mode": "auto_restored"})
             else:
-                delta = self._demand_response_delta
-                comfort = (comfort[0] - delta, comfort[1] + delta)
+                dr_delta = self._demand_response_delta
 
-        # Apply active constraints from external integrations
-        for constraint in self._active_constraints:
-            if constraint["type"] == "min_temp":
-                comfort = (max(comfort[0], constraint["value"]), comfort[1])
-            elif constraint["type"] == "max_temp":
-                comfort = (comfort[0], min(comfort[1], constraint["value"]))
-
-        # Enforce safety limits (absolute guardrails — never exceeded)
-        safety_min, safety_max = self.safety_limits
-        comfort = (max(comfort[0], safety_min), min(comfort[1], safety_max))
-
-        # Conservative activation: use inner 80% of comfort band to limit
-        # optimization aggressiveness when the model has limited HVAC data.
-        # A wider band lets the optimizer push temps further from midpoint
-        # (more pre-heating/cooling), so shrinking reduces that risk.
         if self._is_conservative_mode:
-            band = comfort[1] - comfort[0]
-            margin = band * 0.1  # shrink by 10% from each side = inner 80%
-            comfort = (comfort[0] + margin, comfort[1] - margin)
+            tier = ACTIVATION_TIER_CONSERVATIVE
         elif self._is_learning_active():
-            # Learning mode conservatism: use inner 60% of band (only when
-            # NOT in conservative activation — conservative has its own widening)
-            band = comfort[1] - comfort[0]
-            margin = band * 0.2  # shrink by 20% from each side
-            comfort = (comfort[0] + margin, comfort[1] - margin)
+            tier = ACTIVATION_TIER_LEARNING
+        else:
+            tier = None
 
-        return comfort
+        effective = derive_effective_comfort_band(
+            comfort,
+            demand_response_delta=dr_delta,
+            constraints=self._active_constraints,
+            safety_limits=self.safety_limits,
+            tier=tier,
+        )
+
+        if effective != comfort:
+            _LOGGER.debug(
+                "Effective comfort band %.1f-%.1fF (from %.1f-%.1f; "
+                "dr=%.1f, tier=%s, constraints=%d)",
+                effective[0], effective[1], comfort[0], comfort[1],
+                dr_delta, tier or "none", len(self._active_constraints),
+            )
+
+        return effective
 
     @property
     def learning_active(self) -> bool:
@@ -186,10 +190,11 @@ class HelpersMixin:
     def _is_conservative_mode(self) -> bool:
         """True when the model has limited data and optimization is restrained.
 
-        Conservative activation *narrows* the optimizer's working band to the
-        inner 80% of the configured comfort range.  A wider band lets the
-        optimizer push setpoints further from the midpoint, so narrowing is
-        what makes it less aggressive.  See _active_comfort_range().
+        Conservative activation *narrows* the band the optimizer may work in
+        to the inner 80% of the configured comfort range.  A wider band lets
+        the optimizer push setpoints further from the midpoint, so narrowing
+        is what makes it less aggressive.  All narrowing layers and their
+        ordering live in engine/comfort.py.
         """
         return self._activation_tier == ACTIVATION_TIER_CONSERVATIVE
 

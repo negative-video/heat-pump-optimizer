@@ -10,7 +10,12 @@ static PerformanceModel based on the estimator's confidence level.
 
 from __future__ import annotations
 
+from ..const import DEFAULT_HVAC_POWER_WATTS
 from ..learning.thermal_estimator import ThermalEstimator
+
+# Kept local (not imported from performance_model) so this module stays
+# loadable on its own; the EKF path is slated for retirement anyway.
+DEFAULT_AUX_POWER_WATTS = 10000.0
 
 
 class AdaptivePerformanceModel:
@@ -22,10 +27,20 @@ class AdaptivePerformanceModel:
 
     def __init__(self, estimator: ThermalEstimator):
         self.estimator = estimator
+        # Energy model: flat rated watts until a learned power table is
+        # installed via set_power_table().
+        self.rated_power_watts: float = float(DEFAULT_HVAC_POWER_WATTS)
+        self.aux_power_watts: float = float(DEFAULT_AUX_POWER_WATTS)
+        self._power_by_temp: dict[str, dict[int, float]] = {}
 
     # ── Delta lookups (same interface as PerformanceModel) ──────────
 
-    def passive_drift(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
+    def passive_drift(
+        self,
+        outdoor_temp: float,
+        indoor_temp: float | None = None,
+        solar_condition: str | None = None,
+    ) -> float:
         """Indoor °F change per hour with HVAC off.
 
         Computed from learned R (envelope resistance) and C (air capacitance),
@@ -75,6 +90,74 @@ class AdaptivePerformanceModel:
         heating delta as a conservative estimate.
         """
         return self.heating_delta(outdoor_temp, indoor_temp)
+
+    # ── Gross forcing and energy (same interface as PerformanceModel) ──
+
+    def gross_hvac_rate(
+        self,
+        mode: str,
+        outdoor_temp: float,
+        solar_condition: str | None = None,
+    ) -> float:
+        """The machine's own °F/hr of forcing, envelope load removed.
+
+        See PerformanceModel.gross_hvac_rate for why net deltas must never be
+        used as an efficiency currency.
+        """
+        drift = self.passive_drift(outdoor_temp, solar_condition=solar_condition)
+        if mode == "cool":
+            return self.cooling_delta(outdoor_temp) - drift
+        if mode == "heat":
+            return self.heating_delta(outdoor_temp) - drift
+        if mode == "aux_heat":
+            return self.aux_heating_delta(outdoor_temp) - drift
+        return 0.0
+
+    def set_power_table(self, mode: str, table: dict[int, float] | None) -> None:
+        """Install a learned outdoor-temp-binned power draw table (watts)."""
+        if table:
+            self._power_by_temp[mode] = {int(k): float(v) for k, v in table.items()}
+        else:
+            self._power_by_temp.pop(mode, None)
+
+    def hvac_power_watts(
+        self,
+        mode: str,
+        outdoor_temp: float,
+        aux_active: bool = False,
+    ) -> float:
+        """Electrical draw while running at this outdoor temp, in watts."""
+        base = self.rated_power_watts
+        table = self._power_by_temp.get(mode)
+        if table:
+            temps = sorted(table.keys())
+            t = int(round(outdoor_temp))
+            if t <= temps[0]:
+                base = table[temps[0]]
+            elif t >= temps[-1]:
+                base = table[temps[-1]]
+            elif t in table:
+                base = table[t]
+            else:
+                lower = max(x for x in temps if x <= t)
+                upper = min(x for x in temps if x >= t)
+                frac = (t - lower) / (upper - lower) if upper != lower else 0.0
+                base = table[lower] + frac * (table[upper] - table[lower])
+        if aux_active:
+            return base + self.aux_power_watts
+        return base
+
+    def energy_per_degree_kwh(
+        self,
+        mode: str,
+        outdoor_temp: float,
+        solar_condition: str | None = None,
+    ) -> float:
+        """kWh spent per °F of indoor forcing delivered. Lower is better."""
+        gross = abs(self.gross_hvac_rate(mode, outdoor_temp, solar_condition))
+        if gross < 1e-6:
+            return float("inf")
+        return (self.hvac_power_watts(mode, outdoor_temp) / 1000.0) / gross
 
     # ── Derived metrics (same interface as PerformanceModel) ────────
 

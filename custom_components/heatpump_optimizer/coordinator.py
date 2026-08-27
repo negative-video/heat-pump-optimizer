@@ -189,7 +189,10 @@ from .engine.data_types import (
     PreconditionPlan,
     ScheduleEntry,
 )
-from .engine.comfort import calculate_apparent_temperature
+from .engine.comfort import (
+    calculate_apparent_temperature,
+    derive_effective_comfort_band,
+)
 from .engine.optimizer import ScheduleOptimizer
 from .engine.precondition_planner import PreconditionPlanner
 from .engine.performance_model import PerformanceModel
@@ -1134,6 +1137,30 @@ class HeatPumpOptimizerCoordinator(
                     if self._check_dwell_time(now):
                         await self.thermostat.async_set_temperature(target, *comfort)
                         self._last_written_setpoint_time = now
+            elif current_entry.is_dual_setpoint:
+                # Shoulder-day plan: hand the thermostat both bounds and let
+                # its heat_cool arbitration do the work. Falls back to the
+                # single-setpoint path on a thermostat without dual support.
+                if not self._monitor_only and self._check_dwell_time(now):
+                    wrote = await self.thermostat.async_set_dual_setpoints(
+                        current_entry.target_temp_low,
+                        current_entry.target_temp_high,
+                    )
+                    if wrote:
+                        self._last_written_setpoint_time = now
+                    else:
+                        current_sp = thermo_state.effective_setpoint
+                        if current_sp is not None:
+                            target = self._apply_rate_limit(
+                                current_entry.target_temp, current_sp
+                            )
+                            if abs(current_sp - target) > 0.5:
+                                await self.thermostat.async_set_temperature(
+                                    target,
+                                    current_entry.target_temp_low,
+                                    current_entry.target_temp_high,
+                                )
+                                self._last_written_setpoint_time = now
             else:
                 # Write scheduled setpoint if different from current
                 current_sp = thermo_state.effective_setpoint
@@ -1535,7 +1562,10 @@ class HeatPumpOptimizerCoordinator(
         if self._profile_adapter is not None and not self._monitor_only:
             await self._update_thermostat_profile(effective_mode, thermo_state)
 
-        # Apply preemptive override learning adjustments
+        # Preemptive override learning, demand response, and aggressiveness
+        # all narrow or shift the band the optimizer may work in. They go
+        # through one documented derivation (engine/comfort.py) so they cannot
+        # compound into a 1-2°F slot the way they used to.
         now_hour = datetime.now(timezone.utc).hour
         override_adj = self.override_tracker.get_comfort_adjustment(now_hour)
         if override_adj != 0.0:
@@ -1543,27 +1573,31 @@ class HeatPumpOptimizerCoordinator(
                 "Override learning: adjusting comfort by %+.1f°F at hour %d",
                 override_adj, now_hour,
             )
-            # Shift both comfort ranges in the override direction
-            comfort_cool = (comfort_cool[0] + override_adj, comfort_cool[1] + override_adj)
-            comfort_heat = (comfort_heat[0] + override_adj, comfort_heat[1] + override_adj)
 
-        # Apply demand response widening
-        if self._demand_response_active:
-            delta = self._demand_response_delta
-            comfort_cool = (comfort_cool[0] - delta, comfort_cool[1] + delta)
-            comfort_heat = (comfort_heat[0] - delta, comfort_heat[1] + delta)
+        dr_delta = (
+            self._demand_response_delta if self._demand_response_active else 0.0
+        )
+        # Aggressiveness is a caution signal, not a constraint, so it is
+        # expressed as the conservative tier and is floored at the minimum
+        # usable band width.
+        band_tier = (
+            ACTIVATION_TIER_LEARNING
+            if self._aggressiveness == AGGRESSIVENESS_CONSERVATIVE
+            else None
+        )
 
-        # Apply aggressiveness: conservative uses inner 60% of band,
-        # limiting how far the optimizer can push setpoints from midpoint.
-        if self._aggressiveness == AGGRESSIVENESS_CONSERVATIVE:
-            for name, rng in [("cool", comfort_cool), ("heat", comfort_heat)]:
-                band = rng[1] - rng[0]
-                margin = band * 0.2  # shrink 20% each side = inner 60%
-                narrowed = (rng[0] + margin, rng[1] - margin)
-                if name == "cool":
-                    comfort_cool = narrowed
-                else:
-                    comfort_heat = narrowed
+        comfort_cool = derive_effective_comfort_band(
+            comfort_cool,
+            override_shift=override_adj,
+            demand_response_delta=dr_delta,
+            tier=band_tier,
+        )
+        comfort_heat = derive_effective_comfort_band(
+            comfort_heat,
+            override_shift=override_adj,
+            demand_response_delta=dr_delta,
+            tier=band_tier,
+        )
 
         # Select active model
         active_model = self._get_active_model()
@@ -1665,6 +1699,7 @@ class HeatPumpOptimizerCoordinator(
                 "schedule_entries": len(schedule.entries),
                 "baseline_runtime": round(schedule.baseline_runtime_minutes, 1),
                 "optimized_runtime": round(schedule.optimized_runtime_minutes, 1),
+                "plan": schedule.plan_label,
             })
 
             # Plan pre-conditioning for next AWAY→HOME transition

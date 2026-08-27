@@ -3,12 +3,38 @@
 Models HVAC performance using measured temperature deltas — the indoor temperature
 change (°F) per hour of HVAC runtime at a given outdoor temperature.
 
-Example:
-  Cooling at 75°F outdoor: -3.36°F/hr (effective)
-  Cooling at 96°F outdoor: -0.66°F/hr (struggling) -> 5.1x less effective
+Two different rates live in here and must not be confused:
+
+* **Net delta** (``cooling_delta`` / ``heating_delta``) is what the thermostat
+  observes: HVAC output *minus* the envelope load arriving at the same moment.
+  It is the right rate for simulating indoor temperature.
+* **Gross HVAC rate** (``gross_hvac_rate``) is the machine's own forcing, with
+  the concurrent passive drift subtracted back out. It is the right rate for
+  judging how hard the equipment is working, and therefore for any efficiency
+  comparison.
+
+The distinction is not academic. A net cooling delta collapses from about
+-3.2°F/hr to -2.2°F/hr between 75°F and 96°F outdoor, which looks like the
+compressor losing most of its capacity. Subtract the drift that grew from
++0.9°F/hr to +1.8°F/hr over the same span and the gross rate barely moves
+(~4.1 vs ~4.0°F/hr). Ranking hours by 1/net-delta therefore over-rewards cool
+hours by roughly the ratio of the net spread to the gross spread, and that
+inflation is what made the old optimizer chase pre-conditioning that costs
+energy.
 """
 
 from __future__ import annotations
+
+from ..const import DEFAULT_HVAC_POWER_WATTS
+
+# Electric resistance strip heat draw when staged in. Sized for a typical
+# residential 10 kW backup element; overridden per install where known.
+DEFAULT_AUX_POWER_WATTS = 10000.0
+
+# The empirical delta tables are anchored at the indoor temperature the
+# thermostat usually holds. Both the HVAC tables and the drift table share
+# this anchor, which is what lets gross = net - drift come out clean.
+NOMINAL_INDOOR_F = 72.0
 
 
 class PerformanceModel:
@@ -56,6 +82,20 @@ class PerformanceModel:
         # Keys: "sunny", "cloudy", "night" -> {"slope": float, "intercept": float}
         self._solar_resist_trendlines: dict[str, dict[str, float]] = {}
         self._solar_resist_balance_points: dict[str, float] = {}
+
+        # Electrical draw model. Flat rated watts by default; a learned
+        # outdoor-temp-binned table can be installed via set_power_table()
+        # once a trusted power sensor has been binned. With a flat table the
+        # energy ranking degrades gracefully to gross-rate ranking, which is
+        # still far better than net-rate ranking.
+        power = profile_data.get("power", {}) or {}
+        self.rated_power_watts: float = float(
+            power.get("rated_watts", DEFAULT_HVAC_POWER_WATTS)
+        )
+        self.aux_power_watts: float = float(
+            power.get("aux_watts", DEFAULT_AUX_POWER_WATTS)
+        )
+        self._power_by_temp: dict[str, dict[int, float]] = {}
 
     @classmethod
     def from_defaults(cls) -> PerformanceModel:
@@ -237,12 +277,15 @@ class PerformanceModel:
     def cooling_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of cooling runtime at given outdoor temp.
 
-        Returns negative values (cooling lowers indoor temp).
-        More negative = more effective cooling.
+        Returns negative values (cooling lowers indoor temp). This is the
+        NET rate: it already includes the envelope gain arriving during the
+        same hour, so it is the right rate for simulating indoor temperature
+        and the WRONG rate for judging equipment efficiency. Use
+        ``gross_hvac_rate`` for the latter.
 
-        Real data examples:
-          75°F outdoor -> -3.36°F/hr
-          96°F outdoor -> -0.66°F/hr
+        Representative measured values: about -3.2°F/hr at 75°F outdoor and
+        -2.2°F/hr at 96°F. Most of that apparent 1.5x collapse is the growing
+        envelope load, not lost compressor capacity.
 
         The indoor_temp parameter is accepted for interface compatibility with
         AdaptivePerformanceModel but ignored here -- empirical lookup tables
@@ -255,12 +298,11 @@ class PerformanceModel:
     def heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of heating runtime at given outdoor temp.
 
-        Returns positive values (heating raises indoor temp).
-        More positive = more effective heating.
+        Returns positive values (heating raises indoor temp) while the
+        compressor keeps up, and can go negative below the balance point,
+        where the house loses ground and strip heat has to stage in.
 
-        Real data examples:
-          35°F outdoor -> ~0.76°F/hr
-          50°F outdoor -> ~1.7°F/hr
+        Like cooling_delta this is a NET rate; see gross_hvac_rate.
 
         The indoor_temp parameter is accepted for interface compatibility with
         AdaptivePerformanceModel but ignored here.
@@ -315,6 +357,107 @@ class PerformanceModel:
             return base
         slope = trendline["slope"] if trendline else 0.03
         return base - slope * (indoor_temp - 72.0)
+
+    # ── Gross HVAC forcing and energy ──────────────────────────────
+
+    def gross_hvac_rate(
+        self,
+        mode: str,
+        outdoor_temp: float,
+        solar_condition: str | None = None,
+    ) -> float:
+        """The machine's own °F/hr of forcing, envelope load removed.
+
+        ``net_delta(T_out) - passive_drift(T_out, solar)``, sign-aware:
+        negative for cooling, positive for heating. Both terms are evaluated
+        at the tables' shared nominal indoor anchor, because the gross rate is
+        indoor-independent to first order -- only the drift component shifts
+        with indoor temperature, and it has been subtracted out.
+
+        This is the correct input to any efficiency comparison. The net delta
+        is not: at a hot outdoor temperature most of the machine's output is
+        merely cancelling a simultaneous envelope gain, so the net rate reads
+        as capacity loss that the equipment did not actually suffer.
+        """
+        drift = self.passive_drift(outdoor_temp, solar_condition=solar_condition)
+
+        if mode == "cool":
+            return self.cooling_delta(outdoor_temp) - drift
+        if mode == "heat":
+            return self.heating_delta(outdoor_temp) - drift
+        if mode == "aux_heat":
+            return self.aux_heating_delta(outdoor_temp) - drift
+        return 0.0
+
+    def set_power_table(
+        self,
+        mode: str,
+        table: dict[int, float] | None,
+    ) -> None:
+        """Install a learned outdoor-temp-binned power draw table (watts).
+
+        Extension seam for grounding the energy currency in a measured power
+        sensor. Passing None clears the table and reverts that mode to flat
+        rated watts.
+        """
+        if table:
+            self._power_by_temp[mode] = {int(k): float(v) for k, v in table.items()}
+        else:
+            self._power_by_temp.pop(mode, None)
+
+    def hvac_power_watts(
+        self,
+        mode: str,
+        outdoor_temp: float,
+        aux_active: bool = False,
+    ) -> float:
+        """Electrical draw while running at this outdoor temp, in watts.
+
+        Uses a learned per-mode table when one has been installed, otherwise
+        flat rated watts. Aux strip heat is charged at its own resistive draw
+        in addition to the compressor, since both run together on droop.
+        """
+        base = self.rated_power_watts
+        table = self._power_by_temp.get(mode)
+        if table:
+            temps = sorted(table.keys())
+            t = int(round(outdoor_temp))
+            if t in table:
+                base = table[t]
+            elif t <= temps[0]:
+                base = table[temps[0]]
+            elif t >= temps[-1]:
+                base = table[temps[-1]]
+            else:
+                lower = max(x for x in temps if x <= t)
+                upper = min(x for x in temps if x >= t)
+                frac = (t - lower) / (upper - lower) if upper != lower else 0.0
+                base = table[lower] + frac * (table[upper] - table[lower])
+
+        if aux_active:
+            return base + self.aux_power_watts
+        return base
+
+    def energy_per_degree_kwh(
+        self,
+        mode: str,
+        outdoor_temp: float,
+        solar_condition: str | None = None,
+    ) -> float:
+        """kWh spent per °F of indoor forcing delivered. Lower is better.
+
+        ``power_kW / |gross_hvac_rate|``. This is the honest hour-efficiency
+        currency: it answers "what does a degree of work cost right now?"
+        rather than "how fast does the thermostat needle move right now?",
+        which is what the old 1/net-delta score measured.
+
+        Returns ``float('inf')`` when the machine has no usable forcing.
+        """
+        gross = abs(self.gross_hvac_rate(mode, outdoor_temp, solar_condition))
+        if gross < 1e-6:
+            return float("inf")
+        watts = self.hvac_power_watts(mode, outdoor_temp)
+        return (watts / 1000.0) / gross
 
     # ── Derived metrics ────────────────────────────────────────────
 

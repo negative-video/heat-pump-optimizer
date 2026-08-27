@@ -208,6 +208,60 @@ class ThermostatAdapter:
             )
             return False
 
+    async def async_set_dual_setpoints(
+        self,
+        heat_floor: float,
+        cool_ceiling: float,
+    ) -> bool:
+        """Write an explicit heat floor / cool ceiling pair.
+
+        Used for shoulder-season schedules, where the right answer is to hand
+        the thermostat both bounds and let its own heat_cool arbitration
+        decide, rather than re-deciding a single mode every cycle and writing
+        a single setpoint that means different things at 06:00 and 15:00.
+
+        No-ops (returning False) on a thermostat that is not in heat_cool
+        mode, since a single-setpoint device has nowhere to put the pair.
+        """
+        if cool_ceiling < heat_floor:
+            heat_floor, cool_ceiling = cool_ceiling, heat_floor
+
+        state = self.hass.states.get(self.entity_id)
+        if state is None or state.state == "unavailable":
+            _LOGGER.warning("Cannot write dual setpoints: thermostat unavailable")
+            return False
+
+        if self._map_hvac_mode(state.state) != "heat_cool":
+            return False
+
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                SERVICE_SET_TEMPERATURE,
+                {
+                    "entity_id": self.entity_id,
+                    ATTR_TARGET_TEMP_LOW: self._from_fahrenheit(heat_floor),
+                    ATTR_TARGET_TEMP_HIGH: self._from_fahrenheit(cool_ceiling),
+                },
+                blocking=True,
+            )
+        except Exception:
+            _LOGGER.error("Failed to set dual setpoints", exc_info=True)
+            return False
+
+        # Track the side the house is more likely to be held at, so override
+        # detection still has something to compare against.
+        indoor = self._to_fahrenheit(state.attributes.get(ATTR_CURRENT_TEMPERATURE))
+        mid = (heat_floor + cool_ceiling) / 2
+        self._last_written_setpoint = (
+            cool_ceiling if indoor is not None and indoor >= mid else heat_floor
+        )
+        self._last_write_time = datetime.now(timezone.utc)
+        _LOGGER.debug(
+            "Set dual setpoints: heat %.1f°F / cool %.1f°F", heat_floor, cool_ceiling,
+        )
+        return True
+
     async def async_write_safe_default(
         self, comfort_min: float, comfort_max: float
     ) -> None:
