@@ -109,6 +109,7 @@ class StrategicPlanner:
         appliance_btu: float = 0.0,
         aux_threshold_f: float | None = None,
         aux_heat_active: bool = False,
+        weights: OptimizationWeights | None = None,
     ) -> OptimizedSchedule | None:
         """Run the optimizer and update internal state.
 
@@ -168,7 +169,7 @@ class StrategicPlanner:
         # Run optimizer
         try:
             schedule = self.optimizer.optimize_setpoints(
-                indoor_temp, forecast, comfort, mode
+                indoor_temp, forecast, comfort, mode, weights=weights
             )
         except Exception:
             _LOGGER.error("Optimization failed", exc_info=True)

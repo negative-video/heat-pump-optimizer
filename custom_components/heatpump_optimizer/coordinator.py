@@ -1615,6 +1615,7 @@ class HeatPumpOptimizerCoordinator(
                     self.appliance_manager.total_thermal_impact_btu(),
                     _aux_threshold,
                     _aux_active,
+                    self._optimization_weights(),
                 ),
                 timeout=OPTIMIZER_TIMEOUT_S,
             )
@@ -2527,6 +2528,27 @@ class HeatPumpOptimizerCoordinator(
         return False  # BLEND_MODE_NONE
 
     # ── Kalman filter feeding ────────────────────────────────────────
+
+    def _optimization_weights(self) -> OptimizationWeights:
+        """Build the multi-objective weights from configured options.
+
+        These were plumbed through score_hours from the start but never
+        constructed with anything other than defaults, so cost and carbon
+        could not influence a schedule no matter what the user configured --
+        while the README advertised rate arbitrage and the config flow
+        collected rate entities for it (audit item 5).
+
+        Cost weight only turns on when a rate source actually exists. On a
+        flat tariff the normalized cost score is identical across hours, so
+        this changes nothing there; that is asserted by test, because "flat
+        rate behaves exactly like no rate" is the property that makes the
+        wiring safe to enable by default.
+        """
+        return OptimizationWeights(
+            energy_efficiency=1.0,
+            carbon_intensity=self._carbon_weight if self._co2_entity_id else 0.0,
+            electricity_cost=1.0 if self._rate_entity_id else 0.0,
+        )
 
     def _get_active_model(self):
         """Get the performance model for optimization.
