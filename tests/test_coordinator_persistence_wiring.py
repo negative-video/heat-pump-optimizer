@@ -40,7 +40,9 @@ REQUIRED_STATE_KEYS = [
     "energy_baseline",
     "ab_trial",
     "ab_trial_paused",
-    "thermal_estimator",
+    # No "thermal_estimator": audit item 8 removed the EKF. Its state was
+    # nine parameters identified from one observation, so persisting it
+    # carried a random walk across restarts rather than knowledge.
     "baseline_capture",
     "counterfactual",
     "performance_profiler",

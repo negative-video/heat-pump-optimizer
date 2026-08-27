@@ -2,7 +2,6 @@
 
 Covers:
 - from_defaults() creates a valid model with expected properties
-- from_estimator() builds a model from ThermalEstimator state dict
 - cooling_delta at various outdoor temps (negative = cooling)
 - heating_delta at various outdoor temps (positive = warming)
 - passive_drift negative below balance point, positive above
@@ -648,77 +647,6 @@ class TestNetRates:
     def test_net_heating_rate_matches_heating_delta(self):
         model = PerformanceModel.from_defaults()
         assert model.net_heating_rate(35.0) == model.heating_delta(35.0)
-
-
-# ── from_estimator ───────────────────────────────────────────────────
-
-
-class TestFromEstimator:
-    """Tests for from_estimator() class constructor."""
-
-    def _mock_estimator(self, **overrides):
-        """Create a mock estimator with a state_dict method."""
-        state = {
-            "R_inv": 0.005,
-            "Q_cool_base": 24000,
-            "Q_heat_base": 20000,
-            "C_inv": 1.0 / 2000.0,
-        }
-        state.update(overrides)
-
-        class FakeEstimator:
-            def state_dict(self):
-                return state
-
-        return FakeEstimator()
-
-    def test_creates_valid_model(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        assert isinstance(model, PerformanceModel)
-
-    def test_has_cooling_deltas(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        assert len(model._cool_deltas) > 0
-
-    def test_has_heating_deltas(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        assert len(model._heat_deltas) > 0
-
-    def test_cooling_deltas_are_negative(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        for temp, delta in model._cool_deltas.items():
-            assert delta < 0, f"Cooling delta at {temp}F should be negative, got {delta}"
-
-    def test_heating_deltas_are_positive(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        for temp, delta in model._heat_deltas.items():
-            assert delta > 0, f"Heating delta at {temp}F should be positive, got {delta}"
-
-    def test_no_aux_heat(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        assert model._aux_heat_deltas == {}
-
-    def test_balance_points_set(self):
-        est = self._mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        assert model.heat_balance_point == 25.0
-        assert model.resist_balance_point == 50.0
-
-    def test_larger_cooling_capacity_gives_more_negative_deltas(self):
-        est_small = self._mock_estimator(Q_cool_base=12000)
-        est_large = self._mock_estimator(Q_cool_base=36000)
-        model_small = PerformanceModel.from_estimator(est_small)
-        model_large = PerformanceModel.from_estimator(est_large)
-        # At same temp, larger capacity should cool more
-        delta_small = model_small.cooling_delta(85.0)
-        delta_large = model_large.cooling_delta(85.0)
-        assert delta_large < delta_small  # more negative
 
 
 # ── summary ──────────────────────────────────────────────────────────

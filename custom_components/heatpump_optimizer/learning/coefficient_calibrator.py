@@ -106,7 +106,7 @@ class CoefficientCalibrator:
 
         Args:
             innovations: Conditioned innovation records from the EKF
-                (``ThermalEstimator.get_conditioned_innovations()``).
+                (historically the EKF's conditioned innovations; now profiler residuals).
             dry_run: If True, compute and log proposed adjustments but don't
                 apply them to the CoefficientStore.
 

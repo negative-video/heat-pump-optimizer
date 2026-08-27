@@ -152,8 +152,8 @@ class LearningActiveSensor(CoordinatorEntity, BinarySensorEntity):
         if self.coordinator.data is None:
             return {}
         return {
-            "model_confidence": self.coordinator.data.get("kalman_confidence"),
-            "observations": self.coordinator.data.get("kalman_observations"),
+            "model_confidence": self.coordinator.data.get("profiler_confidence_fraction"),
+            "observations": self.coordinator.data.get("thermal_observations"),
             "initialization_mode": self.coordinator.data.get("initialization_mode"),
         }
 

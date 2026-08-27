@@ -93,7 +93,7 @@ class _ThermalLoadMixin:
     def _confidence_attrs(self) -> dict:
         if self.coordinator.data is None:
             return {}
-        confidence = self.coordinator.data.get("kalman_confidence", 0.0)
+        confidence = self.coordinator.data.get("profiler_confidence_fraction", 0.0)
         return {
             "model_confidence": round(confidence, 2),
             "reliable": confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD,

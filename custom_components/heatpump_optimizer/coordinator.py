@@ -6,9 +6,10 @@ Wires together the three control layers and adaptive learning:
   Layer 3 (Watchdog): WatchdogController — event-driven override detection
 
 Learning:
-  ThermalEstimator — Extended Kalman Filter for online building parameter estimation
-  ModelTracker — prediction error tracking & correction factors (legacy, still used for reporting)
-  SolarAdjuster — cloud cover / solar gain corrections (legacy, absorbed by EKF)
+  PerformanceProfiler — measured HVAC and passive-drift rates, binned by
+    outdoor temperature and solar condition. The primary and only model.
+  ModelTracker — prediction error tracking & correction factors (reporting)
+  SolarAdjuster — cloud cover / solar gain corrections
   OverrideTracker — manual override pattern detection
 """
 
@@ -121,7 +122,6 @@ from .const import (
     CONF_UV_INDEX_ENTITY,
     CONF_TOU_SCHEDULE,
     CONF_CALIBRATION_ENABLED,
-    CONF_USE_ADAPTIVE_MODEL,
     CONF_WIND_SPEED_ENTITY,
     DEFAULT_CALENDAR_AWAY_KEYWORDS,
     DEFAULT_CALENDAR_DEFAULT_MODE,
@@ -197,7 +197,6 @@ from .engine.optimizer import ScheduleOptimizer
 from .engine.precondition_planner import PreconditionPlanner
 from .engine.performance_model import PerformanceModel
 from .engine.thermal_simulator import ThermalSimulator
-from .engine.adaptive_performance_model import AdaptivePerformanceModel
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .learning.ab_trial import (
     DEFAULT_PERIOD_DAYS as AB_TRIAL_DEFAULT_PERIOD_DAYS,
@@ -210,10 +209,10 @@ from .learning.energy_baseline import EnergyBaseline
 from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
+from .learning.thermal_profile import derive_thermal_profile, thermal_mass_for
 from .learning.solar_adjuster import SolarAdjuster
 from .learning.coefficient_calibrator import CoefficientCalibrator
 from .learning.coefficient_store import CoefficientStore
-from .learning.thermal_estimator import ThermalEstimator
 from .savings_tracker import SavingsTracker, TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED
 
 _LOGGER = logging.getLogger(__name__)
@@ -431,9 +430,8 @@ class HeatPumpOptimizerCoordinator(
 
         # Engine initialization — varies by mode
         self._initialization_mode = initialization_mode
-        self._use_adaptive = opts.get(CONF_USE_ADAPTIVE_MODEL, True)
 
-        # Read current indoor temp for EKF initialization (may not be available yet)
+        # Read current indoor temp (may not be available yet)
         _init_state = ThermostatAdapter(hass, climate_entity_id).read_state()
         _init_indoor = (
             _init_state.indoor_temp
@@ -441,72 +439,46 @@ class HeatPumpOptimizerCoordinator(
             else 72.0
         )
 
-        if initialization_mode == "learning":
-            # Cold start: synthetic defaults, EKF learns from scratch.
-            # Tonnage and sqft provide better priors when available, reducing
-            # the convergence window from weeks to days.
-            self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start(
-                indoor_temp=_init_indoor,
-                tonnage=self._hvac_tonnage,
-                sqft=self._home_sqft,
-            )
-            _LOGGER.info(
-                "Initialized in learning mode — model will calibrate over %s "
-                "(tonnage=%s, sqft=%s)",
-                "2-3 days" if self._hvac_tonnage else "2-3 weeks",
-                f"{self._hvac_tonnage:.1f} ton" if self._hvac_tonnage else "unknown",
-                f"{self._home_sqft:.0f} ft²" if self._home_sqft else "unknown",
-            )
-        elif initialization_mode == "import" and model_import_data:
-            # Restore from exported model
+        # Conservative static defaults. The profiler supersedes these within
+        # hours of install by bootstrapping from recorder history; until it
+        # does, being predictably conservative beats being confidently wrong.
+        self.model = PerformanceModel.from_defaults()
+
+        if initialization_mode == "import" and model_import_data:
             try:
-                parsed = json.loads(model_import_data) if isinstance(model_import_data, str) else model_import_data
-                state_data = parsed.get("state", parsed)
-                self.estimator = ThermalEstimator.from_dict(state_data)
-                self.model = PerformanceModel.from_estimator(self.estimator)
+                parsed = (
+                    json.loads(model_import_data)
+                    if isinstance(model_import_data, str) else model_import_data
+                )
+                imported = parsed.get("profiler", parsed.get("state", parsed))
+                self.profiler = PerformanceProfiler.from_dict(imported)
                 _LOGGER.info(
-                    "Initialized from imported model (%d observations, confidence=%.0f%%)",
-                    self.estimator._n_obs, self.estimator.confidence * 100,
+                    "Initialized from imported profiler (%d observations)",
+                    self.profiler.total_observations,
                 )
             except (KeyError, ValueError, TypeError) as err:
-                _LOGGER.error("Failed to import model (%s) — falling back to defaults", type(err).__name__, exc_info=True)
-                self.model = PerformanceModel.from_defaults()
-                self.estimator = ThermalEstimator.cold_start(
-                    indoor_temp=_init_indoor,
-                    tonnage=self._hvac_tonnage,
-                    sqft=self._home_sqft,
+                _LOGGER.error(
+                    "Failed to import model (%s) — starting fresh",
+                    type(err).__name__, exc_info=True,
                 )
+                self.profiler = PerformanceProfiler()
         else:
-            # Unknown mode — fall back to learning
-            _LOGGER.warning(
-                "Unknown initialization mode '%s' — using learning mode",
-                initialization_mode,
-            )
-            self.model = PerformanceModel.from_defaults()
-            self.estimator = ThermalEstimator.cold_start(
-                indoor_temp=_init_indoor,
-                tonnage=self._hvac_tonnage,
-                sqft=self._home_sqft,
+            if initialization_mode not in ("learning", "import"):
+                _LOGGER.warning(
+                    "Unknown initialization mode '%s' — starting fresh",
+                    initialization_mode,
+                )
+            self.profiler = PerformanceProfiler()
+            _LOGGER.info(
+                "Initialized in learning mode — the profiler bootstraps from "
+                "recorder history and typically has a usable model within hours"
             )
 
         self.simulator = ThermalSimulator(self.model)
         self.optimizer = ScheduleOptimizer(self.model, self.simulator)
 
-        # Adaptive model (Kalman filter)
-        self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-        # Propagate thermostat differential from model
-        self.adaptive_model.cool_differential = self.model.cool_differential
-        self.adaptive_model.heat_differential = self.model.heat_differential
-
-        # Performance profiler (empirical HVAC deltas, reaches confidence faster
-        # than EKF; primary model for optimization)
-        self.profiler = PerformanceProfiler()
-
-        # Coefficient calibrator (slow outer loop for EKF physics coefficients)
         self.coeff_store = CoefficientStore()
         self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
-        self.estimator._coeff_store = self.coeff_store
 
         # Aux heat activation learner
         self.aux_heat_learner = AuxHeatLearner(
@@ -1094,7 +1066,7 @@ class HeatPumpOptimizerCoordinator(
             if self._baseline_ready_for_control and not self._monitor_only:
                 comfort = self._active_comfort_range()
                 await self.thermostat.async_write_safe_default(*comfort)
-            # Don't return — let EKF, baseline, and savings continue below
+            # Don't return — let profiler, baseline, and savings continue below
 
         # ── Tactical: reality check & setpoint execution ────────────
 
@@ -1197,17 +1169,20 @@ class HeatPumpOptimizerCoordinator(
                 now, thermo_state.indoor_temp, new_forecast
             )
 
-        # ── Kalman filter update ──────────────────────────────────────
+        # ── Model confidence milestone ────────────────────────────────
+        # Sourced from the profiler's measured coverage. Behavior gates on raw
+        # (unsmoothed) confidence; see PerformanceProfiler.confidence.
 
-        if thermo_state.indoor_temp is not None and self._use_adaptive:
-            self._feed_estimator(thermo_state, now)
-            # Fire event when confidence threshold is first reached
-            if not self._confidence_threshold_reached and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
-                self._confidence_threshold_reached = True
-                self._fire_event(EVENT_CONFIDENCE_REACHED, {
-                    "confidence": round(self.estimator.confidence * 100, 1),
-                    "observations": self.estimator._n_obs,
-                })
+        profiler_conf = self.profiler.confidence(raw=True)
+        if (
+            not self._confidence_threshold_reached
+            and profiler_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
+        ):
+            self._confidence_threshold_reached = True
+            self._fire_event(EVENT_CONFIDENCE_REACHED, {
+                "confidence": round(profiler_conf * 100, 1),
+                "observations": self.profiler.total_observations,
+            })
 
         # ── Shared sensor reads (used by savings, counterfactual, profiler) ──
 
@@ -1266,7 +1241,7 @@ class HeatPumpOptimizerCoordinator(
         except (ValueError, TypeError, ZeroDivisionError):
             _LOGGER.warning("Aux heat learner update failed", exc_info=True)
 
-        # Compute resistive BTU for EKF (separates HP from strip contribution).
+        # Compute resistive BTU (separates heat pump from strip contribution).
         # When a power sensor is available, subtract the learned HP baseline from
         # the measured circuit draw.  When no sensor is present but the user has
         # declared their aux heat capacity (aux_heat_kw), use that directly so
@@ -1286,7 +1261,7 @@ class HeatPumpOptimizerCoordinator(
 
         try:
             actual_cop = None
-            if outdoor_temp is not None and self._use_adaptive:
+            if outdoor_temp is not None:
                 mode = self.strategic.mode or "off"
                 actual_cop = self.counterfactual._cop_at_outdoor_temp(outdoor_temp, mode)
 
@@ -1391,8 +1366,11 @@ class HeatPumpOptimizerCoordinator(
                 thermo_state.indoor_temp is not None
                 and outdoor_temp is not None
             ):
-                c_inv = self.estimator.C_inv
-                c_air = 1.0 / c_inv if c_inv > 0 else None
+                # Seeded from floor area, not estimated. This used to read the
+                # EKF's C_inv state, so the appliance-BTU conversion moved
+                # whenever the filter wandered -- the profiler's own training
+                # data depended on the model the profiler was replacing.
+                c_air = thermal_mass_for(self._home_sqft)
                 self._last_profiler_status = self.profiler.record_observation(
                     indoor_temp=thermo_state.indoor_temp,
                     outdoor_temp=outdoor_temp,
@@ -1415,12 +1393,6 @@ class HeatPumpOptimizerCoordinator(
         except Exception:  # noqa: BLE001
             self._last_profiler_status = "error"
             _LOGGER.error("Profiler observation failed", exc_info=True)
-
-        # ── Seed EKF from profiler (one-time) ─────────────────────
-        try:
-            self._try_seed_ekf_from_profiler()
-        except (ValueError, TypeError, KeyError, AttributeError):
-            _LOGGER.warning("Profiler EKF seeding failed", exc_info=True)
 
         # ── Update accuracy tier ───────────────────────────────────
 
@@ -1610,12 +1582,6 @@ class HeatPumpOptimizerCoordinator(
         profiler_bp = profiler_data.get("balance_point", {}).get("resist")
         if profiler_bp is not None:
             self.strategic.resist_balance_point = profiler_bp
-        elif active_model is self.adaptive_model:
-            param_conf = self.estimator.parameter_confidence
-            if param_conf.get("internal_coupling", 0) >= 0.1:
-                bp = self.adaptive_model.resist_balance_point
-                if bp is not None:
-                    self.strategic.resist_balance_point = bp
 
         # Temporarily swap model for optimization if using adaptive model
         original_model = self.optimizer.model
@@ -1945,47 +1911,26 @@ class HeatPumpOptimizerCoordinator(
     async def async_reset_model(self) -> None:
         """Reset the learned thermal model and profiler to a fresh state (service call).
 
-        Clears the EKF state, performance profiler, model tracker, solar adjuster,
-        baseline capture, and counterfactual simulator. Re-runs history bootstrap
-        afterward so the fresh model starts learning immediately.
+        Clears the performance profiler, model tracker, solar adjuster,
+        baseline capture, and counterfactual simulator. Re-runs history
+        bootstrap afterward so the fresh model starts learning immediately.
+
+        The metered energy baseline is deliberately NOT cleared: it is
+        measured history rather than a learned model, and discarding it is
+        what would make savings unauditable again.
         """
         try:
             _LOGGER.warning(
-                "Resetting learned model — clearing %d EKF observations, "
-                "profiler (%.0f%% confidence), and all learning state",
-                self.estimator._n_obs,
+                "Resetting learned model — clearing profiler (%d observations, "
+                "%.0f%% confidence) and all learning state",
+                self.profiler.total_observations,
                 self.profiler.confidence() * 100,
             )
         except Exception:
             _LOGGER.warning("Resetting learned model — clearing all learning state")
 
-        # Read current indoor temp for cold start
-        try:
-            thermo_state = self.thermostat.read_state()
-            init_indoor = (
-                thermo_state.indoor_temp
-                if thermo_state and thermo_state.available and thermo_state.indoor_temp
-                else 72.0
-            )
-        except Exception:
-            init_indoor = 72.0
-
         # Reset static performance model to conservative defaults
         self.model = PerformanceModel.from_defaults()
-
-        # Reset EKF thermal estimator
-        self.estimator = ThermalEstimator.cold_start(
-            indoor_temp=init_indoor,
-            tonnage=self._hvac_tonnage,
-            sqft=self._home_sqft,
-        )
-        self.estimator._coeff_store = self.coeff_store
-        self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-        try:
-            self.adaptive_model.cool_differential = self.model.cool_differential
-            self.adaptive_model.heat_differential = self.model.heat_differential
-        except AttributeError:
-            pass
 
         # Update downstream model references
         self.simulator.model = self.model
@@ -2410,39 +2355,39 @@ class HeatPumpOptimizerCoordinator(
             )
 
     def export_model(self) -> dict:
-        """Export learned Kalman filter parameters in human-readable format."""
+        """Export the learned model in human-readable form.
+
+        What is portable is the profiler's measured observations plus the
+        coarse thermal characterisation derived from them. The old export
+        shipped nine EKF states, which were not separately identifiable and so
+        were not meaningful to move between installs.
+        """
         return {
-            "confidence": round(self.estimator.confidence * 100, 1),
-            "observations": self.estimator._n_obs,
-            "parameters": {
-                "R_value": self.estimator.R_value,
-                "thermal_mass": self.estimator.thermal_mass,
-                "cooling_capacity_btu_hr": float(self.estimator.x[6]),
-                "heating_capacity_btu_hr": float(self.estimator.x[7]),
-                "T_mass": self.estimator.T_mass,
-            },
-            "state": self.estimator.to_dict(),
+            "confidence": round(self.profiler.confidence() * 100, 1),
+            "observations": self.profiler.total_observations,
+            "parameters": self._thermal_profile().as_dict(),
+            "profiler": self.profiler.to_dict(),
         }
 
     def import_model(self, model_data: dict) -> None:
-        """Import Kalman filter state from exported data."""
-        state_data = model_data.get("state")
-        if not state_data:
-            _LOGGER.error("Import failed: no 'state' key in model data")
+        """Import profiler observations from exported data."""
+        data = model_data.get("profiler")
+        if not data:
+            _LOGGER.error("Import failed: no 'profiler' key in model data")
             return
         try:
-            self.estimator = ThermalEstimator.from_dict(state_data)
-            self.estimator._coeff_store = self.coeff_store
-            self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-            self.adaptive_model.cool_differential = self.model.cool_differential
-            self.adaptive_model.heat_differential = self.model.heat_differential
+            self.profiler = PerformanceProfiler.from_dict(data)
             _LOGGER.info(
                 "Imported model: %d observations, confidence=%.0f%%",
-                self.estimator._n_obs,
-                self.estimator.confidence * 100,
+                self.profiler.total_observations,
+                self.profiler.confidence() * 100,
             )
         except (KeyError, ValueError, TypeError) as err:
             _LOGGER.error("Failed to import model data (%s)", type(err).__name__, exc_info=True)
+
+    def _thermal_profile(self):
+        """Coarse thermal characterisation derived from measured drift data."""
+        return derive_thermal_profile(self.profiler, self._home_sqft)
 
     # ── Watchdog callbacks ──────────────────────────────────────────
 
@@ -2583,174 +2528,23 @@ class HeatPumpOptimizerCoordinator(
 
     # ── Kalman filter feeding ────────────────────────────────────────
 
-    def _feed_estimator(self, thermo_state, now: datetime) -> None:
-        """Feed the EKF with current sensor readings via SensorHub."""
-        if thermo_state.indoor_temp is None:
-            return
-
-        # Outdoor temp: standalone sensor → forecast → last known
-        snapshot = self.strategic.forecast_snapshot
-        outdoor_reading = self.sensor_hub.read_outdoor_temp(snapshot)
-        if outdoor_reading is None:
-            return
-        outdoor_temp = outdoor_reading.value
-
-        # Determine HVAC state
-        hvac_running = self._is_hvac_running(thermo_state)
-        # Use actual thermostat action when HVAC is running, so the EKF
-        # attributes heat flow in the correct direction (positive=heating,
-        # negative=cooling).  Fall back to strategic mode for idle periods.
-        if hvac_running and thermo_state.hvac_action in ("heating", "cooling"):
-            hvac_mode = "heat" if thermo_state.hvac_action == "heating" else "cool"
-        else:
-            hvac_mode = self.strategic.mode or "off"
-
-        # Cloud cover from forecast (now a proper field on ForecastPoint)
-        # Use 7200s (2hr) window — OWM updates hourly; 600s was too aggressive
-        # and caused cloud_cover to be None ~87% of the time.
-        cloud_cover = None
-        if snapshot:
-            closest = min(snapshot, key=lambda pt: abs((pt.time - now).total_seconds()))
-            if abs((closest.time - now).total_seconds()) < 7200:
-                cloud_cover = closest.cloud_cover
-
-        # Sun elevation via SensorHub (configurable entity, default sun.sun)
-        sun_elevation = self.sensor_hub.read_sun_elevation()
-
-        # UV index for improved irradiance estimation
-        uv_reading = self.sensor_hub.read_uv_index()
-
-        # Solar irradiance: prefer direct sensor, fall back to panel-derived
-        irradiance_reading = self.sensor_hub.read_solar_irradiance()
-        solar_irradiance_w_m2 = None
-        irradiance_from_panels = False
-        if irradiance_reading and not irradiance_reading.stale:
-            solar_irradiance_w_m2 = irradiance_reading.value
-        else:
-            # Try to derive from solar panel production + specs
-            opts = self.config_entry.options
-            panel_area = opts.get("solar_panel_area")
-            panel_eff = opts.get("solar_panel_efficiency")
-            derived = self.sensor_hub.derive_solar_irradiance_from_panels(
-                panel_area, panel_eff,
-            )
-            if derived is not None:
-                solar_irradiance_w_m2 = derived
-                irradiance_from_panels = True
-
-        # Wind speed, humidity, and pressure for enhanced COP modeling
-        wind_reading = self.sensor_hub.read_wind_speed(snapshot)
-        humidity_reading = self.sensor_hub.read_outdoor_humidity(
-            thermo_state.humidity, snapshot
-        )
-        pressure_reading = self.sensor_hub.read_barometric_pressure()
-
-        # Indoor humidity for latent load correction
-        indoor_humidity_reading = self.sensor_hub.read_weighted_indoor_humidity(
-            thermo_state.humidity
-        )
-
-        # Occupancy: people count for internal heat gain scaling
-        people_count = self.occupancy.get_people_home_count()
-
-        # Door/window contacts for infiltration modeling
-        open_count, _total = self.sensor_hub.read_door_window_open_count()
-
-        # Buffer zone temperatures (attic, crawlspace)
-        attic_reading = self.sensor_hub.read_attic_temp()
-        crawlspace_reading = self.sensor_hub.read_crawlspace_temp()
-
-        # Precipitation from current forecast point
-        is_precipitation = False
-        if snapshot:
-            closest_pt = min(snapshot, key=lambda pt: abs((pt.time - now).total_seconds()))
-            if abs((closest_pt.time - now).total_seconds()) < 7200:
-                is_precipitation = closest_pt.precipitation
-
-        # Auxiliary appliance thermal load
-        self.appliance_manager.update()
-        appliance_btu = self.appliance_manager.total_thermal_impact_btu()
-
-        # Use multi-sensor averaged temp for better EKF convergence
-        observed = getattr(self, "_effective_indoor_temp", None) or thermo_state.indoor_temp
-        noise_scale = getattr(self, "_last_indoor_noise_scale", 1.0)
-        # Flag for estimator to know if irradiance came from panels
-        self.estimator._irradiance_from_panels = irradiance_from_panels
-        innovation = self.estimator.update(
-            observed_temp=observed,
-            outdoor_temp=outdoor_temp,
-            hvac_mode=hvac_mode,
-            hvac_running=hvac_running,
-            cloud_cover=cloud_cover,
-            sun_elevation=sun_elevation,
-            wind_speed_mph=wind_reading.value if wind_reading else None,
-            humidity=humidity_reading.value if humidity_reading else None,
-            pressure_hpa=pressure_reading.value if pressure_reading else None,
-            indoor_humidity=indoor_humidity_reading.value if indoor_humidity_reading else None,
-            people_home_count=people_count,
-            open_door_window_count=open_count,
-            attic_temp=attic_reading.value if attic_reading else None,
-            crawlspace_temp=crawlspace_reading.value if crawlspace_reading else None,
-            precipitation=is_precipitation,
-            appliance_btu=appliance_btu,
-            aux_resistive_btu_hr=getattr(self, "_cached_aux_resistive_btu", 0.0),
-            measurement_noise_scale=noise_scale,
-            uv_index=uv_reading.value if uv_reading and not uv_reading.stale else None,
-            solar_irradiance_w_m2=solar_irradiance_w_m2,
-        )
-
-        # ── Coefficient calibrator check (daily slow loop) ──────
-        if self.coeff_calibrator.should_calibrate(now):
-            try:
-                cond_inns = self.estimator.get_conditioned_innovations()
-                # Dry-run by default; live mode requires explicit config flag
-                cal_enabled = self.config_entry.options.get(
-                    CONF_CALIBRATION_ENABLED, False
-                )
-                result = self.coeff_calibrator.calibrate(
-                    cond_inns, dry_run=not cal_enabled,
-                )
-                if not result.get("skipped"):
-                    _LOGGER.info(
-                        "Coefficient calibration %s (%d samples, residual=%.3f°F)",
-                        "applied" if result.get("applied") else "dry-run",
-                        result.get("samples_used", 0),
-                        result.get("regression_residual", 0),
-                    )
-            except (ValueError, TypeError, KeyError, ZeroDivisionError):
-                _LOGGER.warning(
-                    "Coefficient calibration failed", exc_info=True
-                )
-
-        if self.estimator._n_obs % 100 == 0:
-            _LOGGER.info(
-                "Kalman filter: %d observations, confidence=%.0f%%, "
-                "R=%.1f, C_mass=%.0f, Q_cool=%.0f, Q_heat=%.0f, solar=%.0f",
-                self.estimator._n_obs,
-                self.estimator.confidence * 100,
-                self.estimator.R_value,
-                self.estimator.thermal_mass,
-                float(self.estimator.x[6]),
-                float(self.estimator.x[7]),
-                self.estimator.solar_gain_btu,
-            )
-
     def _get_active_model(self):
         """Get the performance model for optimization.
 
-        Profiler-primary: always prefer the profiler's measured model.
-        Only fall back to EKF-adaptive or static defaults when the
-        profiler has insufficient data.
+        Profiler first, conservative static defaults second. There is no
+        third option any more.
+
+        The EKF used to sit between them, which meant the least trustworthy
+        model took over at exactly the moment data was scarcest. It was
+        structurally unobservable (audit item 8) and its estimates
+        random-walked rather than converged, so "fall back to it while the
+        profiler warms up" was backwards: the profiler bootstraps from
+        recorder history within hours, and the static defaults are wrong in a
+        predictable, conservative direction rather than an unpredictable one.
         """
-        # Profiler: measured performance from direct observation
         profiler_model = self.profiler.to_performance_model()
         if profiler_model is not None:
             return profiler_model
 
-        # Fallback: adaptive model (EKF-derived) if available and not learning
-        if self._use_adaptive and self._activation_tier != ACTIVATION_TIER_LEARNING:
-            return self.adaptive_model
-
-        # Last resort: conservative static defaults
         return self.model
 

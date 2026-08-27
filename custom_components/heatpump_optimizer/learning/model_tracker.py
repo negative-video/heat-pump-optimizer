@@ -1,7 +1,7 @@
 """Model accuracy tracker -- learns correction factors from prediction errors.
 
 DEPRECATED: Per-mode error corrections are superseded by the EKF's online
-learning (thermal_estimator.py). This module is retained only for diagnostic
+learning (the performance profiler). This module is retained only for diagnostic
 reporting and will be removed in a future version.
 
 Tracks predicted vs actual indoor temperatures over time, binned by:

@@ -98,8 +98,6 @@ PHASE_LEARNING = "learning"
 STORAGE_KEY = f"{DOMAIN}_data"
 STORAGE_VERSION = 1
 
-# Kalman filter / adaptive model
-CONF_USE_ADAPTIVE_MODEL = "use_adaptive_model"
 DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.5  # fall back to static model below this
 
 # Graduated activation tiers

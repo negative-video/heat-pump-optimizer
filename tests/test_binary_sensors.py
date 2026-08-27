@@ -181,8 +181,8 @@ class TestLearningActive:
     def test_extra_state_attributes(self, mock_coordinator):
         mock_coordinator.data = {
             "learning_active": True,
-            "kalman_confidence": 0.42,
-            "kalman_observations": 200,
+            "profiler_confidence_fraction": 0.42,
+            "thermal_observations": 200,
             "initialization_mode": "learning",
         }
         sensor = LearningActiveSensor(mock_coordinator, _entry())

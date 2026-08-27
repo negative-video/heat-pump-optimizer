@@ -719,7 +719,7 @@ function getClimateZone(states) {
 
 /** [F] Building Profile — thermal model with plain-English narrative + visual scales. */
 function renderBuildingCard(states, hass) {
-  const rValue = findEntity(states, "envelope_r_value");
+  const rValue = findEntity(states, "thermal_time_constant");
   const thermalMass = findEntity(states, "thermal_mass");
   const coolCap = findEntity(states, "cooling_capacity");
   const heatCap = findEntity(states, "heating_capacity");
@@ -871,7 +871,6 @@ function renderBuildingCard(states, hass) {
   if (isAvailable(confidence)) {
     const cfa = confidence.attributes || {};
     let mt;
-    if (cfa.using_adaptive === true || cfa.using_adaptive === "true") mt = "Kalman Filter";
     else mt = "Heuristic";
     modelTypeLine = `<div class="model-type">${mt}</div>`;
   }
@@ -1444,7 +1443,7 @@ function renderUnifiedTimeline(states, _hass, retro) {
 /** [G] Learning Progress Cards — three-card grid during learning mode. */
 function renderLearningProgressCards(states) {
   const modelConf = findEntity(states, "model_confidence");
-  const rValue = findEntity(states, "envelope_r_value");
+  const rValue = findEntity(states, "thermal_time_constant");
   const thermalMass = findEntity(states, "thermal_mass");
   const coolCap = findEntity(states, "cooling_capacity");
   const baselineConf = findEntity(states, "baseline_confidence");

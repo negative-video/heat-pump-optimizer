@@ -87,6 +87,7 @@ class TacticalController:
             now = datetime.now(timezone.utc)
 
         predicted = self._find_predicted_temp(schedule, now)
+        self._last_predicted_temp = predicted
 
         if predicted is None or current_entry is None:
             return TacticalResult(
@@ -300,6 +301,18 @@ class TacticalController:
     @property
     def state(self) -> TacticalState:
         return self._state
+
+    @property
+    def predicted_indoor_temp(self) -> float | None:
+        """Where the active plan expects indoor temperature to be right now.
+
+        Taken from the schedule's own simulated trajectory. It previously came
+        from the EKF's last pre-update prediction, which meant the sensor
+        tracked a filter that was random-walking rather than the plan the
+        optimizer is actually executing.
+        """
+        value = getattr(self, "_last_predicted_temp", None)
+        return round(value, 2) if value is not None else None
 
     @property
     def error_history(self) -> list[tuple[datetime, float]]:

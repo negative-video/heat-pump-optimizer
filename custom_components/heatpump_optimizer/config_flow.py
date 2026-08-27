@@ -133,7 +133,6 @@ from .const import (
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
     CONF_CALIBRATION_ENABLED,
-    CONF_USE_ADAPTIVE_MODEL,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
     CONF_WIND_SPEED_ENTITY,
@@ -1319,10 +1318,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
                     ),
-                    vol.Optional(
-                        CONF_USE_ADAPTIVE_MODEL,
-                        default=self._options.get(CONF_USE_ADAPTIVE_MODEL, True),
-                    ): selector.BooleanSelector(),
                     vol.Optional(
                         CONF_CALIBRATION_ENABLED,
                         default=self._options.get(CONF_CALIBRATION_ENABLED, False),

@@ -159,55 +159,6 @@ class TestPerformanceModelDefaults:
 
 
 # =====================================================================
-# PerformanceModel.from_estimator() tests
-# =====================================================================
-
-
-class TestPerformanceModelFromEstimator:
-    """Tests for deriving a model from Kalman filter state."""
-
-    def _make_mock_estimator(self, **overrides):
-        """Create a mock estimator with realistic state_dict."""
-        defaults = {
-            "R_inv": 0.005,
-            "R_int_inv": 0.01,
-            "C_inv": 0.0005,
-            "C_mass_inv": 0.0001,
-            "Q_cool_base": 24000,
-            "Q_heat_base": 20000,
-        }
-        defaults.update(overrides)
-        estimator = MagicMock()
-        estimator.state_dict.return_value = defaults
-        return estimator
-
-    def test_creates_valid_model(self):
-        est = self._make_mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        assert model is not None
-
-    def test_cooling_deltas_are_negative(self):
-        est = self._make_mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        delta = model.cooling_delta(85)
-        assert delta < 0
-
-    def test_heating_deltas_are_positive(self):
-        est = self._make_mock_estimator()
-        model = PerformanceModel.from_estimator(est)
-        delta = model.heating_delta(30)
-        assert delta > 0
-
-    def test_higher_q_cool_means_more_effective(self):
-        est_low = self._make_mock_estimator(Q_cool_base=15000)
-        est_high = self._make_mock_estimator(Q_cool_base=30000)
-        model_low = PerformanceModel.from_estimator(est_low)
-        model_high = PerformanceModel.from_estimator(est_high)
-        # More negative = more effective cooling
-        assert model_high.cooling_delta(85) < model_low.cooling_delta(85)
-
-
-# =====================================================================
 # Rate limiter tests
 # =====================================================================
 

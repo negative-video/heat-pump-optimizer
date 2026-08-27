@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 
-# Default constants (same as thermal_estimator.py module-level values)
+# Default physical constants for sensitivity analysis.
 _WIND_INFILTRATION_COEFF = 0.025
 _STACK_EFFECT_COEFF = 0.02
 _K_ATTIC = 50.0

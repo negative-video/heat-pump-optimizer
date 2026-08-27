@@ -3,7 +3,7 @@
 Split out of coordinator.py to keep the main class focused on orchestration.
 Provides save / restore / history-bootstrap behaviour via a mixin that relies
 on the concrete coordinator owning the expected subsystem attributes
-(estimator, profiler, savings_tracker, etc.). Any AttributeError raised from
+(profiler, savings_tracker, etc.). Any AttributeError raised from
 this mixin indicates a wiring bug in the parent class, not in the mixin
 itself.
 """
@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from .adapters.occupancy import OccupancyMode
 from .const import DEFAULT_HISTORY_BOOTSTRAP_DAYS
-from .engine.adaptive_performance_model import AdaptivePerformanceModel
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .learning.aux_heat_learner import AuxHeatLearner
 from .learning.baseline_capture import BaselineCapture
@@ -25,7 +24,6 @@ from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
-from .learning.thermal_estimator import ThermalEstimator
 from .savings_tracker import SavingsTracker
 from .learning.energy_baseline import EnergyBaseline
 from .learning.ab_trial import ABTrial
@@ -40,9 +38,9 @@ class PersistenceMixin:
     """Coordinator methods for Store save / restore and history bootstrap.
 
     Concrete class is expected to provide: hass, _store, strategic, occupancy,
-    model_tracker, solar_adjuster, override_tracker, savings_tracker, estimator,
+    model_tracker, solar_adjuster, override_tracker, savings_tracker,
     baseline_capture, counterfactual, profiler, aux_heat_learner, coeff_store,
-    coeff_calibrator, sensor_hub, adaptive_model, climate_entity_id,
+    coeff_calibrator, sensor_hub, climate_entity_id,
     _weather_entity_ids, _power_default_watts, _phase, _active,
     _history_bootstrap_completed, _bootstrap_retry_count,
     _bootstrap_retry_unsub, _history_bootstrap_result.
@@ -77,7 +75,6 @@ class PersistenceMixin:
             "energy_baseline": self.energy_baseline.to_dict(),
             "ab_trial": self.ab_trial.to_dict(),
             "ab_trial_paused": self._ab_trial_paused,
-            "thermal_estimator": self.estimator.to_dict(),
             "baseline_capture": self.baseline_capture.to_dict(),
             "counterfactual": self.counterfactual.to_dict(),
             "performance_profiler": self.profiler.to_dict(),
@@ -195,22 +192,6 @@ class PersistenceMixin:
             except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore coefficient calibrator — using fresh state",
                                 exc_info=True)
-        if "thermal_estimator" in stored:
-            try:
-                self.estimator = ThermalEstimator.from_dict(stored["thermal_estimator"])
-                self.estimator._coeff_store = self.coeff_store
-                self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-                _LOGGER.info(
-                    "Restored Kalman filter (%d observations, confidence=%.0f%%)",
-                    self.estimator._n_obs,
-                    self.estimator.confidence * 100,
-                )
-            except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning(
-                    "Failed to restore thermal estimator — using fresh state. "
-                    "The model will re-learn from scratch.",
-                    exc_info=True,
-                )
         if "baseline_capture" in stored:
             try:
                 self.baseline_capture = BaselineCapture.from_dict(stored["baseline_capture"])
@@ -315,7 +296,6 @@ class PersistenceMixin:
             weather_entity_ids=self._weather_entity_ids,
             wind_speed_entity=getattr(self.sensor_hub, "_wind_speed_entity", None),
             humidity_entities=self.sensor_hub._outdoor_humidity_entities,
-            estimator=self.estimator,
             baseline_capture=self.baseline_capture,
             profiler=self.profiler,
             max_days=DEFAULT_HISTORY_BOOTSTRAP_DAYS,
@@ -326,19 +306,14 @@ class PersistenceMixin:
         self._history_bootstrap_result = result.reason if not result.success else "ok"
 
         if result.success:
-            # Rebuild dependent objects with updated estimator state
-            self.estimator._coeff_store = self.coeff_store
-            self.adaptive_model = AdaptivePerformanceModel(self.estimator)
-
             # Reset profiler tracking so the first live cycle starts clean
             # (avoids perpetual skipped_interval from stale bootstrap timestamp)
             self.profiler._previous_indoor_temp = None
             self.profiler._previous_timestamp = None
 
             _LOGGER.info(
-                "History bootstrap complete: %d EKF observations "
-                "(confidence=%.0f%%), baseline %s (%d obs), profiler %d obs",
-                result.ekf_observations,
+                "History bootstrap complete: profiler confidence %.0f%%, "
+                "baseline %s (%d obs), profiler %d obs",
                 result.final_confidence * 100,
                 "ready" if self.baseline_capture.is_ready else "not ready",
                 result.baseline_observations,
@@ -348,7 +323,7 @@ class PersistenceMixin:
             if self.baseline_capture.is_ready:
                 self._history_bootstrap_completed = True
             else:
-                # EKF benefited but baseline needs more days — schedule retry
+                # Profiler benefited but baseline needs more days — schedule retry
                 self._bootstrap_retry_count += 1
                 self._schedule_bootstrap_retry()
 

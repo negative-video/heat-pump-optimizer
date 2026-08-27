@@ -43,15 +43,12 @@ async def async_setup_entry(
         PredictionErrorSensor(coordinator, entry),
         ModelAccuracySensor(coordinator, entry),
         SavingsPercentSensor(coordinator, entry),
-        # Kalman filter / adaptive model sensors
+        # Measured thermal characterisation
         ModelConfidenceSensor(coordinator, entry),
-        EnvelopeRValueSensor(coordinator, entry),
+        ThermalTimeConstantSensor(coordinator, entry),
         ThermalMassSensor(coordinator, entry),
-        CoolingCapacitySensor(coordinator, entry),
-        HeatingCapacitySensor(coordinator, entry),
         EffectiveCoolingCapacitySensor(coordinator, entry),
         EffectiveHeatingCapacitySensor(coordinator, entry),
-        ThermalMassTempSensor(coordinator, entry),
         # Diagnostic sensors
         ScheduleSensor(coordinator, entry),
         # SensorHub diagnostic sensors
@@ -277,11 +274,11 @@ class SavingsPercentSensor(_LearningNullMixin, OptimizerBaseSensor):
         )
 
 
-# ── Kalman filter / adaptive model sensors ──────────────────────────
+# ── Measured thermal characterisation sensors ───────────────────────
 
 
 class ModelConfidenceSensor(OptimizerBaseSensor):
-    """Kalman filter model confidence (0-100%)."""
+    """Profiler model confidence (0-100%)."""
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "model_confidence", "Model Confidence")
@@ -294,43 +291,65 @@ class ModelConfidenceSensor(OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        val = self.coordinator.data.get("kalman_confidence")
+        val = self.coordinator.data.get("profiler_confidence_fraction")
         return round(val * 100, 1) if val is not None else None
 
     @property
     def extra_state_attributes(self) -> dict:
         if self.coordinator.data is None:
             return {}
-        attrs = {
-            "using_adaptive_model": self.coordinator.data.get("using_adaptive_model", False),
+        data = self.coordinator.data
+        return {
+            "observations": data.get("thermal_observations"),
+            "source": data.get("thermal_source"),
+            "note": (
+                "Measured coverage of the outdoor temperature range, per mode. "
+                "Control decisions use the unsmoothed value."
+            ),
         }
-        param_conf = self.coordinator.data.get("kalman_parameter_confidence")
-        if param_conf:
-            for key, val in param_conf.items():
-                attrs[f"{key}_confidence"] = round(val * 100)
-        needs = self.coordinator.data.get("kalman_learning_needs", [])
-        if needs:
-            attrs["learning_needs"] = needs
-        return attrs
 
 
-class EnvelopeRValueSensor(OptimizerBaseSensor):
-    """Learned building envelope thermal resistance."""
+class ThermalTimeConstantSensor(OptimizerBaseSensor):
+    """How long the house holds a temperature offset, in hours.
+
+    The reciprocal of the measured passive-drift slope. This is the number
+    that actually decides whether pre-conditioning can work: coolth stored
+    overnight has to survive until the afternoon peak, and on a house with a
+    short time constant it does not.
+
+    Replaces the EKF's Envelope R-Value and Thermal Mass Temp entities, which
+    reported states that were never separately identifiable.
+    """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "envelope_r_value", "Envelope R-Value")
-        self._attr_native_unit_of_measurement = "°F·hr/BTU"
+        super().__init__(
+            coordinator, entry, "thermal_time_constant", "Thermal Time Constant"
+        )
+        self._attr_native_unit_of_measurement = "h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
-        self._attr_icon = "mdi:home-thermometer-outline"
+        self._attr_icon = "mdi:timer-sand"
 
     @property
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.get("kalman_r_value")
+        return self.coordinator.data.get("thermal_time_constant_hours")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        if self.coordinator.data is None:
+            return {}
+        data = self.coordinator.data
+        return {
+            "drift_slope_per_hour": data.get("thermal_drift_slope"),
+            "envelope_loss_btu_per_hour_f": data.get("thermal_envelope_loss"),
+            "passive_observations": data.get("thermal_observations"),
+            "source": data.get("thermal_source"),
+            "model": "single-node approximation from measured passive drift",
+        }
 
 
 class ThermalMassSensor(OptimizerBaseSensor):
@@ -349,45 +368,7 @@ class ThermalMassSensor(OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self.coordinator.data.get("kalman_thermal_mass")
-
-
-class CoolingCapacitySensor(OptimizerBaseSensor):
-    """Learned cooling capacity at reference temperature."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "cooling_capacity", "Cooling Capacity")
-        self._attr_native_unit_of_measurement = "BTU/hr"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:snowflake"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("kalman_cooling_capacity")
-
-
-class HeatingCapacitySensor(OptimizerBaseSensor):
-    """Learned heating capacity at reference temperature."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "heating_capacity", "Heating Capacity")
-        self._attr_native_unit_of_measurement = "BTU/hr"
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:fire"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("kalman_heating_capacity")
+        return self.coordinator.data.get("thermal_mass_btu_per_f")
 
 
 class EffectiveCoolingCapacitySensor(OptimizerBaseSensor):
@@ -432,29 +413,6 @@ class EffectiveHeatingCapacitySensor(OptimizerBaseSensor):
         if self.coordinator.data is None:
             return None
         return self.coordinator.data.get("effective_heating_capacity")
-
-
-class ThermalMassTempSensor(OptimizerBaseSensor):
-    """Hidden thermal mass temperature (wall/slab temperature estimate)."""
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(coordinator, entry, "thermal_mass_temp", "Thermal Mass Temperature")
-        self._attr_device_class = SensorDeviceClass.TEMPERATURE
-        self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_suggested_display_precision = 1
-        self._attr_icon = "mdi:thermometer-lines"
-
-    @property
-    def native_value(self) -> float | None:
-        if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("kalman_mass_temp")
-
-
-# ── Diagnostic sensors ──────────────────────────────────────────────
 
 
 class ScheduleSensor(OptimizerBaseSensor):
@@ -1554,10 +1512,10 @@ class LearningProgressSensor(OptimizerBaseSensor):
         tier = self.coordinator.data.get("savings_accuracy_tier", "learning")
         days = self.coordinator.data.get("baseline_sample_days", 0)
         baseline_ready = self.coordinator.data.get("baseline_ready", False)
-        confidence = self.coordinator.data.get("kalman_confidence")
+        confidence = self.coordinator.data.get("profiler_confidence_fraction")
         conf_pct = round(confidence * 100) if confidence is not None else 0
 
-        learning_rate = self.coordinator.data.get("kalman_learning_rate", "active")
+        learning_rate = "active"
 
         activation_tier = self.coordinator.data.get("activation_tier", "learning")
 
@@ -1590,7 +1548,7 @@ class LearningProgressSensor(OptimizerBaseSensor):
         baseline_only = self.coordinator.data.get("baseline_only_mode", True)
         attrs = {
             "sample_days": self.coordinator.data.get("baseline_sample_days"),
-            "model_confidence": self.coordinator.data.get("kalman_confidence"),
+            "model_confidence": self.coordinator.data.get("profiler_confidence_fraction"),
             "accuracy_tier": self.coordinator.data.get("savings_accuracy_tier"),
             "activation_tier": self.coordinator.data.get("activation_tier"),
             "initialization_mode": self.coordinator.data.get("initialization_mode"),
@@ -1610,10 +1568,10 @@ class LearningProgressSensor(OptimizerBaseSensor):
                 "a baseline. It will not change your thermostat until baseline "
                 "capture is complete (7 days) and model confidence is sufficient."
             )
-        needs = self.coordinator.data.get("kalman_learning_needs", [])
+        needs = []
         if needs:
             attrs["learning_needs"] = needs
-        learning_rate = self.coordinator.data.get("kalman_learning_rate")
+        learning_rate = None
         if learning_rate:
             attrs["learning_rate"] = learning_rate
         return attrs

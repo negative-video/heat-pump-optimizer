@@ -117,7 +117,7 @@ class HelpersMixin:
 
         Respects the graduated activation tier: if the optimizer has
         activated (conservative/standard/confident), it is no longer
-        in learning mode even if global EKF confidence is below 50%.
+        in learning mode even if overall profiler confidence is below 50%.
         """
         return self._activation_tier == ACTIVATION_TIER_LEARNING
 
@@ -132,8 +132,8 @@ class HelpersMixin:
         Tiers:
         - learning: baseline not captured, or insufficient data
         - conservative: baseline captured + good passive drift data + some HVAC obs
-        - standard: global EKF confidence >= 50% or mode-specific readiness
-        - confident: global EKF >= 70% or profiler per-mode >= 70%
+        - standard: profiler confidence >= 50% or mode-specific readiness
+        - confident: profiler confidence >= 70%
         """
         if self._cached_activation_tier is not None:
             return self._cached_activation_tier
@@ -158,8 +158,8 @@ class HelpersMixin:
         """
         profiler_conf = self.profiler.confidence(raw=True)
 
-        # Confident: profiler has broad coverage or strong EKF
-        if profiler_conf >= 0.7 or self.estimator.confidence >= 0.7:
+        # Confident: profiler has broad coverage
+        if profiler_conf >= 0.7:
             return ACTIVATION_TIER_CONFIDENT
 
         # Standard: profiler has moderate coverage or mode-specific readiness
@@ -176,9 +176,6 @@ class HelpersMixin:
             return ACTIVATION_TIER_CONSERVATIVE
 
         # Fallback: check if baseline is captured (legacy path)
-        if self.baseline_capture.is_ready and self.estimator.confidence >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
-            return ACTIVATION_TIER_STANDARD
-
         return ACTIVATION_TIER_LEARNING
 
     @property
@@ -224,7 +221,7 @@ class HelpersMixin:
     def _get_calibration_status(self) -> str:
         """Human-readable coefficient calibration status."""
         cal = self.coeff_calibrator
-        n_cond = len(self.estimator._conditioned_innovations)
+        n_cond = self.profiler.total_observations
         if cal._first_innovation_time is None:
             return "waiting_for_data"
         hours_elapsed = (
@@ -240,8 +237,8 @@ class HelpersMixin:
     def _update_accuracy_tier(self) -> None:
         """Update the savings accuracy tier based on baseline and model confidence."""
         baseline_conf = self.baseline_capture.confidence
-        model_conf = self.estimator.confidence
         profiler_conf = self.profiler.confidence()
+        model_conf = profiler_conf
 
         if baseline_conf >= 0.7 and model_conf >= 0.5:
             tier = TIER_CALIBRATED
@@ -279,48 +276,10 @@ class HelpersMixin:
         if tier in (TIER_SIMULATED, TIER_CALIBRATED):
             self.savings_tracker.set_counterfactual(self.counterfactual)
 
-    def _try_seed_ekf_from_profiler(self) -> None:
-        """Seed EKF parameters from profiler data when profiler is confident but EKF is not."""
-        if self.estimator._profiler_seeded:
-            return
-        if self.estimator.confidence >= 0.3:
-            return  # EKF already has reasonable confidence
-        if self.profiler.confidence("resist") < 0.7:
-            return  # profiler not ready
-
-        profile = self.profiler.to_profile_data()
-        resist_data = profile["temperature"].get("resist")
-        if resist_data is None or resist_data.get("linear_trendline") is None:
-            return
-
-        resist_trend = resist_data["linear_trendline"]
-        t_ref = 75.0
-        resist_delta_ref = resist_trend["slope"] * t_ref + resist_trend["intercept"]
-
-        cool_delta_ref = None
-        cool_data = profile["temperature"].get("cool_1")
-        if cool_data and cool_data.get("linear_trendline"):
-            ct = cool_data["linear_trendline"]
-            cool_delta_ref = ct["slope"] * t_ref + ct["intercept"]
-
-        heat_delta_ref = None
-        heat_data = profile["temperature"].get("heat_1")
-        if heat_data and heat_data.get("linear_trendline"):
-            ht = heat_data["linear_trendline"]
-            heat_delta_ref = ht["slope"] * t_ref + ht["intercept"]
-
-        self.estimator.inject_profiler_priors(
-            resist_slope=resist_trend["slope"],
-            resist_intercept=resist_trend["intercept"],
-            cool_delta_at_ref=cool_delta_ref,
-            heat_delta_at_ref=heat_delta_ref,
-            resist_delta_at_ref=resist_delta_ref,
-        )
-
     def _check_model_progress(self) -> None:
         """Create or clear a repair issue if the model seems stuck."""
         days = self.baseline_capture.sample_days
-        confidence = self.estimator.confidence
+        confidence = self.profiler.confidence(raw=True)
         if days >= 7 and confidence < 0.15:
             ir.async_create_issue(
                 self.hass,
@@ -450,17 +409,25 @@ class HelpersMixin:
         internal gains, boundary zones, appliances, and aux resistive heat.
         Positive = house gaining heat, negative = losing heat.
         """
-        comps = self.estimator.thermal_load_components
-        if not comps:
+        profile = self._thermal_profile()
+        if not profile.is_measured or profile.envelope_loss_btu_per_hour_f is None:
             return None
-        return (
-            comps.get("q_env", 0.0)
-            + comps.get("q_solar", 0.0)
-            + comps.get("q_internal", 0.0)
-            + comps.get("q_boundary", 0.0)
-            + comps.get("q_appliances", 0.0)
-            + comps.get("q_aux_resistive", 0.0)
+
+        outdoor = self.sensor_hub.get_outdoor_temp_info(
+            self.strategic.forecast_snapshot
         )
+        outdoor_val = outdoor.get("value") if outdoor else None
+        indoor = self.thermostat.read_state()
+        indoor_val = getattr(indoor, "indoor_temp", None) if indoor else None
+        if outdoor_val is None or indoor_val is None:
+            return None
+
+        # Envelope flow only, from the measured conductance. The EKF used to
+        # itemise solar, internal, boundary and appliance flows here; those
+        # were separate states of an unobservable filter, so the breakdown was
+        # arithmetic on numbers that could not be identified. One measured
+        # aggregate is less informative and considerably more honest.
+        return profile.envelope_loss_btu_per_hour_f * (outdoor_val - indoor_val)
 
     # ── Event firing ──────────────────────────────────────────────
 

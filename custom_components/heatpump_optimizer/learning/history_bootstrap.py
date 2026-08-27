@@ -26,7 +26,6 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .baseline_capture import BaselineCapture
 from .performance_profiler import PerformanceProfiler
-from .thermal_estimator import ThermalEstimator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,8 +70,6 @@ class BootstrapResult:
 
     success: bool
     reason: str = ""
-    ekf_observations: int = 0
-    skipped_observations: int = 0
     baseline_observations: int = 0
     profiler_observations: int = 0
     final_confidence: float = 0.0
@@ -85,7 +82,6 @@ async def async_bootstrap_from_history(
     weather_entity_ids: list[str],
     wind_speed_entity: str | None,
     humidity_entities: list[str],
-    estimator: ThermalEstimator,
     baseline_capture: BaselineCapture,
     profiler: PerformanceProfiler,
     max_days: int = 10,
@@ -228,26 +224,18 @@ async def async_bootstrap_from_history(
             reason=f"insufficient_valid_points ({len(valid_points)})",
         )
 
-    # 4. Batch-feed EKF
-    ekf_result = _batch_feed_estimator(estimator, data_points)
-
-    # 5. Bootstrap baseline capture
+    # 4. Bootstrap baseline capture
     baseline_count = _bootstrap_baseline(baseline_capture, data_points)
 
-    # 6. Bootstrap performance profiler
+    # 5. Bootstrap performance profiler
     profiler_count = _bootstrap_profiler(profiler, data_points)
-
-    # 7. Clear meaningless innovations (they have wall-clock timestamps)
-    estimator._innovations.clear()
 
     return BootstrapResult(
         success=True,
         reason="ok",
-        ekf_observations=ekf_result[0],
-        skipped_observations=ekf_result[1],
         baseline_observations=baseline_count,
         profiler_observations=profiler_count,
-        final_confidence=estimator.confidence,
+        final_confidence=profiler.confidence(raw=True),
     )
 
 
@@ -511,59 +499,6 @@ def _collect_sensor_states(
 
 
 # ── EKF batch feeding ───────────────────────────────────────────────────
-
-
-def _batch_feed_estimator(
-    estimator: ThermalEstimator,
-    data_points: list[HistoryDataPoint],
-) -> tuple[int, int]:
-    """Feed aligned data points through the EKF sequentially.
-
-    Returns (valid_count, skipped_count).
-    """
-    valid_count = 0
-    skipped_count = 0
-    last_valid_time: datetime | None = None
-
-    for point in data_points:
-        if not point.valid:
-            skipped_count += 1
-            continue
-
-        # Compute dt from actual time gap
-        if last_valid_time is not None:
-            dt_seconds = (point.timestamp - last_valid_time).total_seconds()
-            dt_hours = dt_seconds / 3600.0
-            # Skip data points with large gaps (e.g. HA restart, DB maintenance).
-            # Previously this reset dt to DT_HOURS (5 min), which compressed
-            # multi-hour gaps into a single step — the EKF would see an
-            # impossibly fast temperature change and learn wrong parameters.
-            if dt_hours > MAX_DT_HOURS:
-                skipped_count += 1
-                last_valid_time = point.timestamp
-                continue
-        else:
-            dt_hours = DT_HOURS
-
-        estimator.update(
-            observed_temp=point.indoor_temp,
-            outdoor_temp=point.outdoor_temp,
-            hvac_mode=point.hvac_mode,
-            hvac_running=point.hvac_running,
-            cloud_cover=None,  # not available in recorder history
-            sun_elevation=None,
-            dt_hours=dt_hours,
-            wind_speed_mph=point.wind_speed_mph,
-            humidity=point.humidity,
-        )
-
-        last_valid_time = point.timestamp
-        valid_count += 1
-
-    return valid_count, skipped_count
-
-
-# ── Baseline bootstrap ──────────────────────────────────────────────────
 
 
 def _bootstrap_baseline(

@@ -32,6 +32,23 @@ from .const import ACTIVATION_TIER_LEARNING, BLEND_MODE_NONE, PHASE_PRECONDITION
 from .savings_tracker import TIER_LEARNING, TIER_PROJECTED
 
 
+def _thermal_keys(profile) -> dict[str, Any]:
+    """Flatten the thermal profile into the sensor payload.
+
+    Named explicitly rather than prefixed programmatically so the key names
+    stay greppable from the sensor classes that read them.
+    """
+    d = profile.as_dict()
+    return {
+        "thermal_drift_slope": d["drift_slope_per_hour"],
+        "thermal_time_constant_hours": d["time_constant_hours"],
+        "thermal_mass_btu_per_f": d["thermal_mass_btu_per_f"],
+        "thermal_envelope_loss": d["envelope_loss_btu_per_hour_f"],
+        "thermal_observations": d["observations"],
+        "thermal_source": d["source"],
+    }
+
+
 class DataBuilderMixin:
     """Methods that serialize coordinator state into the sensor payload."""
 
@@ -112,17 +129,9 @@ class DataBuilderMixin:
         current_entry = self._get_current_entry(now)
         next_entry = self._get_next_entry(now)
 
-        # Tactical stats (fall back to EKF innovations when tactical isn't active)
+        # Tactical stats (None until the tactical layer has run)
         tactical_mae = self.tactical.mean_absolute_error
         tactical_bias = self.tactical.mean_signed_error
-        if tactical_mae is None and self.estimator._innovations:
-            innovations = self.estimator._innovations
-            tactical_mae = round(
-                sum(abs(v) for _, v in innovations) / len(innovations), 2
-            )
-            tactical_bias = round(
-                sum(v for _, v in innovations) / len(innovations), 2
-            )
 
         # Model tracker report
         accuracy_report = self.model_tracker.get_accuracy_report()
@@ -139,15 +148,16 @@ class DataBuilderMixin:
             self.strategic.forecast_snapshot
         )
         _outdoor_val = _outdoor_info.get("value") if _outdoor_info else None
+        # Capacity is the equipment's own forcing, envelope load removed --
+        # measured, rather than an EKF state that absorbed residual error.
+        _active_model = self._get_active_model()
         _eff_cool = (
-            self.estimator.cooling_capacity(_outdoor_val)
-            if _outdoor_val is not None and self.estimator._n_obs > 0
-            else None
+            _active_model.gross_hvac_rate("cool", _outdoor_val)
+            if _outdoor_val is not None else None
         )
         _eff_heat = (
-            self.estimator.heating_capacity(_outdoor_val)
-            if _outdoor_val is not None and self.estimator._n_obs > 0
-            else None
+            _active_model.gross_hvac_rate("heat", _outdoor_val)
+            if _outdoor_val is not None else None
         )
 
         return {
@@ -217,16 +227,9 @@ class DataBuilderMixin:
             "prediction_error": (
                 self.tactical.error_history[-1][1]
                 if self.tactical.error_history
-                else (
-                    round(self.estimator._innovations[-1][1], 2)
-                    if self.estimator._innovations else None
-                )
-            ),
-            "predicted_indoor_temp": (
-                round(self.estimator._last_predicted_temp, 2)
-                if self.estimator._last_predicted_temp is not None
                 else None
             ),
+            "predicted_indoor_temp": self.tactical.predicted_indoor_temp,
             "model_accuracy_mae": tactical_mae,
             "model_bias": tactical_bias,
 
@@ -238,31 +241,18 @@ class DataBuilderMixin:
             "model_alert": self._check_model_alert(accuracy_report),
             "solar_coefficient": self.solar_adjuster.solar_coefficient,
 
-            # Kalman filter / adaptive model
-            "kalman_confidence": self.estimator.confidence,
-            "kalman_parameter_confidence": self.estimator.parameter_confidence,
-            "kalman_learning_needs": self.estimator.learning_needs,
-            "kalman_learning_rate": self.estimator.learning_rate,
-            "kalman_r_value": self.estimator.R_value,
-            "kalman_thermal_mass": self.estimator.thermal_mass,
-            "kalman_cooling_capacity": float(self.estimator.x[6]),
-            "kalman_heating_capacity": float(self.estimator.x[7]),
+            # Measured thermal characterisation. Replaces the nine EKF states,
+            # which were not separately identifiable from one observed
+            # temperature and so reported precision they never had.
+            **_thermal_keys(self._thermal_profile()),
             "effective_cooling_capacity": _eff_cool,
             "effective_heating_capacity": _eff_heat,
-            "kalman_mass_temp": self.estimator.T_mass,
-            "kalman_observations": self.estimator._n_obs,
-            "using_adaptive_model": (
-                self._use_adaptive
-                and self._activation_tier != ACTIVATION_TIER_LEARNING
-            ),
             "learning_active": self._is_learning_active(),
             "initialization_mode": self._initialization_mode,
             "history_bootstrap_completed": self._history_bootstrap_completed,
             "history_bootstrap_result": self._history_bootstrap_result,
             "bootstrap_retry_count": self._bootstrap_retry_count,
 
-            # Thermal load breakdown (BTU/hr components from EKF)
-            "thermal_load_components": self.estimator.thermal_load_components,
             "house_thermal_load_btu": self._compute_net_passive_load(),
 
             # Coefficient calibration (slow outer loop)
@@ -427,6 +417,8 @@ class DataBuilderMixin:
 
             # Performance profiler
             "profiler_confidence": round(self.profiler.confidence() * 100, 0),
+            # 0-1 form for entities that display a percentage themselves.
+            "profiler_confidence_fraction": self.profiler.confidence(),
             "profiler_active": self.profiler.confidence() >= 0.7,
             "profiler_observations": self.profiler.total_observations,
             "profiler_status": self._last_profiler_status,

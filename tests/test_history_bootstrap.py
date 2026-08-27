@@ -82,13 +82,6 @@ data_types_mod = _load(
     os.path.join(CC, "engine", "data_types.py"),
 )
 
-# Load thermal_estimator
-te_mod = _load(
-    "custom_components.heatpump_optimizer.learning.thermal_estimator",
-    os.path.join(CC, "learning", "thermal_estimator.py"),
-)
-learning.thermal_estimator = te_mod
-
 # Load baseline_capture
 bc_mod = _load(
     "custom_components.heatpump_optimizer.learning.baseline_capture",
@@ -110,12 +103,10 @@ hb_mod = _load(
 )
 learning.history_bootstrap = hb_mod
 
-ThermalEstimator = te_mod.ThermalEstimator
 BaselineCapture = bc_mod.BaselineCapture
 PerformanceProfiler = pp_mod.PerformanceProfiler
 HistoryDataPoint = hb_mod.HistoryDataPoint
 BootstrapResult = hb_mod.BootstrapResult
-_batch_feed_estimator = hb_mod._batch_feed_estimator
 _bootstrap_baseline = hb_mod._bootstrap_baseline
 _bootstrap_profiler = hb_mod._bootstrap_profiler
 _build_aligned_timeline = hb_mod._build_aligned_timeline
@@ -292,114 +283,6 @@ class TestBuildAlignedTimeline:
 
 
 # ── EKF batch feeding tests ─────────────────────────────────────────────
-
-
-class TestBatchFeedEstimator:
-    """Test batch-feeding historical data through the EKF."""
-
-    def test_basic_batch_feed(self):
-        estimator = ThermalEstimator.cold_start()
-        initial_obs = estimator._n_obs
-
-        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-        points = []
-        for i in range(288):
-            t = start + timedelta(minutes=5 * i)
-            points.append(
-                HistoryDataPoint(
-                    timestamp=t,
-                    indoor_temp=72.0 + 0.1 * (i % 12),
-                    outdoor_temp=85.0,
-                    hvac_mode="cool",
-                    hvac_running=i % 3 == 0,
-                    hvac_action="cooling" if i % 3 == 0 else "idle",
-                    setpoint=74.0,
-                    humidity=50.0,
-                    wind_speed_mph=5.0,
-                )
-            )
-
-        valid, skipped = _batch_feed_estimator(estimator, points)
-
-        assert valid == 288
-        assert skipped == 0
-        assert estimator._n_obs == initial_obs + 288
-
-    def test_skips_invalid_points(self):
-        estimator = ThermalEstimator.cold_start()
-
-        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-        points = [
-            HistoryDataPoint(
-                timestamp=start,
-                indoor_temp=72.0,
-                outdoor_temp=85.0,
-                hvac_mode="cool",
-                hvac_running=False,
-                hvac_action="idle",
-                setpoint=74.0,
-                humidity=None,
-                wind_speed_mph=None,
-            ),
-            HistoryDataPoint(
-                timestamp=start + timedelta(minutes=5),
-                indoor_temp=None,
-                outdoor_temp=85.0,
-                hvac_mode="cool",
-                hvac_running=False,
-                hvac_action="idle",
-                setpoint=74.0,
-                humidity=None,
-                wind_speed_mph=None,
-            ),
-            HistoryDataPoint(
-                timestamp=start + timedelta(minutes=10),
-                indoor_temp=72.0,
-                outdoor_temp=None,
-                hvac_mode="cool",
-                hvac_running=False,
-                hvac_action="idle",
-                setpoint=74.0,
-                humidity=None,
-                wind_speed_mph=None,
-            ),
-        ]
-
-        valid, skipped = _batch_feed_estimator(estimator, points)
-        assert valid == 1
-        assert skipped == 2
-
-    def test_convergence_improves_with_data(self):
-        """EKF confidence should increase with more observations."""
-        estimator = ThermalEstimator.cold_start()
-        initial_confidence = estimator.confidence
-
-        start = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
-        points = []
-        for i in range(500):
-            t = start + timedelta(minutes=5 * i)
-            running = i % 4 < 2
-            temp = 73.0 - (0.05 * (i % 20)) if running else 73.0 + (0.02 * (i % 20))
-            points.append(
-                HistoryDataPoint(
-                    timestamp=t,
-                    indoor_temp=temp,
-                    outdoor_temp=90.0,
-                    hvac_mode="cool",
-                    hvac_running=running,
-                    hvac_action="cooling" if running else "idle",
-                    setpoint=74.0,
-                    humidity=None,
-                    wind_speed_mph=None,
-                )
-            )
-
-        _batch_feed_estimator(estimator, points)
-
-        assert estimator.confidence > initial_confidence
-
-
-# ── Baseline bootstrap tests ────────────────────────────────────────────
 
 
 class TestBootstrapBaseline:
