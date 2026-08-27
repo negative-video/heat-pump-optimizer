@@ -2,7 +2,6 @@
 
 Covers:
 - _get_active_model always prefers profiler model
-- _should_use_greybox always returns False (deprecated)
 - Activation tiers driven by profiler confidence
 - Activation without baseline capture when profiler has data
 - Solar-condition trendlines attached to profiler model

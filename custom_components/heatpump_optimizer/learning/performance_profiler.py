@@ -40,6 +40,13 @@ EXPECTED_RANGES: dict[str, tuple[int, int]] = {
 
 MODES = ("cool_1", "heat_1", "auxiliary_heat_1", "resist")
 
+# The displayed overall confidence is smoothed with a high-water mark so the
+# number a user sees does not jitter every time a new outdoor temperature bin
+# opens with a single sample.  The mark may never lead the raw value by more
+# than this, so a profiler that has lost (or never restored) its bins cannot
+# keep advertising a model it no longer has.
+CONFIDENCE_HWM_MAX_LEAD = 0.10
+
 # Solar condition classification
 SOLAR_CONDITIONS = ("sunny", "cloudy", "night")
 # Attic temp must exceed outdoor by this much (°F) during daytime to classify as sunny.
@@ -99,7 +106,9 @@ class PerformanceProfiler:
         self._previous_indoor_temp: float | None = None
         self._previous_timestamp: datetime | None = None
         self._total_observations: int = 0
-        self._confidence_hwm: float = 0.0  # high-water mark: confidence can only grow
+        # High-water mark for the *displayed* overall confidence only.
+        # Behavioral gates read confidence(raw=True); see confidence().
+        self._confidence_hwm: float = 0.0
 
     # ── Recording ─────────────────────────────────────────────────────
 
@@ -489,23 +498,47 @@ class PerformanceProfiler:
 
     # ── Confidence ────────────────────────────────────────────────────
 
-    def confidence(self, mode: str | None = None) -> float:
+    def confidence(self, mode: str | None = None, *, raw: bool = False) -> float:
         """Confidence score (0.0 to 1.0).
 
-        If mode is specified, returns confidence for that mode only.
-        Otherwise returns the minimum confidence across modes that have data,
-        or 0.0 if no modes have any data.
+        If mode is specified, returns that mode's confidence, always unsmoothed.
+        Otherwise returns the minimum confidence across modes that have enough
+        observations to be meaningful, or 0.0 if no mode qualifies.
 
-        Overall confidence uses a high-water mark: bin data only grows
-        (observations are never removed), so overall confidence is
-        monotonically non-decreasing.  Without HWM, a mode crossing the
-        30-observation threshold with sparse data can drag the min() down,
-        causing confusing regressions visible to the user.
+        Two flavors of the overall number exist on purpose:
+
+        * ``raw=True`` is the measurement.  Anything that changes *behavior*
+          (activation tier, how aggressively the optimizer is allowed to move
+          setpoints) must use this, so that a season change, an HVAC repair,
+          insulation work, or a partial model reset immediately pulls the
+          optimizer back to conservative behavior.
+        * ``raw=False`` (default) is the *displayed* number.  It is smoothed
+          with a high-water mark so the value a user reads does not jitter
+          every time a new outdoor temperature bin opens with one sample.  The
+          mark is bounded: it may never lead the raw value by more than
+          CONFIDENCE_HWM_MAX_LEAD, so the display stays calm without lying
+          indefinitely about data the profiler no longer has.
         """
         if mode is not None:
             return self._mode_confidence(mode)
 
-        # Overall: min across modes with enough data to be meaningful
+        raw_value = self._raw_overall_confidence()
+        if raw:
+            return raw_value
+
+        # Displayed value: high-water mark, clamped to a bounded lead over raw.
+        self._confidence_hwm = max(
+            raw_value,
+            min(self._confidence_hwm, raw_value + CONFIDENCE_HWM_MAX_LEAD),
+        )
+        return self._confidence_hwm
+
+    def _raw_overall_confidence(self) -> float:
+        """Unsmoothed overall confidence: min across modes with enough data.
+
+        Modes below MIN_OBS_FOR_CONFIDENCE observations are excluded so that a
+        seasonal mode (aux heat in July) does not peg the whole model at 0%.
+        """
         MIN_OBS_FOR_CONFIDENCE = 30
         confidences = []
         for m in MODES:
@@ -514,11 +547,9 @@ class PerformanceProfiler:
                 confidences.append(self._mode_confidence(m))
 
         if not confidences:
-            return self._confidence_hwm
+            return 0.0
 
-        raw = min(confidences)
-        self._confidence_hwm = max(self._confidence_hwm, raw)
-        return self._confidence_hwm
+        return min(confidences)
 
     def _mode_confidence(self, mode: str) -> float:
         """Confidence for a single mode.

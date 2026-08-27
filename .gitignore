@@ -22,3 +22,6 @@ docs/internal/
 # Saved Home Assistant dashboard exports (contain personal entity data)
 *Home Assistant.html
 *Home Assistant_files/
+
+# Agent worktrees (transient, never committed)
+.claude/worktrees/

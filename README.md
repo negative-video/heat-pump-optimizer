@@ -10,9 +10,13 @@ Works with any thermostat Home Assistant can control (Ecobee, Nest, Z-Wave, gene
 
 ## Background
 
-A heat pump's efficiency depends on the outdoor temperature. On a mild morning it might deliver 3–4 units of heating or cooling per unit of electricity. By the hottest part of the afternoon, that ratio can drop below 2:1.
+A heat pump's efficiency depends on the outdoor temperature. In mild conditions it may deliver 3 to 4 units of heating or cooling per unit of electricity; at a summer peak or on a cold winter morning that ratio falls, and below the heating balance point resistance strip heat takes over at roughly 1:1.
 
-Most thermostats don't account for this — they react to the current temperature and run whenever the house drifts outside the setpoint, even during the least efficient hours. This integration looks at the forecast, identifies when the system will run most efficiently, and front-loads work into those hours.
+Most thermostats don't account for this. They react to the current temperature and run whenever the house drifts outside the setpoint, regardless of what the next twelve hours look like. This integration reads the forecast, works out which hours are cheapest to run in, and prefers those hours when scheduling, always inside the comfort range you define.
+
+**How large is the effect, honestly?** Smaller than it first looks, and worth stating plainly rather than discovering later. The only thing a thermostat can observe is the *net* indoor temperature change while the HVAC runs, and that number mixes the machine's output with the envelope load pushing back at the same moment. In one measured 365-day profile, cooling moved the house about 3.2°F/hr at 75°F outdoor and about 2.2°F/hr at 96°F, which reads as a 1.5x efficiency spread. But passive drift at those same outdoor temperatures was +0.9°F/hr and +1.8°F/hr, so the compressor's own contribution was roughly 4.1°F/hr and 4.0°F/hr: nearly flat. Most of the apparent spread is the building, not the heat pump.
+
+Pre-conditioning is also not free. Holding the house further from outdoor conditions raises the loss rate for as long as you hold it, and stored coolth or heat bleeds away on the order of the building's thermal time constant, which is a handful of hours for a typical home rather than a full day. Shifting runtime pays clearly when it displaces something genuinely expensive (resistance strip heat below the balance point, or an expensive time-of-use window) or when it buys comfort on a day the system would otherwise saturate. On a flat electricity rate, expect single-digit percent energy savings, with most of the value coming from not wasting energy on pointless setpoint swings.
 
 ## How It Works
 
@@ -30,7 +34,11 @@ Three control layers run on top:
 
 The profiler accumulates observed HVAC performance into solar-aware 2D lookup tables -- keyed by `(outdoor_temp, solar_condition)` -- across four modes: compressor cooling, compressor heating, auxiliary heat, and passive drift (no HVAC). Solar condition is classified from the attic temperature sensor: sunny when the attic exceeds outdoor by more than 10F, cloudy at 7-10F above outdoor, and night otherwise.
 
+The rates it records are **net**: they include whatever the envelope was doing during the same interval. Subtracting the passive drift rate at the same outdoor temperature and solar condition recovers the machine's own contribution, which is far flatter across the outdoor range than the net rates imply. See [Background](#background) for a worked example. Treat a large net spread as mostly a statement about the building.
+
 **Confidence** is the geometric mean of three factors per mode: coverage (fraction of the expected outdoor temp range with data), depth (total observation hours vs a 48-hour minimum), and quality (fraction of temperature bins with 6+ samples). Overall confidence is the minimum across modes with at least 30 observations. The profiler rejects outliers (temperature changes greater than 2F per 5-minute interval or rates exceeding 15F/hr) and skips observations while auxiliary appliances are active.
+
+The number shown on the dashboard is lightly smoothed by a high-water mark, so it does not twitch every time a brand-new outdoor temperature bin opens with a single sample. That smoothing is bounded: the displayed value can never sit more than 10 percentage points above the raw measurement, so it follows real drops down. Activation tiers and every other behavioral decision read the raw value directly, never the smoothed one.
 
 When the profiler reaches 70% confidence but the EKF is below 30%, the profiler's measured trendlines seed EKF parameters as a one-time prior injection, accelerating EKF convergence from weeks to days.
 
@@ -119,8 +127,8 @@ After setup, open **Configure** on the integration card for advanced options: en
 | Timeline | What's happening | Dashboard shows |
 |----------|-----------------|-----------------|
 | **Hours 0-6** | History bootstrap replays up to 10 days of recorder data through the profiler. If sufficient history exists, the profiler can reach initial confidence within hours. | Learning mode layout: retrospective 48h chart, three learning-progress cards (thermal model, baseline schedule, profiler), milestone checklist, today's snapshot |
-| **Days 1-3** | Profiler accumulates live observations across current weather conditions. Conservative optimization may begin as soon as the profiler has enough coverage for the active HVAC mode. Baseline capture runs in the background. | Conservative activation: wider comfort bands, savings tracking begins |
-| **Days 4-14** | Profiler coverage grows as it observes more outdoor temperatures and solar conditions. Activation tier upgrades from conservative to standard. EKF converges in parallel for diagnostics. | Standard optimization: normal comfort bands, full savings panel |
+| **Days 1-3** | Profiler accumulates live observations across current weather conditions. Conservative optimization may begin as soon as the profiler has enough coverage for the active HVAC mode. Baseline capture runs in the background. | Conservative activation: narrowed working band, savings tracking begins |
+| **Days 4-14** | Profiler coverage grows as it observes more outdoor temperatures and solar conditions. Activation tier upgrades from conservative to standard. EKF converges in parallel for diagnostics. | Standard optimization: full comfort band, full savings panel |
 | **Week 2+** | Full confidence as the profiler covers the current season's conditions. Tier upgrades to confident. | Full optimization: aggressive pre-conditioning, rate arbitrage, thermal profile views |
 
 > **Tip:** Providing HVAC tonnage and home square footage during setup improves energy accounting accuracy from day one. Restoring a previously exported model is immediate.
@@ -134,9 +142,11 @@ Rather than waiting for a single global confidence score to reach a fixed thresh
 | Tier | Requirements | Behavior |
 |------|-------------|----------|
 | **Learning** | Profiler accumulating initial observations. History bootstrap may complete this within hours. | Passive observation only. No thermostat changes. |
-| **Conservative** | Profiler passive drift confidence >= 70% + at least 30 HVAC observations in active mode | Optimization active with wider comfort bands (+/- 1F). No aggressive pre-conditioning. Shorter lookahead window. |
+| **Conservative** | Profiler passive drift confidence >= 70% + at least 30 HVAC observations in active mode | Optimization active, but restrained: the optimizer works inside the inner 80% of your configured comfort range instead of the whole band. No aggressive pre-conditioning. Shorter lookahead window. |
 | **Standard** | Profiler per-mode confidence >= 50% for the current HVAC mode | Full optimization with normal comfort bands. |
 | **Confident** | Profiler overall confidence >= 70% | Aggressive pre-conditioning, rate arbitrage, full forecast lookahead. |
+
+**Why does the conservative tier use a *narrower* band?** A wide comfort range is exactly what gives the optimizer room to pre-condition: the further a setpoint may sit from the middle of your range, the more aggressively it can push the house around. Restricting the optimizer to the inner 80% of your range is therefore the direct lever on how much it is allowed to do while the model is still thin. Your configured comfort range is never exceeded in any tier; the conservative tier simply declines to use all of it.
 
 **Why graduated activation?** The profiler builds confidence by accumulating observations across outdoor temperature bins and solar conditions. It reaches useful confidence for current conditions quickly -- often within hours via history bootstrap -- because it only needs to cover the temperature ranges you're actually experiencing. Modes for conditions the home hasn't seen (e.g., cooling capacity in spring, aux heat in summer) are excluded from the confidence calculation until they accumulate enough data.
 
@@ -415,7 +425,6 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 | Effective Cooling Capacity | Cooling output adjusted for current outdoor temperature | BTU/hr |
 | Effective Heating Capacity | Heating output adjusted for current outdoor temperature | BTU/hr |
 | Thermal Mass Temperature | Hidden thermal mass node temperature | °F |
-| Grey-Box Active | Deprecated (always false) | -- |
 
 #### Predictions and Diagnostics
 
@@ -519,6 +528,8 @@ The profiler builds lookup tables of observed HVAC performance (°F/hr change vs
 | Passive Drift | 20–90°F | Natural temperature decay rate without HVAC |
 
 Confidence per mode is the geometric mean of three factors: **coverage** (fraction of the expected temp range with sufficient data), **depth** (total observation hours vs a 48-hour minimum), and **quality** (fraction of temperature bins with 6+ samples each). Overall confidence is the minimum across modes with at least 30 observations — modes with fewer observations are excluded from the calculation and hidden from the card until they accumulate enough data. This prevents seasonal modes (e.g., aux heat in spring) from permanently dragging confidence to 0%.
+
+The `Profiler Confidence` sensor reports the lightly smoothed value (see [Performance Profiler](#performance-profiler) for how the smoothing is bounded); per-mode confidences in its attributes are always raw.
 
 The profiler builds coverage from live observations across all HVAC modes, outdoor temperature bins, and solar conditions (sunny, cloudy, night). As more varied weather is experienced, the profiler's confidence grows. The profiler is the primary model driving schedule optimization and provides one-time prior seeding for the EKF when the profiler reaches confidence before the filter converges.
 
@@ -1105,7 +1116,9 @@ A few possible reasons:
 
 ### Why does model confidence sometimes drop after being high?
 
-**Profiler confidence** can decrease when outdoor conditions shift to temperature ranges the profiler hasn't observed yet. For example, the first warm week of spring may push outdoor temps above the profiler's cooling data range -- confidence drops until observations fill in the new bins. This is expected and resolves as the profiler accumulates data in the new conditions.
+**Profiler confidence** can decrease when outdoor conditions shift to temperature ranges the profiler hasn't observed yet. For example, the first warm week of spring may push outdoor temps above the profiler's cooling data range and confidence drops until observations fill in the new bins. This is expected and resolves as the profiler accumulates data in the new conditions.
+
+The displayed number is smoothed: it rises with the measurement immediately, but a dip has to exceed about 10 points before the display follows it down. The optimizer always reacts to the raw value, so it can pull back to conservative behavior before the dashboard number visibly changes.
 
 **EKF confidence** (secondary/diagnostic) can also decrease during seasonal transitions, equipment changes (new filter, refrigerant recharge), or when process noise causes capacity estimates to drift. This does not affect optimization since the profiler drives scheduling.
 
@@ -1225,6 +1238,15 @@ mode_confidence = (coverage * depth * quality) ^ (1/3)
 Expected outdoor ranges per mode: cooling 65-100F, heating 0-55F, aux heat 0-35F, passive drift 20-90F.
 
 Overall confidence is the minimum across modes with at least 30 observations. Modes with fewer observations are excluded -- this prevents seasonal modes (e.g., aux heat in spring) from dragging confidence to 0%.
+
+Two values are derived from that minimum:
+
+| Value | Used for | Behavior |
+|-------|----------|----------|
+| **Raw** | Activation tier and every other control decision | Follows the measurement exactly, up and down |
+| **Displayed** | `Profiler Confidence` sensor, dashboard, log lines | High-water mark, clamped so it can never exceed raw by more than 10 percentage points |
+
+The split exists so the displayed number stays calm while the optimizer stays honest. A high-water mark alone would let a stale score keep the optimizer aggressive after a season change, an HVAC repair, insulation work, or a partial model reset; clamping the mark to a bounded lead means the display tracks real regressions instead of ratcheting forever.
 
 ### History bootstrap
 
