@@ -169,26 +169,41 @@ class TestCoolingDelta:
         # Midpoint between 75 (-3.0) and 85 (-2.0) => -2.5
         assert abs(delta - (-2.5)) < 0.01
 
-    def test_trendline_extrapolation_below_range(self):
-        """Below measured range, use trendline."""
-        model = _make_custom_model()
-        delta = model.cooling_delta(60.0)
-        # trendline: 0.1 * 60 + (-10.5) = -4.5
-        assert abs(delta - (-4.5)) < 0.01
+    def test_clamps_to_edge_bin_below_range(self):
+        """Below the observed range, return the coldest observed bin.
 
-    def test_trendline_extrapolation_above_range(self):
-        """Above measured range, use trendline."""
+        Item 9: this used to extrapolate the trendline to -4.5 F/hr at 60F,
+        a rate 50% better than anything ever measured, invented from a line
+        fitted 15 degrees away. Those phantom-efficient hours then ranked as
+        the best in the day.
+        """
         model = _make_custom_model()
-        delta = model.cooling_delta(110.0)
-        # trendline: 0.1 * 110 + (-10.5) = 0.5
-        assert abs(delta - 0.5) < 0.01
+        assert model.cooling_delta(60.0) == -3.0  # the 75F bin, unchanged
 
-    def test_indoor_temp_param_accepted_but_ignored(self):
-        """indoor_temp is accepted for interface compatibility but not used."""
+    def test_clamps_to_edge_bin_above_range(self):
+        """Above the observed range, return the hottest observed bin.
+
+        The trendline would have claimed +0.5 F/hr at 110F -- that the unit
+        heats the house while cooling. Plausible for a truly saturated system,
+        but not something a fit extrapolated 15 degrees past the data has any
+        standing to assert.
+        """
+        model = _make_custom_model()
+        assert model.cooling_delta(110.0) == -1.0  # the 95F bin, unchanged
+
+    def test_indoor_temp_corrects_the_rate(self):
+        """Item 4: a warmer house cools faster, because it gains less.
+
+        The tables were recorded at ~72F. The optimizer's whole purpose is to
+        visit other temperatures, so the rate has to be corrected for where
+        the house actually is or pre-cool cost and coast payback disagree.
+        """
         model = PerformanceModel.from_defaults()
-        delta_a = model.cooling_delta(80.0, indoor_temp=70.0)
-        delta_b = model.cooling_delta(80.0, indoor_temp=80.0)
-        assert delta_a == delta_b
+        cool_at_70 = model.cooling_delta(80.0, indoor_temp=70.0)
+        cool_at_80 = model.cooling_delta(80.0, indoor_temp=80.0)
+        assert cool_at_80 < cool_at_70, "warmer house should cool faster"
+        # And the nominal anchor is a no-op.
+        assert model.cooling_delta(80.0, indoor_temp=72.0) == model.cooling_delta(80.0)
 
     def test_defaults_capped_at_neg4(self):
         """Default model caps best cooling at -4.0 F/hr."""
@@ -243,18 +258,23 @@ class TestHeatingDelta:
         expected = 0.5 + (1.0 - 0.5) * (27.5 - 20) / (35 - 20)
         assert abs(delta - expected) < 0.01
 
-    def test_trendline_extrapolation_below_range(self):
+    def test_clamps_to_edge_bin_below_range(self):
+        """Item 9: below observed data, hold the coldest observed bin."""
         model = _make_custom_model()
-        delta = model.heating_delta(-10.0)
-        # trendline: 0.033 * (-10) + 0.0 = -0.33
-        expected = 0.033 * (-10) + 0.0
-        assert abs(delta - expected) < 0.01
+        assert model.heating_delta(-10.0) == 0.5  # the 20F bin, unchanged
 
-    def test_indoor_temp_param_accepted_but_ignored(self):
+    def test_indoor_temp_corrects_the_rate(self):
+        """Item 4: a warmer house heats slower, because it loses more.
+
+        Same correction as cooling and the same sign, not mirrored: both
+        follow from the envelope term, which is what actually moves with
+        indoor temperature.
+        """
         model = PerformanceModel.from_defaults()
-        delta_a = model.heating_delta(30.0, indoor_temp=60.0)
-        delta_b = model.heating_delta(30.0, indoor_temp=75.0)
-        assert delta_a == delta_b
+        heat_at_60 = model.heating_delta(30.0, indoor_temp=60.0)
+        heat_at_75 = model.heating_delta(30.0, indoor_temp=75.0)
+        assert heat_at_75 < heat_at_60, "warmer house should heat slower"
+        assert model.heating_delta(30.0, indoor_temp=72.0) == model.heating_delta(30.0)
 
     def test_defaults_heating_capped_at_2(self):
         """Default model caps best heating at 2.0 F/hr."""
@@ -360,18 +380,36 @@ class TestRuntimeNeeded:
         assert minutes < float("inf")
 
     def test_cooling_inf_when_delta_positive(self):
-        """If cooling delta is >= 0 (system cannot cool), return inf."""
-        # Build a model where cooling delta is positive at extreme outdoor temp
-        model = _make_custom_model()
-        # At 110F, trendline gives 0.1*110 - 10.5 = 0.5 (positive!)
-        minutes = model.runtime_needed(110.0, "cool", 2.0)
+        """If cooling delta is >= 0 (system cannot cool), return inf.
+
+        This used to reach the guard by extrapolating past the observed bins
+        (0.1*110 - 10.5 = +0.5). Audit item 9 clamps lookups to observed data,
+        so the condition now has to come from a bin that genuinely records the
+        unit losing ground -- which is the only way it should ever be believed.
+        """
+        model = _make_custom_model(
+            **{"temperature.cool_1": {
+                "deltas": {"75": -3.0, "85": -2.0, "95": -1.0, "105": 0.5},
+                "linear_trendline": {"slope": 0.1, "intercept": -10.5},
+            }}
+        )
+        minutes = model.runtime_needed(105.0, "cool", 2.0)
         assert minutes == float("inf")
 
     def test_heating_inf_when_delta_negative(self):
-        """If heating delta is <= 0, return inf."""
-        model = _make_custom_model()
-        # At -10F, trendline gives 0.033*(-10) + 0.0 = -0.33 (negative!)
-        minutes = model.runtime_needed(-10.0, "heat", 2.0)
+        """If heating delta is <= 0, return inf.
+
+        Same rationale as the cooling case: the observed bin has to show the
+        compressor losing ground, rather than a trendline invented below the
+        coldest temperature the house has ever been measured at.
+        """
+        model = _make_custom_model(
+            **{"temperature.heat_1": {
+                "deltas": {"0": -0.33, "20": 0.5, "35": 1.0, "50": 1.5},
+                "linear_trendline": {"slope": 0.033, "intercept": 0.0},
+            }}
+        )
+        minutes = model.runtime_needed(0.0, "heat", 2.0)
         assert minutes == float("inf")
 
     def test_unknown_mode_returns_inf(self):
@@ -536,8 +574,8 @@ class TestAuxHeatingDelta:
         delta = model.aux_heating_delta(30.0)
         assert delta == 3.0
 
-    def test_aux_extrapolation(self):
-        """Aux heat uses trendline for temps outside measured range."""
+    def test_aux_clamps_outside_measured_range(self):
+        """Aux heat clamps to the edge bin outside measured range."""
         data = {
             "temperature": {
                 "cool_1": {
@@ -562,9 +600,11 @@ class TestAuxHeatingDelta:
             "setpoint": {"cool": 74.0, "heat": 68.0},
         }
         model = PerformanceModel(data)
-        # Below range: trendline at -10F -> 0.05 * (-10) + 1.5 = 1.0
-        delta = model.aux_heating_delta(-10.0)
-        assert abs(delta - 1.0) < 0.01
+        # Item 9: clamped to the coldest observed bin (10F -> 2.0) rather than
+        # extrapolated to 1.0. Strip heat is nearly constant-output, so a
+        # trendline sloping it downward below the observed range was never
+        # physical to begin with.
+        assert model.aux_heating_delta(-10.0) == 2.0
 
 
 # ── _lookup_delta edge cases ────────────────────────────────────────

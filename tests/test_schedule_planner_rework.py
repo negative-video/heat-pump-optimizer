@@ -460,7 +460,18 @@ class TestSaturationGate:
 
     # An undersized machine: net cooling goes positive above ~97F, meaning
     # the compressor at 100% duty can no longer hold the house.
-    UNDERSIZED = dict(cool=(0.13, -12.4, 51, 105))
+    # A unit that genuinely cannot hold the ceiling through a 99F peak.
+    #
+    # This was (0.13, -12.4, ...) before audit item 4 gave the HVAC deltas the
+    # same indoor-temp correction passive_drift already had. Coasting at the
+    # 78F ceiling means a smaller indoor/outdoor gap than the 72F the tables
+    # were recorded at, so the envelope load is lower and the net cooling rate
+    # is ~0.25 F/hr better than the uncorrected model claimed. That is enough
+    # to carry the old fixture through the peak, which made it stop testing
+    # saturation at all. The intent is unchanged; the numbers now describe an
+    # undersized unit under corrected physics (157 degree-minutes over the
+    # ceiling, against a 30 degree-minute gate threshold).
+    UNDERSIZED = dict(cool=(0.13, -12.0, 51, 105))
 
     def test_gate_opens_when_flat_plan_cannot_hold_the_ceiling(self):
         model = make_model(**self.UNDERSIZED)
@@ -517,10 +528,17 @@ class TestSaturationGate:
         assert max(targets) == 78.0, (
             "comfort ceiling was abandoned; looks like a narrowing fallback"
         )
-        assert min(targets) <= 75.0, (
-            "plan never leaves the outer band; looks like a midpoint clamp"
+        # A real pre-cool window exists (the plan is not simply flat)...
+        assert min(targets) < 78.0, "no pre-cool window on a saturation day"
+        # ...and the plan is not confined to the inner 50%, which is the
+        # signature the old narrow-and-retry fallback would have left.
+        assert not (73.5 <= min(targets) and max(targets) <= 76.5), (
+            "plan sits entirely inside the inner 50%; looks like a midpoint clamp"
         )
-        assert max(targets) - min(targets) >= 3.0
+        # Depth is deliberately not asserted. Item 4 made coasting at the
+        # ceiling cheaper than the uncorrected model believed, so the search
+        # now buys the same comfort with a shallower window. Pinning depth
+        # here would just re-encode the old model's error as a requirement.
 
     def test_least_bad_plan_ships_and_surfaces_its_violations(self):
         model = make_model(**self.UNDERSIZED)

@@ -236,12 +236,24 @@ class PerformanceModel:
         trendline: dict[str, float],
         outdoor_temp: float,
     ) -> float:
-        """Look up a delta value with interpolation.
+        """Look up a delta value with interpolation, clamped to observed data.
 
         Strategy:
         1. If outdoor_temp matches a measured point exactly, use it.
         2. If between two measured points, linearly interpolate.
-        3. If outside measured range, use the trendline (slope * temp + intercept).
+        3. If outside the measured range, return the nearest edge bin's value.
+
+        Step 3 used to extrapolate along the count-weighted trendline, with no
+        bound. That is how a cooling fit with slope 0.0631 and intercept -8.06
+        produced -9.6 F/hr at 48 F outdoor: a rate the equipment cannot
+        physically achieve, invented from a line fitted 20 degrees away. The
+        optimizer then ranked those phantom-efficient hours as the best in the
+        day. Clamping keeps lookups inside the range the house has actually
+        been observed in, which is what the documentation always claimed the
+        model did.
+
+        Callers that need to know whether a lookup was clamped should ask
+        ``is_extrapolating()`` and treat the result as low confidence.
         """
         temp_int = int(round(outdoor_temp))
 
@@ -254,9 +266,11 @@ class PerformanceModel:
         if not measured_temps:
             return trendline["slope"] * outdoor_temp + trendline["intercept"]
 
-        # Outside measured range -> use trendline
-        if outdoor_temp < measured_temps[0] or outdoor_temp > measured_temps[-1]:
-            return trendline["slope"] * outdoor_temp + trendline["intercept"]
+        # Outside measured range -> clamp to the nearest observed bin
+        if outdoor_temp < measured_temps[0]:
+            return deltas[measured_temps[0]]
+        if outdoor_temp > measured_temps[-1]:
+            return deltas[measured_temps[-1]]
 
         # Between measured points -> linear interpolation
         lower = None
@@ -274,6 +288,61 @@ class PerformanceModel:
         frac = (outdoor_temp - lower) / (upper - lower)
         return deltas[lower] + frac * (deltas[upper] - deltas[lower])
 
+    def _observed_range(self, deltas: dict[int, float]) -> tuple[float, float] | None:
+        """Outdoor-temp range the given mode has actually been observed in."""
+        if not deltas:
+            return None
+        temps = sorted(deltas.keys())
+        return (float(temps[0]), float(temps[-1]))
+
+    def is_extrapolating(self, mode: str, outdoor_temp: float) -> bool:
+        """Whether a lookup for this mode/temp falls outside observed data.
+
+        Lookups are clamped rather than extrapolated, so the returned rate is
+        still physically plausible. It is simply not evidence. Callers making
+        aggressive decisions (pre-conditioning gates, window search) should
+        treat a True here as a reason to stay conservative.
+        """
+        deltas = {
+            "cool_1": self._cool_deltas,
+            "heat_1": self._heat_deltas,
+            "auxiliary_heat_1": self._aux_heat_deltas,
+            "resist": self._resist_deltas,
+        }.get(mode)
+        observed = self._observed_range(deltas or {})
+        if observed is None:
+            return True
+        return not (observed[0] <= outdoor_temp <= observed[1])
+
+    def _indoor_correction(self, indoor_temp: float | None) -> float:
+        """Drift-slope correction for running away from the nominal indoor temp.
+
+        The empirical delta tables were recorded at whatever indoor temp the
+        thermostat happened to hold, which is ~72 F. The optimizer's entire
+        purpose is to visit temperatures that are not that: pre-cool to 70,
+        coast to 78. At 70 F indoor the envelope gain is larger, so net
+        cooling is genuinely slower than the table says.
+
+        Decomposing net = gross + drift, the gross HVAC forcing is
+        indoor-independent to first order; only the drift term moves with
+        indoor temp. Since ``passive_drift`` already applies
+        ``base - slope * (T_in - 72)``, the same term carries through to the
+        net rate unchanged:
+
+            net(T_in) = [net_table - drift_base] + [drift_base - k(T_in - 72)]
+                      = net_table - k(T_in - 72)
+
+        Note this is the *same* sign for heating and cooling, not mirrored:
+        a warmer house both cools faster and heats slower for the same reason.
+        Applying it here keeps the simulator's pre-cool cost and coast payback
+        mutually consistent, which they were not while drift was corrected and
+        the HVAC rates were not.
+        """
+        if indoor_temp is None:
+            return 0.0
+        slope = (self._resist_trendline or {}).get("slope", 0.03)
+        return slope * (indoor_temp - 72.0)
+
     def cooling_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of cooling runtime at given outdoor temp.
 
@@ -287,13 +356,12 @@ class PerformanceModel:
         -2.2°F/hr at 96°F. Most of that apparent 1.5x collapse is the growing
         envelope load, not lost compressor capacity.
 
-        The indoor_temp parameter is accepted for interface compatibility with
-        AdaptivePerformanceModel but ignored here -- empirical lookup tables
-        already bake in thermostat setpoint behavior.
+        When indoor_temp is given, the rate is corrected for running away from
+        the ~72 F the tables were recorded at. See ``_indoor_correction``.
         """
         return self._lookup_delta(
             self._cool_deltas, self._cool_trendline, outdoor_temp
-        )
+        ) - self._indoor_correction(indoor_temp)
 
     def heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of heating runtime at given outdoor temp.
@@ -304,20 +372,23 @@ class PerformanceModel:
 
         Like cooling_delta this is a NET rate; see gross_hvac_rate.
 
-        The indoor_temp parameter is accepted for interface compatibility with
-        AdaptivePerformanceModel but ignored here.
+        When indoor_temp is given, the rate is corrected for running away from
+        the ~72 F the tables were recorded at. See ``_indoor_correction``.
         """
         return self._lookup_delta(
             self._heat_deltas, self._heat_trendline, outdoor_temp
-        )
+        ) - self._indoor_correction(indoor_temp)
 
     def aux_heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
-        """Indoor °F change per hour of auxiliary (electric resistance) heat runtime."""
+        """Indoor °F change per hour of auxiliary (electric resistance) heat runtime.
+
+        Indoor-corrected like the other HVAC rates; see ``_indoor_correction``.
+        """
         if not self._aux_heat_deltas or not self._aux_heat_trendline:
             return 0.0
         return self._lookup_delta(
             self._aux_heat_deltas, self._aux_heat_trendline, outdoor_temp
-        )
+        ) - self._indoor_correction(indoor_temp)
 
     def passive_drift(
         self,
