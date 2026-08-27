@@ -139,3 +139,47 @@ set_constraint:
       default: "service_call"
       selector:
         text:
+
+start_ab_trial:
+  name: Start A/B Validation Trial
+  description: >-
+    Begin an A/B trial that alternates the optimizer on and off in fixed blocks
+    and compares the two populations of metered kWh per degree-day. This is the
+    only measurement that can confirm or refute the optimizer's savings claim,
+    because both arms are measured and neither depends on the thermal model.
+    During off blocks the optimizer stops writing setpoints and your thermostat
+    follows its own schedule.
+  fields:
+    period_days:
+      name: Block length
+      description: How many days the optimizer stays on, then off, before switching.
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 14
+          step: 1
+          unit_of_measurement: days
+    total_days:
+      name: Trial length
+      description: Total length of the trial. It ends automatically after this many days.
+      default: 28
+      selector:
+        number:
+          min: 2
+          max: 180
+          step: 1
+          unit_of_measurement: days
+
+stop_ab_trial:
+  name: Stop A/B Validation Trial
+  description: >-
+    End the running A/B trial early and resume normal optimization. Days already
+    collected are kept, so the result stays available.
+
+ab_trial_result:
+  name: A/B Trial Result
+  description: >-
+    Return the current standing of the A/B trial: mean kWh per degree-day for the
+    optimizer-on and optimizer-off populations, the difference, whether it clears
+    the noise, and the per-day detail behind it.

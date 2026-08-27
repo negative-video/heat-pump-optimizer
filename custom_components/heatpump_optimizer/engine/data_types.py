@@ -247,6 +247,10 @@ class HourlySavingsRecord:
     aux_heat_kwh: float = 0.0       # incremental resistive kWh above HP draw this hour
     avoided_aux_heat_kwh: float = 0.0  # kWh saved by not triggering aux vs baseline
 
+    # Provenance of actual_kwh: "measured" (power sensor), "estimated"
+    # (rated watts), "mixed", or "none" (no energy this hour)
+    energy_source: str = "none"
+
 
 @dataclass
 class DailySavingsReport:
@@ -303,6 +307,18 @@ class DailySavingsReport:
     def total_rate_arbitrage_savings(self) -> float | None:
         vals = [h.rate_arbitrage_savings for h in self.hours if h.rate_arbitrage_savings is not None]
         return sum(vals) if vals else None
+
+    @property
+    def energy_source(self) -> str:
+        """Provenance of the day's actual energy: measured, estimated, or mixed."""
+        sources = {h.energy_source for h in self.hours if h.energy_source != "none"}
+        if not sources:
+            return "none"
+        if sources == {"measured"}:
+            return "measured"
+        if sources == {"estimated"}:
+            return "estimated"
+        return "mixed"
 
     @property
     def total_aux_heat_kwh(self) -> float:

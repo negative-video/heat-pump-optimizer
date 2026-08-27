@@ -85,15 +85,16 @@ class TestServiceRegistration:
             "reset_model", "rebootstrap", "force_reoptimize", "pause", "resume",
             "set_occupancy", "demand_response", "export_model",
             "import_model", "set_constraint",
+            "start_ab_trial", "stop_ab_trial", "ab_trial_result",
         ]
         for name in expected:
             assert name in registered
-        assert len(registered) == 10
+        assert len(registered) == len(expected)
 
     def test_unload_removes_all(self, mock_hass):
         _run(services_mod.async_unload_services(mock_hass))
         removed = [a[0][1] for a in mock_hass.services.async_remove.call_args_list]
-        assert len(removed) == 10
+        assert len(removed) == 13
 
 
 # ── rebootstrap ──────────────────────────────────────────────────────

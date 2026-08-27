@@ -311,6 +311,11 @@ class DataBuilderMixin:
                 today_savings.total_saved_co2_grams
                 if self.savings_tracker.accuracy_tier != TIER_LEARNING else None
             ),
+            # ── Headline: measured vs weather-normalized baseline ──
+            # Metered kWh against a degree-day regression of the user's own
+            # optimizer-off days. No thermal model on either side.
+            **self._measured_savings_data(),
+
             "baseline_kwh_today": today_savings.total_baseline_kwh,
             "actual_kwh_today": today_savings.total_actual_kwh,
             "actual_kwh_cumulative": cumulative["kwh_actual"],
@@ -334,7 +339,13 @@ class DataBuilderMixin:
                 else None
             ),
 
-            # Counterfactual digital twin — decomposed savings
+            # Counterfactual digital twin — modeled attribution only.
+            # These explain where the optimizer thinks a difference came from.
+            # They are NOT evidence that it happened: the shadow house runs on
+            # the same thermal model as the optimizer being graded.
+            "modeled_attribution": self.savings_tracker.modeled_attribution(
+                today_savings
+            ),
             "runtime_savings_kwh_today": (
                 today_savings.total_runtime_savings_kwh
                 if self.savings_tracker.accuracy_tier != TIER_LEARNING else None

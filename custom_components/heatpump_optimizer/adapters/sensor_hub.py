@@ -1067,34 +1067,50 @@ class SensorHub:
             aux_heat_active: True if aux/emergency heat is detected (from
                 duct sensor, override entity, or thermostat attribute).
         """
+        return self.read_power_draw_source(
+            hvac_action=hvac_action, aux_heat_active=aux_heat_active
+        )[0]
+
+    def read_power_draw_source(
+        self,
+        hvac_action: str | None = None,
+        aux_heat_active: bool = False,
+    ) -> tuple[float | None, bool]:
+        """HVAC power draw plus whether it was measured.
+
+        Returns (watts, measured). `measured` is True only when a configured
+        power entity supplied the value, so energy accounting can distinguish
+        metered kWh from rated-watts estimation instead of silently mixing
+        them. See savings_tracker.record_interval(power_measured=...).
+        """
         if self._power_entity:
             value = self._read_entity(
                 self._power_entity, 0.0, 100000.0, "HVAC power"
             )
             if value is not None:
-                return value
+                return value, True
             # Entity configured but unavailable — fall through to estimation
             # If no fallback watts and no mode context, report unavailable
             if hvac_action is None and not self._power_default_watts:
-                return None
+                return None, False
 
         # Mode-aware estimation when hvac_action is provided
         if hvac_action is not None:
             if aux_heat_active or hvac_action in ("aux_heating", "emergency_heating"):
                 if self._aux_heat_kw:
-                    return self._aux_heat_kw * 1000.0
-                return self._power_default_watts  # no aux spec, use general default
+                    return self._aux_heat_kw * 1000.0, False
+                return self._power_default_watts, False  # no aux spec, general default
             if hvac_action == "cooling":
-                return self._cooling_watts
+                return self._cooling_watts, False
             if hvac_action == "heating":
-                return self._heating_watts
+                return self._heating_watts, False
             if hvac_action == "fan_only":
-                return float(DEFAULT_FAN_ONLY_WATTS)
+                return float(DEFAULT_FAN_ONLY_WATTS), False
             if hvac_action in ("idle", "off"):
-                return 0.0
+                return 0.0, False
 
         # Legacy fallback: no hvac_action provided or unrecognized action
-        return self._power_default_watts
+        return self._power_default_watts, False
 
     def read_co2_intensity(self) -> float | None:
         """CO2 grid intensity in gCO2/kWh."""

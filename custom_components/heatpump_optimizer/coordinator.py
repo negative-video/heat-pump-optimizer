@@ -196,8 +196,14 @@ from .engine.performance_model import PerformanceModel
 from .engine.thermal_simulator import ThermalSimulator
 from .engine.adaptive_performance_model import AdaptivePerformanceModel
 from .engine.counterfactual_simulator import CounterfactualSimulator
+from .learning.ab_trial import (
+    DEFAULT_PERIOD_DAYS as AB_TRIAL_DEFAULT_PERIOD_DAYS,
+    DEFAULT_TOTAL_DAYS as AB_TRIAL_DEFAULT_TOTAL_DAYS,
+    ABTrial,
+)
 from .learning.aux_heat_learner import AuxHeatLearner
 from .learning.baseline_capture import BaselineCapture
+from .learning.energy_baseline import EnergyBaseline
 from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
@@ -504,6 +510,8 @@ class HeatPumpOptimizerCoordinator(
             default_hp_watts=self._power_default_watts
         )
         self._cached_aux_heat_active: bool = False
+        # Whether the most recent power reading came from a real power sensor
+        self._power_is_measured: bool = False
 
         # Adapters (HA ↔ engine)
         self.thermostat = ThermostatAdapter(hass, climate_entity_id)
@@ -616,6 +624,13 @@ class HeatPumpOptimizerCoordinator(
             deadband=self._thermostat_deadband
         )
 
+        # Measured, weather-normalized savings (headline) and the A/B trial
+        # that can validate them. These deliberately do not depend on the
+        # thermal model.
+        self.energy_baseline = EnergyBaseline()
+        self.ab_trial = ABTrial()
+        self._link_energy_baseline()
+
         # Set rated HVAC capacity from user's tonnage config
         if self._hvac_tonnage:
             self.counterfactual.set_rated_capacity(
@@ -627,6 +642,8 @@ class HeatPumpOptimizerCoordinator(
         self._phase: str = PHASE_IDLE
         self._active: bool = True
         self._paused: bool = False
+        # True while the A/B trial (not the user) is holding the optimizer off
+        self._ab_trial_paused: bool = False
         self._cached_activation_tier: str | None = None  # Reset each update cycle
         self._last_learning_persist: datetime | None = None
         self._thermostat_was_unavailable: bool = False
@@ -991,6 +1008,25 @@ class HeatPumpOptimizerCoordinator(
             else:
                 ir.async_delete_issue(self.hass, DOMAIN, "door_window_sensor_unavailable")
 
+        # ── A/B validation trial scheduling ─────────────────────────
+        # Runs before the pause check so the trial can drive pause/resume,
+        # and so the off arm is actually reached.
+
+        try:
+            await self._apply_ab_trial_phase(now)
+        except (ValueError, TypeError, AttributeError):
+            _LOGGER.warning("A/B trial scheduling failed", exc_info=True)
+
+        # ── Weather-normalized energy baseline ──────────────────────
+        # Must run before the paused/override early returns: days when the
+        # optimizer is NOT controlling are exactly the baseline days the
+        # regression is fitted on.
+
+        try:
+            self._record_energy_baseline_interval(now, thermo_state)
+        except (ValueError, TypeError, ZeroDivisionError, AttributeError):
+            _LOGGER.warning("Energy baseline tracking failed", exc_info=True)
+
         # ── Watchdog checks ─────────────────────────────────────────
 
         # Override detection (skip in monitor mode — we never write setpoints)
@@ -1156,10 +1192,11 @@ class HeatPumpOptimizerCoordinator(
         self._cached_aux_heat_active = aux_heat_active
 
         hvac_action = getattr(thermo_state, "hvac_action", None) if thermo_state else None
-        power_watts = self.sensor_hub.read_power_draw(
+        power_watts, power_measured = self.sensor_hub.read_power_draw_source(
             hvac_action=hvac_action,
             aux_heat_active=aux_heat_active,
         )
+        self._power_is_measured = power_measured
         co2_intensity = self.sensor_hub.read_co2_intensity()
         elec_rate = self.sensor_hub.read_electricity_rate()
         solar_reading = self.sensor_hub.read_solar_production()
@@ -1239,6 +1276,7 @@ class HeatPumpOptimizerCoordinator(
                 actual_cop=actual_cop,
                 aux_heat_active=aux_heat_active,
                 hp_baseline_watts=self.aux_heat_learner.learned_hp_watts,
+                power_measured=power_measured,
             )
         except (ValueError, TypeError, ZeroDivisionError, KeyError):
             _LOGGER.warning("Savings tracking failed", exc_info=True)
@@ -1935,6 +1973,11 @@ class HeatPumpOptimizerCoordinator(
         )
         self._set_counterfactual_capacity()
 
+        # The weather-normalized energy baseline is deliberately NOT reset:
+        # it is metered history, not a learned thermal model, and throwing it
+        # away would be the one thing that makes savings unauditable again.
+        self._link_energy_baseline()
+
         # Reset learning flags
         self._confidence_threshold_reached = False
         self._last_model_alert = False
@@ -1997,6 +2040,154 @@ class HeatPumpOptimizerCoordinator(
     def set_occupancy(self, mode: OccupancyMode | None) -> None:
         """Set occupancy mode (service call)."""
         self.occupancy.force_mode(mode)
+
+    # ── Measured savings: baseline + A/B validation ─────────────────
+
+    def _link_energy_baseline(self) -> None:
+        """Wire the energy baseline into the savings tracker and A/B trial."""
+        self.savings_tracker.set_energy_baseline(self.energy_baseline)
+        self.energy_baseline.add_day_listener(self.ab_trial.record_day)
+
+    @property
+    def optimizer_is_controlling(self) -> bool:
+        """Whether the optimizer is actually writing setpoints right now.
+
+        This is what separates a baseline day from an optimized day, so it is
+        derived from real control state rather than from configuration.
+        """
+        return bool(
+            self._active
+            and not self._paused
+            and not self._monitor_only
+            and not self.watchdog.is_override_active
+        )
+
+    def _record_energy_baseline_interval(self, now: datetime, thermo_state: Any) -> None:
+        """Feed one cycle of metered energy and weather to the baseline."""
+        hvac_action = getattr(thermo_state, "hvac_action", None) if thermo_state else None
+        power_watts, power_measured = self.sensor_hub.read_power_draw_source(
+            hvac_action=hvac_action,
+            aux_heat_active=self._cached_aux_heat_active,
+        )
+        outdoor_reading = self.sensor_hub.read_outdoor_temp(
+            forecast_snapshot=self.strategic.forecast_snapshot
+        )
+        self.energy_baseline.record_interval(
+            now=dt_util.as_local(now),
+            interval_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+            power_watts=power_watts,
+            outdoor_temp=outdoor_reading.value if outdoor_reading else None,
+            optimizer_active=self.optimizer_is_controlling,
+            power_measured=power_measured,
+        )
+
+    async def _apply_ab_trial_phase(self, now: datetime) -> None:
+        """Hold the optimizer on or off according to the active A/B trial."""
+        local_now = dt_util.as_local(now)
+        if self.ab_trial.check_expiry(local_now):
+            if self._ab_trial_paused:
+                self._ab_trial_paused = False
+                await self.async_resume()
+            return
+
+        if self._monitor_only:
+            return
+
+        action = self.ab_trial.pause_action(
+            local_now,
+            currently_paused=self._paused,
+            trial_paused=self._ab_trial_paused,
+        )
+        if action == "pause":
+            _LOGGER.info("A/B trial: entering optimizer-off block")
+            self._ab_trial_paused = True
+            self.pause()
+        elif action == "resume":
+            _LOGGER.info("A/B trial: entering optimizer-on block")
+            self._ab_trial_paused = False
+            await self.async_resume()
+
+    async def async_start_ab_trial(
+        self,
+        period_days: int = AB_TRIAL_DEFAULT_PERIOD_DAYS,
+        total_days: int = AB_TRIAL_DEFAULT_TOTAL_DAYS,
+    ) -> dict[str, Any]:
+        """Start an A/B validation trial (service call)."""
+        self.ab_trial.start(
+            dt_util.as_local(dt_util.utcnow()),
+            period_days=period_days,
+            total_days=total_days,
+        )
+        await self._apply_ab_trial_phase(dt_util.utcnow())
+        await self._persist_state()
+        return self.ab_trial.result()
+
+    async def async_stop_ab_trial(self) -> dict[str, Any]:
+        """Stop the A/B validation trial and resume normal operation."""
+        self.ab_trial.stop()
+        if self._ab_trial_paused:
+            self._ab_trial_paused = False
+            await self.async_resume()
+        await self._persist_state()
+        return self.ab_trial.result()
+
+    def _measured_savings_data(self) -> dict[str, Any]:
+        """Sensor payload for the measured, weather-normalized savings.
+
+        Every value is None until the baseline regression has enough
+        optimizer-off days. Reporting nothing is the correct answer while the
+        honest answer is unknown.
+        """
+        today = self.savings_tracker.measured_savings_today()
+        window = self.savings_tracker.measured_savings_window(days=30)
+        fit = self.energy_baseline.fit()
+        diagnostics = self.energy_baseline.diagnostics()
+        trial = self.ab_trial.result()
+
+        return {
+            "measured_savings_kwh_today": (
+                round(today["saved_kwh"], 3) if today else None
+            ),
+            "measured_savings_kwh_30d": (
+                round(window["saved_kwh"], 2) if window else None
+            ),
+            "measured_savings_pct_30d": (
+                round(window["saved_pct"], 1)
+                if window and window["saved_pct"] is not None
+                else None
+            ),
+            "measured_baseline_kwh_today": (
+                round(today["baseline_kwh"], 3) if today else None
+            ),
+            "measured_actual_kwh_today": (
+                round(today["actual_kwh"], 3) if today else None
+            ),
+            "measured_savings_uncertainty_kwh": (
+                round(window["uncertainty_kwh"], 2)
+                if window and window["uncertainty_kwh"] is not None
+                else None
+            ),
+            "measured_savings_window_days": window["days"] if window else 0,
+            "energy_baseline_source": fit.source,
+            "energy_baseline_kwh_per_cdd": round(fit.kwh_per_cdd, 4),
+            "energy_baseline_kwh_per_hdd": round(fit.kwh_per_hdd, 4),
+            "energy_baseline_days": diagnostics["baseline_days"],
+            "energy_baseline_optimized_days": diagnostics["optimized_days"],
+            "energy_baseline_days_remaining": diagnostics["days_until_measured_fit"],
+            "energy_source": (
+                "measured" if self._power_is_measured else "estimated"
+            ),
+            "ab_trial": trial,
+            "ab_trial_active": trial["active"],
+            "ab_trial_phase": self.ab_trial.current_phase(dt_util.now()),
+        }
+
+    def ab_trial_result(self) -> dict[str, Any]:
+        """Current A/B trial standing plus per-day detail (service call)."""
+        result = self.ab_trial.result()
+        result["days"] = self.ab_trial.days()
+        result["baseline"] = self.energy_baseline.diagnostics()
+        return result
 
     # ── Thermostat profile control ──────────────────────────────────
 

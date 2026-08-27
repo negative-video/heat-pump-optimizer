@@ -1,11 +1,28 @@
 """Savings tracker — accumulates kWh, $, and CO2 savings over time.
 
-Compares actual HVAC runtime against counterfactual baselines:
-  1. Counterfactual digital twin: simulates the user's old thermostat schedule
-     against actual weather, capturing runtime reduction, COP improvement,
-     and rate/carbon arbitrage savings.
-  2. Worst case: HVAC always on (60 min/hr) — the theoretical ceiling.
-  3. Legacy ratio-based: fallback when counterfactual data isn't available yet.
+Energy is integrated from the HVAC power sensor interval by interval, so
+`actual_kwh` is metered energy whenever a power entity is configured and
+available.  Every record carries an `energy_source` label saying whether the
+number came from a meter, from rated-watts estimation, or from a mix, because
+"2.4 kWh" from a CT clamp and "2.4 kWh" from tonnage-times-SEER deserve very
+different amounts of trust.
+
+Two different baselines are reported, and they are not interchangeable:
+
+  1. **Weather-normalized baseline (headline).**  Metered kWh compared against
+     a degree-day regression learned from the user's own days when the
+     optimizer was not controlling.  Both sides are measured; the only model is
+     a two-slope line.  See learning/energy_baseline.py.
+  2. **Counterfactual digital twin (modeled attribution).**  Simulates the
+     user's old thermostat schedule against actual weather and decomposes the
+     difference into runtime, COP, and rate components.  This is useful for
+     answering "why", but it shares a performance model with the optimizer it
+     is grading, so its errors can cancel or compound invisibly.  It is
+     reported as modeled attribution with an uncertainty label, never as the
+     headline number.
+
+Also tracked: worst case (HVAC always on, 60 min/hr) as a theoretical ceiling,
+and a legacy runtime-ratio fallback for before the counterfactual has data.
 
 Tracks per-hour records, produces daily reports, and maintains cumulative totals
 that survive HA restarts via Store persistence.
@@ -20,6 +37,7 @@ from typing import Any
 
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .engine.data_types import BaselineHourResult, DailySavingsReport, HourlySavingsRecord
+from .learning.energy_baseline import EnergyBaseline
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +50,16 @@ TIER_PROJECTED = "projected"
 TIER_ESTIMATED = "estimated"
 TIER_SIMULATED = "simulated"
 TIER_CALIBRATED = "calibrated"
+
+# Where an hour's energy number came from
+ENERGY_SOURCE_MEASURED = "measured"
+ENERGY_SOURCE_ESTIMATED = "estimated"
+ENERGY_SOURCE_MIXED = "mixed"
+ENERGY_SOURCE_NONE = "none"
+
+# Fraction of an hour's energy that must come from a real sensor before the
+# hour is called measured rather than mixed.
+MEASURED_ENERGY_THRESHOLD = 0.99
 
 
 class SavingsTracker:
@@ -63,7 +91,12 @@ class SavingsTracker:
         # Intra-hour accumulator (5-min intervals within the current hour)
         self._current_hour: int | None = None  # hour key (Unix timestamp // 3600)
         self._hour_actual_runtime_min: float = 0.0
-        self._hour_power_readings: list[float] = []
+        # True energy integration: sum of power x interval over the hour,
+        # tracked separately from runtime so the number is metered rather
+        # than reconstructed from runtime x rated watts.
+        self._hour_energy_kwh: float = 0.0
+        self._hour_measured_energy_kwh: float = 0.0
+        self._hour_powered_minutes: float = 0.0
         self._hour_co2_readings: list[float] = []
         self._hour_rate_readings: list[float] = []
         self._hour_cop_readings: list[float] = []
@@ -75,6 +108,11 @@ class SavingsTracker:
         # Counterfactual simulator reference (set by coordinator)
         self._counterfactual: CounterfactualSimulator | None = None
 
+        # Weather-normalized measured baseline (set by coordinator).
+        # This owns the headline savings number; the counterfactual above is
+        # demoted to modeled attribution.
+        self._energy_baseline: EnergyBaseline | None = None
+
         # Legacy fallback ratio (used when counterfactual not yet available)
         self._baseline_to_optimized_ratio: float = 1.0
 
@@ -84,6 +122,10 @@ class SavingsTracker:
     def set_counterfactual(self, simulator: CounterfactualSimulator) -> None:
         """Set the counterfactual simulator reference."""
         self._counterfactual = simulator
+
+    def set_energy_baseline(self, baseline: EnergyBaseline) -> None:
+        """Set the weather-normalized measured baseline reference."""
+        self._energy_baseline = baseline
 
     def set_accuracy_tier(self, tier: str) -> None:
         """Update the current accuracy tier."""
@@ -130,12 +172,18 @@ class SavingsTracker:
         actual_cop: float | None = None,
         aux_heat_active: bool = False,
         hp_baseline_watts: float = 0.0,
+        power_measured: bool = False,
     ) -> None:
         """Record a single update interval (typically 5 minutes).
 
         Called every coordinator update cycle. Accumulates data within the
         current hour, and finalizes the previous hour when the hour boundary
         is crossed.
+
+        Args:
+            power_measured: True when power_watts came from a configured power
+                sensor rather than a rated-watts estimate. Drives the
+                energy_source label on the resulting hourly record.
         """
         hour_key = int(now.timestamp()) // 3600
 
@@ -147,7 +195,9 @@ class SavingsTracker:
         if self._current_hour is None or hour_key != self._current_hour:
             self._current_hour = hour_key
             self._hour_actual_runtime_min = 0.0
-            self._hour_power_readings = []
+            self._hour_energy_kwh = 0.0
+            self._hour_measured_energy_kwh = 0.0
+            self._hour_powered_minutes = 0.0
             self._hour_co2_readings = []
             self._hour_rate_readings = []
             self._hour_cop_readings = []
@@ -160,7 +210,13 @@ class SavingsTracker:
         if hvac_running:
             self._hour_actual_runtime_min += interval_minutes
             if power_watts is not None:
-                self._hour_power_readings.append(power_watts)
+                # Integrate energy directly rather than reconstructing it from
+                # runtime x a single average at the end of the hour.
+                interval_kwh = power_watts * (interval_minutes / 60.0) / 1000.0
+                self._hour_energy_kwh += interval_kwh
+                self._hour_powered_minutes += interval_minutes
+                if power_measured:
+                    self._hour_measured_energy_kwh += interval_kwh
             if carbon_intensity is not None:
                 self._hour_co2_readings.append(carbon_intensity)
             if electricity_rate is not None:
@@ -205,10 +261,11 @@ class SavingsTracker:
         actual_min = self._hour_actual_runtime_min
         worst_case_min = 60.0
 
-        # Average actual power draw for this hour
+        # Average power while running, derived from the integrated energy so
+        # that it stays consistent with the metered total.
         avg_power = (
-            sum(self._hour_power_readings) / len(self._hour_power_readings)
-            if self._hour_power_readings
+            self._hour_energy_kwh * 1000.0 / (self._hour_powered_minutes / 60.0)
+            if self._hour_powered_minutes > 0
             else 0.0
         )
 
@@ -219,9 +276,26 @@ class SavingsTracker:
             else None
         )
 
-        # Actual energy
-        actual_kwh = (actual_min / 60.0) * (avg_power / 1000.0)
+        # Actual energy: the integrated total when every running interval had a
+        # power reading, extended at the observed average when some intervals
+        # were missing one.
+        if self._hour_powered_minutes >= actual_min or self._hour_powered_minutes <= 0:
+            actual_kwh = self._hour_energy_kwh
+        else:
+            actual_kwh = (actual_min / 60.0) * (avg_power / 1000.0)
         worst_case_kwh = (worst_case_min / 60.0) * (avg_power / 1000.0)
+
+        # Where the energy number came from
+        if self._hour_energy_kwh <= 0:
+            energy_source = ENERGY_SOURCE_NONE
+        else:
+            measured_fraction = self._hour_measured_energy_kwh / self._hour_energy_kwh
+            if measured_fraction >= MEASURED_ENERGY_THRESHOLD:
+                energy_source = ENERGY_SOURCE_MEASURED
+            elif measured_fraction > 0:
+                energy_source = ENERGY_SOURCE_MIXED
+            else:
+                energy_source = ENERGY_SOURCE_ESTIMATED
 
         # Solar offset
         solar_offset_kwh = self._hour_solar_offset_kwh
@@ -343,6 +417,7 @@ class SavingsTracker:
             rate_arbitrage_savings=rate_arbitrage,
             aux_heat_kwh=aux_heat_kwh,
             avoided_aux_heat_kwh=avoided_aux_kwh,
+            energy_source=energy_source,
         )
 
         self._hourly_records.append(record)
@@ -399,6 +474,54 @@ class SavingsTracker:
             if r.hour.strftime("%Y-%m-%d") == today_str
         ]
         return DailySavingsReport(date=today_str, hours=today_hours)
+
+    # ── Headline: measured vs weather-normalized baseline ────────────
+
+    def measured_savings_today(self) -> dict[str, Any] | None:
+        """Running metered-vs-baseline comparison for the current day.
+
+        Returns None when no weather-normalized baseline has been learned yet,
+        rather than falling back to a modeled number. A missing headline is
+        more useful than a confident wrong one.
+        """
+        if self._energy_baseline is None:
+            return None
+        return self._energy_baseline.today_estimate()
+
+    def measured_savings_window(self, days: int = 30) -> dict[str, Any] | None:
+        """Metered-vs-baseline over recent whole days.
+
+        Whole completed days only, so there is no partial-day extrapolation.
+        This is the number to trust.
+        """
+        if self._energy_baseline is None:
+            return None
+        return self._energy_baseline.window_summary(days=days)
+
+    def modeled_attribution(self, report: DailySavingsReport) -> dict[str, Any]:
+        """Digital-twin decomposition, explicitly labelled as modeled.
+
+        These components explain where the optimizer *thinks* the difference
+        came from. They are produced by simulating the old schedule with the
+        same performance model that drives the optimizer, so they inherit its
+        errors and are not independent evidence of savings. Use them to answer
+        "why", never "how much".
+        """
+        return {
+            "method": "counterfactual digital twin",
+            "confidence": "modeled, not measured",
+            "uncertainty": (
+                "Simulated with the same thermal model the optimizer uses, so "
+                "these components cannot confirm the savings they describe. "
+                "Check the weather-normalized measured savings instead."
+            ),
+            "runtime_component_kwh": report.total_runtime_savings_kwh,
+            "modeled_cop_effect_kwh": report.total_cop_savings_kwh,
+            "rate_arbitrage_component": report.total_rate_arbitrage_savings,
+            "baseline_kwh": report.total_baseline_kwh,
+            "actual_kwh": report.total_actual_kwh,
+            "energy_source": report.energy_source,
+        }
 
     def cumulative_totals(self) -> dict[str, float]:
         """Get all-time cumulative savings totals."""

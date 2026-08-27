@@ -27,6 +27,8 @@ from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
 from .learning.thermal_estimator import ThermalEstimator
 from .savings_tracker import SavingsTracker
+from .learning.energy_baseline import EnergyBaseline
+from .learning.ab_trial import ABTrial
 
 if TYPE_CHECKING:
     pass
@@ -72,6 +74,9 @@ class PersistenceMixin:
             "solar_adjuster": self.solar_adjuster.to_dict(),
             "override_tracker": self.override_tracker.to_dict(),
             "savings_tracker": self.savings_tracker.to_dict(),
+            "energy_baseline": self.energy_baseline.to_dict(),
+            "ab_trial": self.ab_trial.to_dict(),
+            "ab_trial_paused": self._ab_trial_paused,
             "thermal_estimator": self.estimator.to_dict(),
             "baseline_capture": self.baseline_capture.to_dict(),
             "counterfactual": self.counterfactual.to_dict(),
@@ -150,6 +155,27 @@ class PersistenceMixin:
             except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore savings tracker — using fresh state",
                                 exc_info=True)
+        if "energy_baseline" in stored:
+            try:
+                self.energy_baseline = EnergyBaseline.from_dict(stored["energy_baseline"])
+                _LOGGER.debug(
+                    "Restored energy baseline (%d days, source=%s)",
+                    len(self.energy_baseline.days),
+                    self.energy_baseline.fit().source,
+                )
+            except (KeyError, ValueError, TypeError, AttributeError):
+                _LOGGER.warning("Failed to restore energy baseline — using fresh state",
+                                exc_info=True)
+        if "ab_trial" in stored:
+            try:
+                self.ab_trial = ABTrial.from_dict(stored["ab_trial"])
+                _LOGGER.debug("Restored A/B trial (active=%s)", self.ab_trial.is_active)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                _LOGGER.warning("Failed to restore A/B trial — using fresh state",
+                                exc_info=True)
+        self._ab_trial_paused = bool(stored.get("ab_trial_paused", False))
+        # Re-link after any of the three objects above may have been replaced
+        self._link_energy_baseline()
         if "coefficient_store" in stored:
             try:
                 self.coeff_store = CoefficientStore.from_dict(stored["coefficient_store"])
