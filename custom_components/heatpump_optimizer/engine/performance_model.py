@@ -103,12 +103,8 @@ class PerformanceModel:
         # energy ranking degrades gracefully to gross-rate ranking, which is
         # still far better than net-rate ranking.
         power = profile_data.get("power", {}) or {}
-        self.rated_power_watts: float = float(
-            power.get("rated_watts", DEFAULT_HVAC_POWER_WATTS)
-        )
-        self.aux_power_watts: float = float(
-            power.get("aux_watts", DEFAULT_AUX_POWER_WATTS)
-        )
+        self.rated_power_watts: float = float(power.get("rated_watts", DEFAULT_HVAC_POWER_WATTS))
+        self.aux_power_watts: float = float(power.get("aux_watts", DEFAULT_AUX_POWER_WATTS))
         self._power_by_temp: dict[str, dict[int, float]] = {}
 
     @classmethod
@@ -338,9 +334,9 @@ class PerformanceModel:
         When indoor_temp is given, the rate is corrected for running away from
         the ~72 F the tables were recorded at. See ``_indoor_correction``.
         """
-        return self._lookup_delta(
-            self._cool_deltas, self._cool_trendline, outdoor_temp
-        ) - self._indoor_correction(indoor_temp, "cool_1", outdoor_temp)
+        return self._lookup_delta(self._cool_deltas, self._cool_trendline, outdoor_temp) - self._indoor_correction(
+            indoor_temp, "cool_1", outdoor_temp
+        )
 
     def heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of heating runtime at given outdoor temp.
@@ -354,9 +350,9 @@ class PerformanceModel:
         When indoor_temp is given, the rate is corrected for running away from
         the ~72 F the tables were recorded at. See ``_indoor_correction``.
         """
-        return self._lookup_delta(
-            self._heat_deltas, self._heat_trendline, outdoor_temp
-        ) - self._indoor_correction(indoor_temp, "heat_1", outdoor_temp)
+        return self._lookup_delta(self._heat_deltas, self._heat_trendline, outdoor_temp) - self._indoor_correction(
+            indoor_temp, "heat_1", outdoor_temp
+        )
 
     def aux_heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of auxiliary (electric resistance) heat runtime.
@@ -399,9 +395,7 @@ class PerformanceModel:
         if solar_condition and solar_condition in self._solar_resist_trendlines:
             base = trendline["slope"] * outdoor_temp + trendline["intercept"]
         else:
-            base = self._lookup_delta(
-                self._resist_deltas, self._resist_trendline, outdoor_temp
-            )
+            base = self._lookup_delta(self._resist_deltas, self._resist_trendline, outdoor_temp)
 
         if indoor_temp is None:
             return base

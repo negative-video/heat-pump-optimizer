@@ -91,8 +91,8 @@ COMFORT_BAND_MIN_WIDTH_F = 2.0
 # Fraction shrunk from EACH side per activation tier. These used to be
 # scattered across three modules and compounded silently.
 TIER_NARROWING = {
-    "learning": 0.20,       # inner 60%
-    "conservative": 0.10,   # inner 80%
+    "learning": 0.20,  # inner 60%
+    "conservative": 0.10,  # inner 80%
     "standard": 0.0,
     "confident": 0.0,
 }

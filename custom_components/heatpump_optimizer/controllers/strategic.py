@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 
 from ..adapters.occupancy import (
     AWAY_COMFORT_DELTA,
@@ -101,7 +102,7 @@ class StrategicPlanner:
         if force:
             return True
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Never optimized
         if self._last_optimization_time is None:
@@ -125,7 +126,8 @@ class StrategicPlanner:
             if new_mode != self._current_mode and new_mode != "off":
                 _LOGGER.debug(
                     "Re-optimize: mode conflict detected (current=%s, forecast suggests=%s)",
-                    self._current_mode, new_mode,
+                    self._current_mode,
+                    new_mode,
                 )
                 return True
 
@@ -174,7 +176,7 @@ class StrategicPlanner:
             _LOGGER.warning("No forecast data — cannot optimize")
             return None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Determine mode
         mode = self.detect_mode(forecast)
@@ -202,8 +204,12 @@ class StrategicPlanner:
                 heat_base = self._apply_humidity_correction(comfort_heat, humidity, mode)
 
         bands = self._build_hour_bands(
-            forecast, cool_base, heat_base, occupancy_timeline,
-            current_occupancy, now,
+            forecast,
+            cool_base,
+            heat_base,
+            occupancy_timeline,
+            current_occupancy,
+            now,
         )
 
         # Check for shoulder day (needs both heat and cool). A mild day is
@@ -216,21 +222,29 @@ class StrategicPlanner:
         if mode == "heat" or is_shoulder:
             try:
                 self._plan_morning_recovery(
-                    bands, forecast, indoor_temp, heat_base, mode, is_shoulder, now,
+                    bands,
+                    forecast,
+                    indoor_temp,
+                    heat_base,
+                    mode,
+                    is_shoulder,
+                    now,
                 )
             except Exception:  # noqa: BLE001 - never let this block a plan
                 _LOGGER.warning("Morning recovery planning failed", exc_info=True)
 
         self._hour_bands = bands
         current_band = self._band_for(now, bands)
-        comfort = (
-            current_band[mode] if current_band is not None
-            else (cool_base if mode == "cool" else heat_base)
-        )
+        comfort = current_band[mode] if current_band is not None else (cool_base if mode == "cool" else heat_base)
 
         if is_shoulder:
             shoulder = self._build_shoulder_schedule(
-                indoor_temp, forecast, cool_base, heat_base, mode, bands=bands,
+                indoor_temp,
+                forecast,
+                cool_base,
+                heat_base,
+                mode,
+                bands=bands,
             )
             if shoulder is not None:
                 for pt in forecast:
@@ -242,11 +256,9 @@ class StrategicPlanner:
                 self._current_schedule = shoulder
                 self._current_mode = mode
                 self._last_forecast_snapshot = list(forecast)
-                self._last_optimization_time = datetime.now(timezone.utc)
+                self._last_optimization_time = datetime.now(UTC)
                 if occupancy_timeline is not None:
-                    self._last_occupancy_hash = self._hash_occupancy_timeline(
-                        occupancy_timeline
-                    )
+                    self._last_occupancy_hash = self._hash_occupancy_timeline(occupancy_timeline)
                 return shoulder
             _LOGGER.info(
                 "Shoulder day, but the dual-setpoint plan leaves the comfort "
@@ -262,9 +274,7 @@ class StrategicPlanner:
 
         # Run optimizer
         try:
-            schedule = self.optimizer.optimize_setpoints(
-                indoor_temp, forecast, comfort, mode, weights=weights
-            )
+            schedule = self.optimizer.optimize_setpoints(indoor_temp, forecast, comfort, mode, weights=weights)
         except Exception:
             _LOGGER.error("Optimization failed", exc_info=True)
             return None
@@ -273,15 +283,12 @@ class StrategicPlanner:
         self._current_schedule = schedule
         self._current_mode = mode
         self._last_forecast_snapshot = list(forecast)
-        self._last_optimization_time = datetime.now(timezone.utc)
+        self._last_optimization_time = datetime.now(UTC)
         if occupancy_timeline is not None:
-            self._last_occupancy_hash = self._hash_occupancy_timeline(
-                occupancy_timeline
-            )
+            self._last_occupancy_hash = self._hash_occupancy_timeline(occupancy_timeline)
 
         _LOGGER.info(
-            "Optimization complete [%s]: baseline=%.1f min, optimized=%.1f min, "
-            "savings=%.1f%%, violations=%d",
+            "Optimization complete [%s]: baseline=%.1f min, optimized=%.1f min, savings=%.1f%%, violations=%d",
             mode,
             schedule.baseline_runtime_minutes,
             schedule.optimized_runtime_minutes,
@@ -328,9 +335,7 @@ class StrategicPlanner:
             cool_ceiling = midpoint + COMFORT_BAND_MIN_WIDTH_F / 2
 
         planner = self.optimizer.planner
-        hour_keys = sorted({
-            pt.time.replace(minute=0, second=0, microsecond=0) for pt in forecast
-        })
+        hour_keys = sorted({pt.time.replace(minute=0, second=0, microsecond=0) for pt in forecast})
         if not hour_keys:
             return None
 
@@ -344,7 +349,11 @@ class StrategicPlanner:
                 heat_floor, cool_ceiling = first
 
         entries = planner.build_dual_setpoint_schedule(
-            hour_keys, forecast, heat_floor, cool_ceiling, mode,
+            hour_keys,
+            forecast,
+            heat_floor,
+            cool_ceiling,
+            mode,
             per_hour_bounds=setpoints,
         )
         candidate = planner.evaluate(
@@ -360,10 +369,11 @@ class StrategicPlanner:
             return None
 
         _LOGGER.info(
-            "Shoulder day: dual setpoint heat %.1fF / cool %.1fF, flat "
-            "(%.1f min runtime, %.2f kWh)",
-            heat_floor, cool_ceiling,
-            candidate.runtime_minutes, candidate.energy_kwh,
+            "Shoulder day: dual setpoint heat %.1fF / cool %.1fF, flat (%.1f min runtime, %.2f kWh)",
+            heat_floor,
+            cool_ceiling,
+            candidate.runtime_minutes,
+            candidate.energy_kwh,
         )
 
         return OptimizedSchedule(
@@ -406,7 +416,8 @@ class StrategicPlanner:
         bp = self.resist_balance_point
         if bp < 20 or bp > 90:
             _LOGGER.warning(
-                "Balance point %.1f°F out of range, using default 50°F", bp,
+                "Balance point %.1f°F out of range, using default 50°F",
+                bp,
             )
             bp = 50.0
 
@@ -505,7 +516,7 @@ class StrategicPlanner:
         threshold_f: float,
     ) -> bool:
         """Check if new forecast deviates significantly from the snapshot."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         lookahead = now + timedelta(hours=6)
 
         old_by_hour: dict[int, float] = {}
@@ -535,7 +546,9 @@ class StrategicPlanner:
         for pt in forecast:
             occ_mode = self._lookup_occupancy_at(pt.time, timeline)
             adjusted = OccupancyAdapter.adjust_comfort_for_mode(
-                base_comfort, mode, occ_mode,
+                base_comfort,
+                mode,
+                occ_mode,
                 away_delta=self.away_comfort_delta,
                 safety_limits=self.safety_limits,
             )
@@ -546,9 +559,7 @@ class StrategicPlanner:
                 and occ_mode == OccupancyMode.HOME
                 and self._is_in_sleep_window(pt.time, self.sleep_config)
             ):
-                sleep_comfort = self.sleep_config.get(
-                    "comfort_cool" if mode == "cool" else "comfort_heat"
-                )
+                sleep_comfort = self.sleep_config.get("comfort_cool" if mode == "cool" else "comfort_heat")
                 if sleep_comfort:
                     adjusted = sleep_comfort
             pt.comfort_min = adjusted[0]
@@ -609,12 +620,16 @@ class StrategicPlanner:
                 occ = OccupancyMode.HOME
 
             heat = OccupancyAdapter.adjust_comfort_for_mode(
-                comfort_heat, "heat", occ,
+                comfort_heat,
+                "heat",
+                occ,
                 away_delta=self.away_comfort_delta,
                 safety_limits=self.safety_limits,
             )
             cool = OccupancyAdapter.adjust_comfort_for_mode(
-                comfort_cool, "cool", occ,
+                comfort_cool,
+                "cool",
+                occ,
                 away_delta=self.away_comfort_delta,
                 safety_limits=self.safety_limits,
             )
@@ -689,6 +704,7 @@ class StrategicPlanner:
     def _to_local(time: datetime) -> datetime:
         try:
             from homeassistant.util import dt as dt_util
+
             return dt_util.as_local(time)
         except ImportError:
             return time.astimezone()
@@ -753,28 +769,38 @@ class StrategicPlanner:
                 start = wait_for_warmth_start(window, config)
             else:
                 start = self._search_warm_by_start(
-                    window, config, bands, forecast, indoor_temp, mode, dual, now_hour,
+                    window,
+                    config,
+                    bands,
+                    forecast,
+                    indoor_temp,
+                    mode,
+                    dual,
+                    now_hour,
                 )
             self._recovery_starts[window.key] = start
             self._apply_recovery(bands, window, config, start)
-            self._recovery_plan.append({
-                "mode": config.mode,
-                "target_time": window.deadline.isoformat(),
-                "recovery_start": start.isoformat(),
-                "night_floor": window.night_floor,
-                "day_floor": window.day_floor,
-            })
+            self._recovery_plan.append(
+                {
+                    "mode": config.mode,
+                    "target_time": window.deadline.isoformat(),
+                    "recovery_start": start.isoformat(),
+                    "night_floor": window.night_floor,
+                    "day_floor": window.day_floor,
+                }
+            )
             _LOGGER.debug(
                 "Morning recovery [%s]: target %s, start %s (%.1f -> %.1f F)",
-                config.mode, window.deadline.isoformat(), start.isoformat(),
-                window.night_floor, window.day_floor,
+                config.mode,
+                window.deadline.isoformat(),
+                start.isoformat(),
+                window.night_floor,
+                window.day_floor,
             )
 
         # Forget mornings that are over
         cutoff = (now - timedelta(hours=12)).isoformat()
-        self._recovery_starts = {
-            key: value for key, value in self._recovery_starts.items() if key >= cutoff
-        }
+        self._recovery_starts = {key: value for key, value in self._recovery_starts.items() if key >= cutoff}
 
     @staticmethod
     def _apply_recovery(
@@ -822,15 +848,22 @@ class StrategicPlanner:
             per_hour = self._dual_bounds(bands, setpoints=True)
             floor, ceiling = per_hour[hour_keys[0]]
             return planner.build_dual_setpoint_schedule(
-                hour_keys, forecast, floor, ceiling, mode, per_hour_bounds=per_hour,
+                hour_keys,
+                forecast,
+                floor,
+                ceiling,
+                mode,
+                per_hour_bounds=per_hour,
             )
         per_hour = {hour: band["heat"] for hour, band in bands.items()}
-        targets = {
-            hour: band["heat_target"] for hour, band in bands.items()
-            if band.get("heat_target") is not None
-        }
+        targets = {hour: band["heat_target"] for hour, band in bands.items() if band.get("heat_target") is not None}
         return planner.build_flat_schedule(
-            hour_keys, forecast, per_hour[hour_keys[0]], "heat", per_hour, targets,
+            hour_keys,
+            forecast,
+            per_hour[hour_keys[0]],
+            "heat",
+            per_hour,
+            targets,
         )
 
     def _search_warm_by_start(
@@ -874,7 +907,9 @@ class StrategicPlanner:
         # Nothing arrives on time: start as early as allowed and say so.
         _LOGGER.info(
             "Morning recovery cannot reach %.1fF by %s; starting at %s",
-            window.day_floor, window.deadline.isoformat(), earliest.isoformat(),
+            window.day_floor,
+            window.deadline.isoformat(),
+            earliest.isoformat(),
         )
         return earliest
 
@@ -925,6 +960,7 @@ class StrategicPlanner:
 
         try:
             from homeassistant.util import dt as dt_util
+
             local_time = dt_util.as_local(time).time()
         except ImportError:
             local_time = time.astimezone().time()
@@ -960,9 +996,7 @@ class StrategicPlanner:
         """Produce a simple hash to detect timeline changes."""
         parts = []
         for seg in timeline:
-            parts.append(
-                f"{seg.start_time.isoformat()}:{seg.end_time.isoformat()}:{seg.mode}"
-            )
+            parts.append(f"{seg.start_time.isoformat()}:{seg.end_time.isoformat()}:{seg.mode}")
         return "|".join(parts)
 
     @property

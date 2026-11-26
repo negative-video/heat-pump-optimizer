@@ -10,7 +10,7 @@ Supports multiple occupancy sources:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 
 from homeassistant.core import HomeAssistant
@@ -59,9 +59,7 @@ class OccupancyAdapter:
         self._forced_mode: OccupancyMode | None = None
         self._last_active: dict[str, datetime] = {}
         # Extra person entity states that count as "home" (e.g., zone names)
-        self._home_zone_states = [
-            s.lower().strip() for s in (home_zone_states or [])
-        ]
+        self._home_zone_states = [s.lower().strip() for s in (home_zone_states or [])]
 
     def get_people_home_count(self) -> int:
         """Count the number of tracked entities currently in HOME state.
@@ -121,9 +119,7 @@ class OccupancyAdapter:
         Returns:
             Adjusted (min, max) comfort range.
         """
-        return self.adjust_comfort_for_mode(
-            comfort, mode, self.get_mode(), away_delta=self.away_comfort_delta
-        )
+        return self.adjust_comfort_for_mode(comfort, mode, self.get_mode(), away_delta=self.away_comfort_delta)
 
     @staticmethod
     def adjust_comfort_for_mode(
@@ -204,7 +200,7 @@ class OccupancyAdapter:
 
         # Calendar check: look up current time in the timeline
         if calendar_timeline:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for point in calendar_timeline:
                 if point.start_time <= now < point.end_time:
                     mode_str = point.mode.lower()
@@ -225,7 +221,7 @@ class OccupancyAdapter:
         if not self.entity_ids:
             return OccupancyMode.HOME
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         any_home = False
         any_vacation = False
 
@@ -244,7 +240,7 @@ class OccupancyAdapter:
 
         # Check debounce: recently-active entities count as home
         if not any_home:
-            for eid, last in self._last_active.items():
+            for last in self._last_active.values():
                 elapsed = (now - last).total_seconds() / 60.0
                 if elapsed < self.debounce_minutes:
                     any_home = True

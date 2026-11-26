@@ -97,14 +97,10 @@ class ThermalSimulator:
                 active_mode = "off"
                 rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
             else:
-                step_mode, target, hvac_on = self._thermostat_step(
-                    entry, indoor_temp, hvac_on, active_mode
-                )
+                step_mode, target, hvac_on = self._thermostat_step(entry, indoor_temp, hvac_on, active_mode)
                 active_mode = step_mode
                 if not hvac_on or step_mode == "off":
-                    rate = self.model.passive_drift(
-                        outdoor_temp, indoor_temp, solar_condition=solar_cond
-                    )
+                    rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
                 elif step_mode == "cool":
                     # Profile deltas represent the OBSERVED indoor temp change
                     # per hour of runtime, which already includes passive drift.
@@ -123,9 +119,7 @@ class ThermalSimulator:
                     cumulative_runtime += dt_minutes
                 else:
                     hvac_on = False
-                    rate = self.model.passive_drift(
-                        outdoor_temp, indoor_temp, solar_condition=solar_cond
-                    )
+                    rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
 
             results.append(
                 SimulationPoint(
@@ -181,14 +175,10 @@ class ThermalSimulator:
 
         target = entry.target_temp
         if entry.mode == "cool":
-            running = self._should_cool(
-                indoor_temp, target, currently_on=hvac_on and previous_mode == "cool"
-            )
+            running = self._should_cool(indoor_temp, target, currently_on=hvac_on and previous_mode == "cool")
             return "cool", target, running
         if entry.mode == "heat":
-            running = self._should_heat(
-                indoor_temp, target, currently_on=hvac_on and previous_mode == "heat"
-            )
+            running = self._should_heat(indoor_temp, target, currently_on=hvac_on and previous_mode == "heat")
             return "heat", target, running
         return "off", target, False
 
@@ -247,9 +237,7 @@ class ThermalSimulator:
             return False
         return indoor_temp < target_temp - AUX_DROOP_F
 
-    def _interpolate_forecast(
-        self, time: datetime, forecast: list[ForecastPoint]
-    ) -> float:
+    def _interpolate_forecast(self, time: datetime, forecast: list[ForecastPoint]) -> float:
         """Get outdoor temp at a given time by interpolating the forecast."""
         if not forecast:
             return 70.0  # fallback
@@ -269,16 +257,11 @@ class ThermalSimulator:
                 if span == 0:
                     return forecast[i].outdoor_temp
                 frac = (time - forecast[i].time).total_seconds() / span
-                return (
-                    forecast[i].outdoor_temp
-                    + frac * (forecast[i + 1].outdoor_temp - forecast[i].outdoor_temp)
-                )
+                return forecast[i].outdoor_temp + frac * (forecast[i + 1].outdoor_temp - forecast[i].outdoor_temp)
 
         return forecast[-1].outdoor_temp
 
-    def _get_schedule_entry(
-        self, time: datetime, schedule: list[ScheduleEntry]
-    ) -> ScheduleEntry | None:
+    def _get_schedule_entry(self, time: datetime, schedule: list[ScheduleEntry]) -> ScheduleEntry | None:
         """Find the schedule entry covering the given time."""
         for entry in schedule:
             if entry.start_time <= time < entry.end_time:
@@ -290,7 +273,8 @@ class ThermalSimulator:
 
     @staticmethod
     def _interpolate_solar_condition(
-        time: datetime, forecast: list[ForecastPoint],
+        time: datetime,
+        forecast: list[ForecastPoint],
     ) -> str | None:
         """Determine solar condition from the nearest forecast point's cloud cover.
 
@@ -364,9 +348,7 @@ class ThermalSimulator:
         if len(simulation) < 2:
             return 0.0
 
-        dt_hours = (
-            simulation[1].time - simulation[0].time
-        ).total_seconds() / 3600.0
+        dt_hours = (simulation[1].time - simulation[0].time).total_seconds() / 3600.0
         if dt_hours <= 0:
             return 0.0
 
@@ -436,9 +418,7 @@ class ThermalSimulator:
         if tolerance is None:
             tolerance = self.violation_tolerance()
 
-        dt_minutes = (
-            simulation[1].time - simulation[0].time
-        ).total_seconds() / 60.0
+        dt_minutes = (simulation[1].time - simulation[0].time).total_seconds() / 60.0
         if dt_minutes <= 0:
             return 0.0
 

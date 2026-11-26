@@ -11,8 +11,8 @@ Tracks:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,11 +34,11 @@ _MAX_EVENTS = 50
 class AuxHeatEvent:
     """One recorded aux heat activation event."""
 
-    timestamp: str               # ISO-8601 UTC
-    outdoor_temp_f: float        # raw outdoor temp at activation
-    outdoor_humidity: float      # outdoor RH at activation (ice buildup factor)
+    timestamp: str  # ISO-8601 UTC
+    outdoor_temp_f: float  # raw outdoor temp at activation
+    outdoor_humidity: float  # outdoor RH at activation (ice buildup factor)
     effective_outdoor_temp_f: float  # wind-chill-adjusted temp (better proxy for condenser stress)
-    setpoint_delta_f: float      # how far indoor was from setpoint when aux kicked in
+    setpoint_delta_f: float  # how far indoor was from setpoint when aux kicked in
     hp_runtime_before_min: float  # how long heat pump ran alone before aux activated
 
 
@@ -94,10 +94,7 @@ class AuxHeatLearner:
                 # Cold-start: seed EMA with first observation
                 self._learned_hp_watts = power_watts
             else:
-                self._learned_hp_watts = (
-                    _EMA_HP_ALPHA * power_watts
-                    + (1.0 - _EMA_HP_ALPHA) * self._learned_hp_watts
-                )
+                self._learned_hp_watts = _EMA_HP_ALPHA * power_watts + (1.0 - _EMA_HP_ALPHA) * self._learned_hp_watts
             self._hp_sample_count += 1
 
         # ── Accumulate heat pump runtime before aux kicks in ──────────────
@@ -115,7 +112,7 @@ class AuxHeatLearner:
         if aux_heat_active and not was_running:
             # Aux just activated — record event
             event = AuxHeatEvent(
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 outdoor_temp_f=outdoor_temp_f,
                 outdoor_humidity=outdoor_humidity,
                 effective_outdoor_temp_f=effective_outdoor_temp_f,
@@ -200,7 +197,4 @@ class AuxHeatLearner:
             # First event: seed threshold with this observation
             self._t_aux_threshold = effective_outdoor_temp
         else:
-            self._t_aux_threshold = (
-                _EMA_ALPHA * effective_outdoor_temp
-                + (1.0 - _EMA_ALPHA) * self._t_aux_threshold
-            )
+            self._t_aux_threshold = _EMA_ALPHA * effective_outdoor_temp + (1.0 - _EMA_ALPHA) * self._t_aux_threshold

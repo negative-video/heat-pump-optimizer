@@ -16,19 +16,19 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────
-MIN_SAMPLES_PER_BIN = 6         # 30 min at a given outdoor temp
-MIN_BINS_FOR_TRENDLINE = 5      # distinct temps for meaningful trendline
-MIN_TOTAL_HOURS = 48.0          # total data before considering authoritative
+MIN_SAMPLES_PER_BIN = 6  # 30 min at a given outdoor temp
+MIN_BINS_FOR_TRENDLINE = 5  # distinct temps for meaningful trendline
+MIN_TOTAL_HOURS = 48.0  # total data before considering authoritative
 OUTLIER_DELTA_THRESHOLD = 15.0  # max plausible °F/hr
-OUTLIER_TEMP_CHANGE = 2.0       # max plausible °F change in one 5-min interval
-INTERVAL_TOLERANCE = 0.5        # reject if interval deviates >50% from expected
+OUTLIER_TEMP_CHANGE = 2.0  # max plausible °F change in one 5-min interval
+INTERVAL_TOLERANCE = 0.5  # reject if interval deviates >50% from expected
 
 # Expected outdoor temp ranges per mode (for confidence scoring)
 EXPECTED_RANGES: dict[str, tuple[int, int]] = {
@@ -93,7 +93,7 @@ class BinAccumulator:
     def std_delta(self) -> float:
         if self.count < 2:
             return 0.0
-        variance = (self.sum_sq_delta / self.count) - (self.mean_delta ** 2)
+        variance = (self.sum_sq_delta / self.count) - (self.mean_delta**2)
         return math.sqrt(max(0.0, variance))
 
     def add(
@@ -124,9 +124,7 @@ class PerformanceProfiler:
     """
 
     def __init__(self, expected_interval_minutes: float = 5.0) -> None:
-        self._bins: dict[str, dict[int, BinAccumulator]] = {
-            m: {} for m in MODES
-        }
+        self._bins: dict[str, dict[int, BinAccumulator]] = {m: {} for m in MODES}
         # Solar-aware bins: _solar_bins[mode][condition][outdoor_temp]
         self._solar_bins: dict[str, dict[str, dict[int, BinAccumulator]]] = {
             m: {c: {} for c in SOLAR_CONDITIONS} for m in MODES
@@ -162,7 +160,7 @@ class PerformanceProfiler:
         "skipped_outlier_temp", "skipped_outlier_rate", "skipped_unclassified".
         """
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
         # Gate: discard when HVAC is off entirely
         if hvac_mode == "off":
@@ -188,7 +186,9 @@ class PerformanceProfiler:
         if interval_minutes < min_interval or interval_minutes > max_interval:
             _LOGGER.info(
                 "Profiler: skipped — interval %.1f min outside [%.1f, %.1f]",
-                interval_minutes, min_interval, max_interval,
+                interval_minutes,
+                min_interval,
+                max_interval,
             )
             self._previous_indoor_temp = indoor_temp
             self._previous_timestamp = now
@@ -231,7 +231,8 @@ class PerformanceProfiler:
         if mode is None:
             _LOGGER.info(
                 "Profiler: skipped — unclassified (action=%s, mode=%s)",
-                hvac_action, hvac_mode,
+                hvac_action,
+                hvac_mode,
             )
             return "skipped_unclassified"
 
@@ -243,7 +244,9 @@ class PerformanceProfiler:
 
         # Solar-aware bin: classify by attic delta or sun elevation
         solar_cond = self._classify_solar_condition(
-            attic_temp, outdoor_temp, sun_elevation,
+            attic_temp,
+            outdoor_temp,
+            sun_elevation,
         )
         if solar_cond is not None:
             cond_bins = self._solar_bins[mode][solar_cond]
@@ -253,7 +256,10 @@ class PerformanceProfiler:
 
         _LOGGER.info(
             "Profiler: recorded %s observation at %d°F outdoor, solar=%s (total=%d)",
-            mode, temp_bin, solar_cond or "unknown", self._total_observations,
+            mode,
+            temp_bin,
+            solar_cond or "unknown",
+            self._total_observations,
         )
         return "recorded"
 
@@ -339,10 +345,7 @@ class PerformanceProfiler:
 
         for mode in MODES:
             bins = self._bins[mode]
-            qualified = {
-                t: acc for t, acc in bins.items()
-                if acc.count >= MIN_SAMPLES_PER_BIN
-            }
+            qualified = {t: acc for t, acc in bins.items() if acc.count >= MIN_SAMPLES_PER_BIN}
 
             if not qualified:
                 temperature[mode] = None
@@ -350,12 +353,9 @@ class PerformanceProfiler:
 
             trendline = self._fit_trendline(qualified)
             smoothed = self._smoothed_means(qualified, trendline)
-            deltas = {
-                str(t): round(smoothed[t], 2) for t in sorted(qualified)
-            }
+            deltas = {str(t): round(smoothed[t], 2) for t in sorted(qualified)}
             durations = {
-                str(t): round(acc.count * self._expected_interval / 60.0, 1)
-                for t, acc in sorted(qualified.items())
+                str(t): round(acc.count * self._expected_interval / 60.0, 1) for t, acc in sorted(qualified.items())
             }
 
             temperature[mode] = {
@@ -399,6 +399,7 @@ class PerformanceProfiler:
         house's current season is a far better guess at where that data was
         recorded than a fixed 72 F.
         """
+
         def _mean(accs) -> float | None:
             total = sum(a.sum_indoor for a in accs)
             n = sum(a.indoor_count for a in accs)
@@ -407,9 +408,7 @@ class PerformanceProfiler:
         own = _mean(self._bins[mode].values())
         if own is not None:
             return own
-        overall = _mean(
-            acc for bins in self._bins.values() for acc in bins.values()
-        )
+        overall = _mean(acc for bins in self._bins.values() for acc in bins.values())
         if overall is not None:
             return overall
         if self._total_observations > 0 and self._previous_indoor_temp is not None:
@@ -428,9 +427,7 @@ class PerformanceProfiler:
         F/hr at 46-47 F outdoor and +2.18 at 48 F, and a simulator that
         could not lift the house three degrees in twelve hours at 46 F.
         """
-        has_trend = bool(trendline) and (
-            trendline.get("slope", 0.0) != 0.0 or trendline.get("intercept", 0.0) != 0.0
-        )
+        has_trend = bool(trendline) and (trendline.get("slope", 0.0) != 0.0 or trendline.get("intercept", 0.0) != 0.0)
         prior = SMOOTHING_PRIOR_SAMPLES if has_trend and len(qualified) >= MIN_BINS_FOR_TRENDLINE else 0.0
 
         shrunk: dict[int, float] = {}
@@ -518,10 +515,7 @@ class PerformanceProfiler:
 
             for mode in MODES:
                 bins = self._solar_bins[mode][condition]
-                qualified = {
-                    t: acc for t, acc in bins.items()
-                    if acc.count >= MIN_SAMPLES_PER_BIN
-                }
+                qualified = {t: acc for t, acc in bins.items() if acc.count >= MIN_SAMPLES_PER_BIN}
 
                 if len(qualified) < MIN_BINS_FOR_TRENDLINE:
                     temperature[mode] = None
@@ -548,7 +542,8 @@ class PerformanceProfiler:
         return result
 
     def solar_resist_trendline(
-        self, condition: str,
+        self,
+        condition: str,
     ) -> dict[str, float] | None:
         """Get the resist trendline for a specific solar condition.
 
@@ -558,10 +553,7 @@ class PerformanceProfiler:
         solar conditions.
         """
         bins = self._solar_bins.get("resist", {}).get(condition, {})
-        qualified = {
-            t: acc for t, acc in bins.items()
-            if acc.count >= MIN_SAMPLES_PER_BIN
-        }
+        qualified = {t: acc for t, acc in bins.items() if acc.count >= MIN_SAMPLES_PER_BIN}
         if len(qualified) < MIN_BINS_FOR_TRENDLINE:
             return None
         return self._fit_trendline(qualified)
@@ -681,8 +673,7 @@ class PerformanceProfiler:
 
         # Coverage: how much of the expected range has qualified bins
         qualified_temps = [
-            t for t, acc in bins.items()
-            if acc.count >= MIN_SAMPLES_PER_BIN and expected_lo <= t <= expected_hi
+            t for t, acc in bins.items() if acc.count >= MIN_SAMPLES_PER_BIN and expected_lo <= t <= expected_hi
         ]
         if qualified_temps and expected_span > 0:
             observed_span = max(qualified_temps) - min(qualified_temps)
@@ -709,9 +700,7 @@ class PerformanceProfiler:
     def has_sufficient_data(self, mode: str) -> bool:
         """Whether a mode has enough data for reliable deltas and trendline."""
         bins = self._bins.get(mode, {})
-        qualified = sum(
-            1 for acc in bins.values() if acc.count >= MIN_SAMPLES_PER_BIN
-        )
+        qualified = sum(1 for acc in bins.values() if acc.count >= MIN_SAMPLES_PER_BIN)
         return qualified >= MIN_BINS_FOR_TRENDLINE
 
     @property
@@ -723,12 +712,9 @@ class PerformanceProfiler:
         bins = self._bins.get(mode, {})
         return {
             "bins": {
-                t: {"count": acc.count, "mean_delta": round(acc.mean_delta, 2)}
-                for t, acc in sorted(bins.items())
+                t: {"count": acc.count, "mean_delta": round(acc.mean_delta, 2)} for t, acc in sorted(bins.items())
             },
-            "qualified_bins": sum(
-                1 for acc in bins.values() if acc.count >= MIN_SAMPLES_PER_BIN
-            ),
+            "qualified_bins": sum(1 for acc in bins.values() if acc.count >= MIN_SAMPLES_PER_BIN),
             "total_observations": sum(acc.count for acc in bins.values()),
         }
 
@@ -787,10 +773,7 @@ class PerformanceProfiler:
             "total_observations": self._total_observations,
             "expected_interval": self._expected_interval,
             "previous_indoor_temp": self._previous_indoor_temp,
-            "previous_timestamp": (
-                self._previous_timestamp.isoformat()
-                if self._previous_timestamp else None
-            ),
+            "previous_timestamp": (self._previous_timestamp.isoformat() if self._previous_timestamp else None),
             "confidence_hwm": self._confidence_hwm,
         }
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +60,6 @@ class SolarAdjuster:
         """
         # Direct irradiance model: compute Q_solar and derive adjustment factor
         if irradiance_w_m2 is not None:
-            Q_solar = irradiance_w_m2 * self.solar_coefficient * 3.412
             # Average solar gain as baseline reference
             average_solar = self.solar_coefficient * 0.5 * 0.5
             # Scale relative to average conditions
@@ -129,9 +128,10 @@ class SolarAdjuster:
         adjusted = base_drift * factor
 
         _LOGGER.debug(
-            "Solar adjustment: base_drift=%.3f, factor=%.2f, adjusted=%.3f "
-            "(cloud=%.0f%%, elevation=%.1f°)",
-            base_drift, factor, adjusted,
+            "Solar adjustment: base_drift=%.3f, factor=%.2f, adjusted=%.3f (cloud=%.0f%%, elevation=%.1f°)",
+            base_drift,
+            factor,
+            adjusted,
             (cloud_cover or 0) * 100,
             sun_elevation or 0,
         )
@@ -144,7 +144,8 @@ class SolarAdjuster:
         if clamped != self.solar_coefficient:
             _LOGGER.info(
                 "Solar coefficient updated: %.3f → %.3f",
-                self.solar_coefficient, clamped,
+                self.solar_coefficient,
+                clamped,
             )
             self.solar_coefficient = clamped
 
@@ -155,7 +156,7 @@ class SolarAdjuster:
         the sun.sun entity provides this directly.
         """
         if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
+            now = now.replace(tzinfo=UTC)
 
         day_of_year = now.timetuple().tm_yday
 
@@ -171,10 +172,7 @@ class SolarAdjuster:
         dec_rad = math.radians(declination)
         ha_rad = math.radians(hour_angle)
 
-        sin_elevation = (
-            math.sin(lat_rad) * math.sin(dec_rad)
-            + math.cos(lat_rad) * math.cos(dec_rad) * math.cos(ha_rad)
-        )
+        sin_elevation = math.sin(lat_rad) * math.sin(dec_rad) + math.cos(lat_rad) * math.cos(dec_rad) * math.cos(ha_rad)
 
         return math.degrees(math.asin(max(-1, min(1, sin_elevation))))
 

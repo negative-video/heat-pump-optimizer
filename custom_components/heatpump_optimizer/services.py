@@ -103,7 +103,10 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             source = call.data.get("source", "service_call")
             _LOGGER.info(
                 "Service call: set_constraint type=%s value=%s duration=%d source=%s",
-                constraint_type, value, duration, source,
+                constraint_type,
+                value,
+                duration,
+                source,
             )
             await coordinator.async_set_constraint(
                 constraint_type=constraint_type,
@@ -135,7 +138,8 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         total_days = call.data.get("total_days", 28)
         _LOGGER.info(
             "Service call: start A/B trial (%d day blocks, %d days total)",
-            period_days, total_days,
+            period_days,
+            total_days,
         )
         return await coordinator.async_start_ab_trial(
             period_days=period_days,
@@ -170,10 +174,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_DEMAND_RESPONSE,
         handle_demand_response,
-        schema=vol.Schema({
-            vol.Required("mode"): vol.In(["reduce", "restore"]),
-            vol.Optional("duration_minutes", default=60): vol.Coerce(int),
-        }),
+        schema=vol.Schema(
+            {
+                vol.Required("mode"): vol.In(["reduce", "restore"]),
+                vol.Optional("duration_minutes", default=60): vol.Coerce(int),
+            }
+        ),
     )
     hass.services.async_register(
         DOMAIN,
@@ -191,12 +197,14 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_SET_CONSTRAINT,
         handle_set_constraint,
-        schema=vol.Schema({
-            vol.Required("type"): vol.In(["max_temp", "min_temp", "max_power", "pause_until"]),
-            vol.Optional("value", default=0): vol.Coerce(float),
-            vol.Optional("duration_minutes", default=60): vol.Coerce(int),
-            vol.Optional("source", default="service_call"): str,
-        }),
+        schema=vol.Schema(
+            {
+                vol.Required("type"): vol.In(["max_temp", "min_temp", "max_power", "pause_until"]),
+                vol.Optional("value", default=0): vol.Coerce(float),
+                vol.Optional("duration_minutes", default=60): vol.Coerce(int),
+                vol.Optional("source", default="service_call"): str,
+            }
+        ),
     )
     hass.services.async_register(
         DOMAIN,
@@ -204,10 +212,12 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         handle_start_ab_trial,
         # Bounds are enforced in ABTrial.start(), which clamps rather than
         # rejecting, so a slightly out-of-range automation still runs a trial.
-        schema=vol.Schema({
-            vol.Optional("period_days", default=3): vol.Coerce(int),
-            vol.Optional("total_days", default=28): vol.Coerce(int),
-        }),
+        schema=vol.Schema(
+            {
+                vol.Optional("period_days", default=3): vol.Coerce(int),
+                vol.Optional("total_days", default=28): vol.Coerce(int),
+            }
+        ),
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(

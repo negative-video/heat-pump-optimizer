@@ -18,7 +18,7 @@ Two historical mistakes are corrected here and should not be reintroduced:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from ..const import DEFAULT_SWITCHING_PENALTY_WEIGHT
 from .data_types import (
@@ -37,8 +37,7 @@ from .thermal_simulator import ThermalSimulator
 _UNUSABLE_HOUR_SCORE = 1e6
 
 _WORK_REDISTRIBUTION_DISCLAIMER = (
-    "theoretical upper bound, not achievable: assumes HVAC work is conserved "
-    "when moved between hours, which it is not"
+    "theoretical upper bound, not achievable: assumes HVAC work is conserved when moved between hours, which it is not"
 )
 
 
@@ -113,13 +112,15 @@ class ScheduleOptimizer:
             if hour in hourly_cost:
                 cost_score = sum(hourly_cost[hour]) / len(hourly_cost[hour])
 
-            raw_scores.append({
-                "hour": hour,
-                "outdoor_temp": avg_temp,
-                "efficiency": efficiency_score,
-                "carbon": carbon_score,
-                "cost": cost_score,
-            })
+            raw_scores.append(
+                {
+                    "hour": hour,
+                    "outdoor_temp": avg_temp,
+                    "efficiency": efficiency_score,
+                    "carbon": carbon_score,
+                    "cost": cost_score,
+                }
+            )
 
         # Second pass: normalize each dimension to 0-1 via min-max scaling.
         # This makes weights comparable across dimensions with different units
@@ -202,10 +203,11 @@ class ScheduleOptimizer:
         Returns:
             Dict with the bound plus a ``disclaimer`` key.
         """
-        if mode == "cool":
-            get_delta = lambda t: abs(self.model.cooling_delta(t))
-        else:
-            get_delta = lambda t: max(self.model.heating_delta(t), 0.01)
+
+        def get_delta(t: float) -> float:
+            if mode == "cool":
+                return abs(self.model.cooling_delta(t))
+            return max(self.model.heating_delta(t), 0.01)
 
         # "Work units" = runtime * net delta magnitude.
         #
@@ -243,10 +245,7 @@ class ScheduleOptimizer:
             }
 
         # Find the best delta available across all hours of the day
-        all_deltas = {
-            hour: get_delta(hourly_outdoor_temp.get(hour, 70.0))
-            for hour in hourly_outdoor_temp
-        }
+        all_deltas = {hour: get_delta(hourly_outdoor_temp.get(hour, 70.0)) for hour in hourly_outdoor_temp}
         best_delta = max(all_deltas.values()) if all_deltas else 1.0
 
         # Theoretical minimum: do ALL the work at the best efficiency
@@ -270,13 +269,15 @@ class ScheduleOptimizer:
             runtime_this_hour = (work_assigned / delta) * 60  # minutes
             remaining_work -= work_assigned
             redistributed_runtime += runtime_this_hour
-            redistribution_plan.append({
-                "hour": hour,
-                "outdoor_temp": hourly_outdoor_temp.get(hour, 0),
-                "delta": round(delta, 2),
-                "runtime_minutes": round(runtime_this_hour, 1),
-                "work_units": round(work_assigned, 2),
-            })
+            redistribution_plan.append(
+                {
+                    "hour": hour,
+                    "outdoor_temp": hourly_outdoor_temp.get(hour, 0),
+                    "delta": round(delta, 2),
+                    "runtime_minutes": round(runtime_this_hour, 1),
+                    "work_units": round(work_assigned, 2),
+                }
+            )
 
         savings_minutes = total_actual_runtime - redistributed_runtime
         savings_pct = (savings_minutes / total_actual_runtime * 100) if total_actual_runtime > 0 else 0
@@ -287,14 +288,16 @@ class ScheduleOptimizer:
             if hourly_runtime[hour] > 0:
                 delta = hourly_delta.get(hour, 0)
                 efficiency_vs_best = (delta / best_delta * 100) if best_delta > 0 else 0
-                hourly_breakdown.append({
-                    "hour": hour,
-                    "outdoor_temp": hourly_outdoor_temp.get(hour, 0),
-                    "runtime_minutes": round(hourly_runtime[hour], 1),
-                    "delta": round(delta, 2),
-                    "work_units": round(hourly_work.get(hour, 0), 2),
-                    "efficiency_vs_best": round(efficiency_vs_best, 1),
-                })
+                hourly_breakdown.append(
+                    {
+                        "hour": hour,
+                        "outdoor_temp": hourly_outdoor_temp.get(hour, 0),
+                        "runtime_minutes": round(hourly_runtime[hour], 1),
+                        "delta": round(delta, 2),
+                        "work_units": round(hourly_work.get(hour, 0), 2),
+                        "efficiency_vs_best": round(efficiency_vs_best, 1),
+                    }
+                )
 
         return {
             "disclaimer": _WORK_REDISTRIBUTION_DISCLAIMER,
@@ -364,9 +367,7 @@ class ScheduleOptimizer:
 
         savings_pct = 0.0
         if flat.energy_kwh > 0:
-            savings_pct = (
-                (flat.energy_kwh - chosen.energy_kwh) / flat.energy_kwh * 100
-            )
+            savings_pct = (flat.energy_kwh - chosen.energy_kwh) / flat.energy_kwh * 100
 
         return OptimizedSchedule(
             entries=chosen.entries,

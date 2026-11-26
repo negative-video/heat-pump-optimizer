@@ -18,13 +18,20 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.start import async_at_started
 
 from .const import (
+    CONF_AUX_HEAT_KW,
+    CONF_AUX_HEAT_TYPE,
     CONF_AWAY_COMFORT_DELTA,
     CONF_CLIMATE_ENTITY,
-    CONF_COOLING_WATTS,
     CONF_COMFORT_COOL_MAX,
     CONF_COMFORT_COOL_MIN,
     CONF_COMFORT_HEAT_MAX,
     CONF_COMFORT_HEAT_MIN,
+    CONF_COOLING_WATTS,
+    CONF_DUCT_TEMP_ENTITY,
+    CONF_DWELL_TIME_MINUTES,
+    CONF_HEATING_WATTS,
+    CONF_HOME_SQFT,
+    CONF_HVAC_TONNAGE,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
     CONF_INITIALIZATION_MODE,
@@ -52,23 +59,16 @@ from .const import (
     CONF_SLEEP_SCHEDULE_ENABLED,
     CONF_SLEEP_SCHEDULE_END,
     CONF_SLEEP_SCHEDULE_START,
-    CONF_DUCT_TEMP_ENTITY,
-    CONF_DWELL_TIME_MINUTES,
-    CONF_HEATING_WATTS,
     CONF_THERMOSTAT_DEADBAND,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
-    CONF_HOME_SQFT,
-    CONF_HVAC_TONNAGE,
-    CONF_HVAC_SEER,
-    CONF_AUX_HEAT_TYPE,
-    CONF_AUX_HEAT_KW,
     DEFAULT_AGGRESSIVENESS,
     DEFAULT_AWAY_COMFORT_DELTA,
     DEFAULT_COMFORT_COOL_MAX,
     DEFAULT_COMFORT_COOL_MIN,
     DEFAULT_COMFORT_HEAT_MAX,
     DEFAULT_COMFORT_HEAT_MIN,
+    DEFAULT_DWELL_TIME_MINUTES,
     DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR,
     DEFAULT_MORNING_RECOVERY_MODE,
     DEFAULT_MORNING_WARM_OUTDOOR_TEMP,
@@ -85,7 +85,6 @@ from .const import (
     DEFAULT_SLEEP_SCHEDULE_ENABLED,
     DEFAULT_SLEEP_SCHEDULE_END,
     DEFAULT_SLEEP_SCHEDULE_START,
-    DEFAULT_DWELL_TIME_MINUTES,
     DEFAULT_THERMOSTAT_DEADBAND,
     DOMAIN,
     INIT_MODE_LEARNING,
@@ -107,7 +106,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     if config_entry.version > target_version:
         _LOGGER.error(
             "Cannot downgrade entry %s from v%s to v%s",
-            config_entry.entry_id, config_entry.version, target_version,
+            config_entry.entry_id,
+            config_entry.version,
+            target_version,
         )
         return False
 
@@ -117,11 +118,12 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         if data.get("initialization_mode") == "beestat":
             data["initialization_mode"] = "learning"
         hass.config_entries.async_update_entry(
-            config_entry, data=data, version=2,
+            config_entry,
+            data=data,
+            version=2,
         )
         _LOGGER.info(
-            "Migrated entry %s to v2: removed Beestat profile_path, "
-            "initialization_mode=%s",
+            "Migrated entry %s to v2: removed Beestat profile_path, initialization_mode=%s",
             config_entry.entry_id,
             data.get("initialization_mode", "learning"),
         )
@@ -137,17 +139,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     active_entries: set[str] = hass.data.setdefault(DOMAIN, set())
 
     # Extract config — options can override data for equipment & comfort values
-    climate_entity = (
-        entry.options.get(CONF_CLIMATE_ENTITY)
-        or entry.data[CONF_CLIMATE_ENTITY]
-    )
+    climate_entity = entry.options.get(CONF_CLIMATE_ENTITY) or entry.data[CONF_CLIMATE_ENTITY]
     weather_entity = entry.data.get(CONF_WEATHER_ENTITY)
 
     # Weather: migrate singular → plural for backward compat
-    weather_entities = (
-        entry.options.get(CONF_WEATHER_ENTITIES)
-        or entry.data.get(CONF_WEATHER_ENTITIES)
-    )
+    weather_entities = entry.options.get(CONF_WEATHER_ENTITIES) or entry.data.get(CONF_WEATHER_ENTITIES)
     if not weather_entities and weather_entity:
         weather_entities = [weather_entity]
     weather_entities = weather_entities or []
@@ -164,10 +160,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     model_import_data = entry.data.get(CONF_MODEL_IMPORT_DATA)
 
     # Occupancy: migrate singular → plural for backward compat
-    occupancy_entities = (
-        entry.options.get(CONF_OCCUPANCY_ENTITIES)
-        or entry.data.get(CONF_OCCUPANCY_ENTITIES)
-    )
+    occupancy_entities = entry.options.get(CONF_OCCUPANCY_ENTITIES) or entry.data.get(CONF_OCCUPANCY_ENTITIES)
     if not occupancy_entities:
         singular = entry.data.get(CONF_OCCUPANCY_ENTITY)
         if singular:
@@ -177,11 +170,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Merge onboarding data into opts (options flow overrides take precedence)
     for _key in (
-        CONF_OUTDOOR_TEMP_ENTITIES, CONF_OUTDOOR_HUMIDITY_ENTITIES,
-        CONF_INDOOR_TEMP_ENTITIES, CONF_INDOOR_HUMIDITY_ENTITIES,
+        CONF_OUTDOOR_TEMP_ENTITIES,
+        CONF_OUTDOOR_HUMIDITY_ENTITIES,
+        CONF_INDOOR_TEMP_ENTITIES,
+        CONF_INDOOR_HUMIDITY_ENTITIES,
         # System specs set during initial setup — editable later via options flow
-        CONF_HOME_SQFT, CONF_HVAC_TONNAGE, CONF_AUX_HEAT_TYPE, CONF_AUX_HEAT_KW,
-        CONF_COOLING_WATTS, CONF_HEATING_WATTS, CONF_DUCT_TEMP_ENTITY,
+        CONF_HOME_SQFT,
+        CONF_HVAC_TONNAGE,
+        CONF_AUX_HEAT_TYPE,
+        CONF_AUX_HEAT_KW,
+        CONF_COOLING_WATTS,
+        CONF_HEATING_WATTS,
+        CONF_DUCT_TEMP_ENTITY,
     ):
         if _key not in opts:
             _val = entry.data.get(_key)
@@ -207,7 +207,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "aggressiveness": opts.get(CONF_OPTIMIZATION_AGGRESSIVENESS, DEFAULT_AGGRESSIVENESS),
         "override_grace_hours": opts.get(CONF_OVERRIDE_GRACE_PERIOD_HOURS, DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS),
         "reoptimize_interval_hours": opts.get(CONF_REOPTIMIZE_INTERVAL_HOURS, DEFAULT_REOPTIMIZE_INTERVAL_HOURS),
-        "max_setpoint_change_per_hour": opts.get(CONF_MAX_SETPOINT_CHANGE_PER_HOUR, DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR),
+        "max_setpoint_change_per_hour": opts.get(
+            CONF_MAX_SETPOINT_CHANGE_PER_HOUR, DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR
+        ),
         "away_comfort_delta": opts.get(CONF_AWAY_COMFORT_DELTA, DEFAULT_AWAY_COMFORT_DELTA),
         "thermostat_deadband": opts.get(CONF_THERMOSTAT_DEADBAND, DEFAULT_THERMOSTAT_DEADBAND),
         "dwell_time_minutes": opts.get(CONF_DWELL_TIME_MINUTES, DEFAULT_DWELL_TIME_MINUTES),
@@ -232,9 +234,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "weekday_time": opts.get(CONF_MORNING_WEEKDAY_TIME, DEFAULT_MORNING_WEEKDAY_TIME),
             "weekend_time": opts.get(CONF_MORNING_WEEKEND_TIME, DEFAULT_MORNING_WEEKEND_TIME),
             "hold_temp": opts.get(CONF_MORNING_HOLD_TEMP),
-            "warm_outdoor_temp": opts.get(
-                CONF_MORNING_WARM_OUTDOOR_TEMP, DEFAULT_MORNING_WARM_OUTDOOR_TEMP
-            ),
+            "warm_outdoor_temp": opts.get(CONF_MORNING_WARM_OUTDOOR_TEMP, DEFAULT_MORNING_WARM_OUTDOOR_TEMP),
         },
     }
 
@@ -270,10 +270,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # retries with exponential backoff rather than running with broken metrics.
     thermo_state = coordinator.thermostat.read_state()
     if not thermo_state.available:
-        raise ConfigEntryNotReady(
-            f"Climate entity '{climate_entity}' not yet available — "
-            "will retry automatically"
-        )
+        raise ConfigEntryNotReady(f"Climate entity '{climate_entity}' not yet available — will retry automatically")
 
     # Once HA is fully started (all integrations loaded), trigger a refresh
     # so the coordinator can pick up weather entities that weren't ready yet,

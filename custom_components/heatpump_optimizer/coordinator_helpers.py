@@ -10,7 +10,7 @@ they do not own state of their own.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import homeassistant.helpers.issue_registry as ir
@@ -27,7 +27,6 @@ from .const import (
     DEFAULT_DUCT_AUX_RATE_THRESHOLD_F,
     DEFAULT_DUCT_AUX_THRESHOLD_F,
     DEFAULT_FORECAST_DEVIATION_THRESHOLD,
-    DEFAULT_MODEL_CONFIDENCE_THRESHOLD,
     DEFAULT_STALE_FORECAST_HOURS,
     DOMAIN,
     EVENT_ACCURACY_TIER_CHANGED,
@@ -90,7 +89,7 @@ class HelpersMixin:
         """
         if mode not in ("heat", "cool"):
             mode = self._plan_mode()
-        planned = self.strategic.band_at(datetime.now(timezone.utc), mode)
+        planned = self.strategic.band_at(datetime.now(UTC), mode)
         if isinstance(planned, tuple):
             comfort = planned
         else:
@@ -101,7 +100,7 @@ class HelpersMixin:
         # rather than inside the pure band derivation.
         dr_delta = 0.0
         if self._demand_response_active:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if self._demand_response_end and now >= self._demand_response_end:
                 # Auto-restore
                 self._demand_response_active = False
@@ -128,10 +127,14 @@ class HelpersMixin:
 
         if effective != comfort:
             _LOGGER.debug(
-                "Effective comfort band %.1f-%.1fF (from %.1f-%.1f; "
-                "dr=%.1f, tier=%s, constraints=%d)",
-                effective[0], effective[1], comfort[0], comfort[1],
-                dr_delta, tier or "none", len(self._active_constraints),
+                "Effective comfort band %.1f-%.1fF (from %.1f-%.1f; dr=%.1f, tier=%s, constraints=%d)",
+                effective[0],
+                effective[1],
+                comfort[0],
+                comfort[1],
+                dr_delta,
+                tier or "none",
+                len(self._active_constraints),
             )
 
         return effective
@@ -253,9 +256,7 @@ class HelpersMixin:
         n_cond = self.profiler.total_observations
         if cal._first_innovation_time is None:
             return "waiting_for_data"
-        hours_elapsed = (
-            datetime.now(timezone.utc) - cal._first_innovation_time
-        ).total_seconds() / 3600
+        hours_elapsed = (datetime.now(UTC) - cal._first_innovation_time).total_seconds() / 3600
         if hours_elapsed < 72:
             hours_left = round(72 - hours_elapsed)
             return f"collecting_data ({hours_left}h until first calibration)"
@@ -282,22 +283,25 @@ class HelpersMixin:
 
         # Fire events on tier changes and milestones
         if tier != self._last_accuracy_tier:
-            self._fire_event(EVENT_ACCURACY_TIER_CHANGED, {
-                "previous_tier": self._last_accuracy_tier,
-                "new_tier": tier,
-                "model_confidence": round(model_conf * 100, 1),
-                "baseline_confidence": round(baseline_conf * 100, 1),
-            })
+            self._fire_event(
+                EVENT_ACCURACY_TIER_CHANGED,
+                {
+                    "previous_tier": self._last_accuracy_tier,
+                    "new_tier": tier,
+                    "model_confidence": round(model_conf * 100, 1),
+                    "baseline_confidence": round(baseline_conf * 100, 1),
+                },
+            )
             self._last_accuracy_tier = tier
 
-        if (
-            not self._baseline_complete_fired
-            and self.baseline_capture.is_ready
-        ):
+        if not self._baseline_complete_fired and self.baseline_capture.is_ready:
             self._baseline_complete_fired = True
-            self._fire_event(EVENT_BASELINE_COMPLETE, {
-                "sample_days": self.baseline_capture.sample_days,
-            })
+            self._fire_event(
+                EVENT_BASELINE_COMPLETE,
+                {
+                    "sample_days": self.baseline_capture.sample_days,
+                },
+            )
 
         self.savings_tracker.set_accuracy_tier(tier)
 
@@ -382,10 +386,11 @@ class HelpersMixin:
         return None
 
     def _classify_phase(
-        self, entry: ScheduleEntry, indoor_temp: float | None = None,
+        self,
+        entry: ScheduleEntry,
+        indoor_temp: float | None = None,
     ) -> str:
         """Determine phase from schedule entry reason text and current conditions."""
-        from .const import PHASE_COASTING, PHASE_MAINTAINING, PHASE_PRE_COOLING, PHASE_PRE_HEATING
         reason = entry.reason.lower()
 
         # Override: if indoor temp already at or beyond the target, the HVAC
@@ -410,7 +415,7 @@ class HelpersMixin:
             # No forecast has ever been fetched — not stale, just needs first fetch.
             # Returning True here would immediately enter safe_mode on startup.
             return False
-        elapsed = (datetime.now(timezone.utc) - last).total_seconds() / 3600
+        elapsed = (datetime.now(UTC) - last).total_seconds() / 3600
         return elapsed >= DEFAULT_STALE_FORECAST_HOURS
 
     def _should_persist_learning(self, now: datetime) -> bool:
@@ -431,20 +436,16 @@ class HelpersMixin:
 
     def _check_model_alert(self, accuracy_report: dict) -> bool:
         """Check for model alert and fire event on transition to alert state."""
-        alert = any(
-            accuracy_report[m].get("alert", False) for m in ("cool", "heat", "resist")
-        )
+        alert = any(accuracy_report[m].get("alert", False) for m in ("cool", "heat", "resist"))
         if alert and not self._last_model_alert:
-            alerting_modes = [
-                m for m in ("cool", "heat", "resist")
-                if accuracy_report[m].get("alert", False)
-            ]
-            self._fire_event(EVENT_MODEL_ALERT, {
-                "modes": alerting_modes,
-                "corrections": {
-                    m: accuracy_report[m]["correction"] for m in alerting_modes
+            alerting_modes = [m for m in ("cool", "heat", "resist") if accuracy_report[m].get("alert", False)]
+            self._fire_event(
+                EVENT_MODEL_ALERT,
+                {
+                    "modes": alerting_modes,
+                    "corrections": {m: accuracy_report[m]["correction"] for m in alerting_modes},
                 },
-            })
+            )
         self._last_model_alert = alert
         return alert
 
@@ -459,9 +460,7 @@ class HelpersMixin:
         if not profile.is_measured or profile.envelope_loss_btu_per_hour_f is None:
             return None
 
-        outdoor = self.sensor_hub.get_outdoor_temp_info(
-            self.strategic.forecast_snapshot
-        )
+        outdoor = self.sensor_hub.get_outdoor_temp_info(self.strategic.forecast_snapshot)
         outdoor_val = outdoor.get("value") if outdoor else None
         indoor = self.thermostat.read_state()
         indoor_val = getattr(indoor, "indoor_temp", None) if indoor else None
@@ -481,7 +480,6 @@ class HelpersMixin:
     def _fire_event(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         """Fire an HA event for automation triggers."""
         self.hass.bus.async_fire(event_type, data or {})
-
 
     # ── HVAC state helpers ──────────────────────────────────────────
 
@@ -575,9 +573,7 @@ class HelpersMixin:
             return False
 
         # Read from standalone sensor only (not forecast fallback)
-        reading = self.sensor_hub._read_multi_temp(
-            self.sensor_hub._outdoor_temp_entities, "Outdoor temp"
-        )
+        reading = self.sensor_hub._read_multi_temp(self.sensor_hub._outdoor_temp_entities, "Outdoor temp")
         if reading is None or reading.stale:
             return False
 
@@ -586,12 +582,13 @@ class HelpersMixin:
         if abs((closest.time - now).total_seconds()) > 3600:
             return False
 
-        from .const import DEFAULT_FORECAST_DEVIATION_THRESHOLD
         deviation = abs(reading.value - closest.outdoor_temp)
         if deviation > DEFAULT_FORECAST_DEVIATION_THRESHOLD:
             _LOGGER.debug(
                 "Outdoor sensor (%.1f°F) diverges from forecast (%.1f°F) by %.1f°F",
-                reading.value, closest.outdoor_temp, deviation,
+                reading.value,
+                closest.outdoor_temp,
+                deviation,
             )
             return True
         return False

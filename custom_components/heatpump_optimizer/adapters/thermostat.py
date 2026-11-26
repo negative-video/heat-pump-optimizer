@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from homeassistant.components.climate import (
     ATTR_CURRENT_HUMIDITY,
     ATTR_CURRENT_TEMPERATURE,
     ATTR_HVAC_ACTION,
-    ATTR_MAX_TEMP,
-    ATTR_MIN_TEMP,
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
     SERVICE_SET_TEMPERATURE,
@@ -94,7 +92,7 @@ class ThermostatAdapter:
                 target_temp=None,
                 target_temp_high=None,
                 target_temp_low=None,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 available=False,
             )
 
@@ -119,7 +117,7 @@ class ThermostatAdapter:
             target_temp=target,
             target_temp_high=target_high,
             target_temp_low=target_low,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             available=True,
         )
 
@@ -153,7 +151,10 @@ class ThermostatAdapter:
         if clamped != temperature:
             _LOGGER.info(
                 "Clamped setpoint from %.1f°F to %.1f°F (bounds: %.1f-%.1f)",
-                temperature, clamped, comfort_min, comfort_max,
+                temperature,
+                clamped,
+                comfort_min,
+                comfort_max,
             )
         clamped = self._round_setpoint(clamped)
 
@@ -184,8 +185,7 @@ class ThermostatAdapter:
                     # and guessing wrong puts a cooling target on the heat
                     # setpoint. Callers that mean a side must name it.
                     _LOGGER.error(
-                        "Refusing to write %.1f°F to a heat_cool thermostat "
-                        "without knowing which setpoint it is for",
+                        "Refusing to write %.1f°F to a heat_cool thermostat without knowing which setpoint it is for",
                         clamped,
                     )
                     return False
@@ -210,7 +210,10 @@ class ThermostatAdapter:
                 }
                 _LOGGER.debug(
                     "Dual-setpoint write: low=%.1f high=%.1f (side=%s, action=%s)",
-                    low, high, side, hvac_action,
+                    low,
+                    high,
+                    side,
+                    hvac_action,
                 )
             else:
                 # Single-setpoint mode
@@ -231,13 +234,11 @@ class ThermostatAdapter:
             self._last_written_low = low
             self._last_written_high = high
             self._last_written_side = side
-            self._last_write_time = datetime.now(timezone.utc)
+            self._last_write_time = datetime.now(UTC)
             _LOGGER.debug("Set thermostat to %.1f°F", clamped)
             return True
         except Exception:
-            _LOGGER.error(
-                "Failed to set thermostat temperature", exc_info=True
-            )
+            _LOGGER.error("Failed to set thermostat temperature", exc_info=True)
             return False
 
     async def async_set_dual_setpoints(
@@ -263,9 +264,7 @@ class ThermostatAdapter:
         if cool_ceiling < heat_floor:
             heat_floor, cool_ceiling = cool_ceiling, heat_floor
         heat_floor = self._round_setpoint(heat_floor)
-        cool_ceiling = max(
-            self._round_setpoint(cool_ceiling), heat_floor + MIN_DUAL_SETPOINT_GAP_F
-        )
+        cool_ceiling = max(self._round_setpoint(cool_ceiling), heat_floor + MIN_DUAL_SETPOINT_GAP_F)
 
         state = self.hass.states.get(self.entity_id)
         if state is None or state.state == "unavailable":
@@ -299,9 +298,11 @@ class ThermostatAdapter:
         self._last_written_low = heat_floor
         self._last_written_high = cool_ceiling
         self._last_written_side = primary
-        self._last_write_time = datetime.now(timezone.utc)
+        self._last_write_time = datetime.now(UTC)
         _LOGGER.debug(
-            "Set dual setpoints: heat %.1f°F / cool %.1f°F", heat_floor, cool_ceiling,
+            "Set dual setpoints: heat %.1f°F / cool %.1f°F",
+            heat_floor,
+            cool_ceiling,
         )
         return True
 
@@ -328,7 +329,9 @@ class ThermostatAdapter:
         hvac_mode = self._map_hvac_mode(state.state)
         if hvac_mode == "heat_cool":
             return await self.async_set_dual_setpoints(
-                heat_floor, cool_ceiling, primary=mode,
+                heat_floor,
+                cool_ceiling,
+                primary=mode,
             )
         if hvac_mode == "heat":
             return await self.async_set_temperature(heat_floor, heat_floor, cool_ceiling)
@@ -362,7 +365,8 @@ class ThermostatAdapter:
         return "heat" if low is not None and high is None else "cool"
 
     def expected_and_actual(
-        self, state: ThermostatState,
+        self,
+        state: ThermostatState,
     ) -> tuple[float | None, float | None]:
         """What we last wrote and what the thermostat shows, like for like.
 
@@ -430,7 +434,10 @@ class ThermostatAdapter:
             # unconditionally, so every idle winter cycle selected the
             # cooling comfort band.
             return self._infer_side(
-                None, state.indoor_temp, state.target_temp_low, state.target_temp_high,
+                None,
+                state.indoor_temp,
+                state.target_temp_low,
+                state.target_temp_high,
             )
         return "off"
 
@@ -449,17 +456,13 @@ class ThermostatAdapter:
         if temp is None:
             return None
         if self.hass.config.units.temperature_unit == UnitOfTemperature.CELSIUS:
-            return TemperatureConverter.convert(
-                temp, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-            )
+            return TemperatureConverter.convert(temp, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
         return temp
 
     def _from_fahrenheit(self, temp_f: float) -> float:
         """Convert °F back to HA's unit system for service calls."""
         if self.hass.config.units.temperature_unit == UnitOfTemperature.CELSIUS:
-            return TemperatureConverter.convert(
-                temp_f, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS
-            )
+            return TemperatureConverter.convert(temp_f, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS)
         return temp_f
 
     @staticmethod

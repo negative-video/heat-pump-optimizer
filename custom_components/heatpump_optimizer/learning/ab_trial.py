@@ -323,10 +323,7 @@ class ABTrial:
         else:
             t_stat = 0.0
 
-        enough = (
-            len(on) >= MIN_DAYS_PER_POPULATION
-            and len(off) >= MIN_DAYS_PER_POPULATION
-        )
+        enough = len(on) >= MIN_DAYS_PER_POPULATION and len(off) >= MIN_DAYS_PER_POPULATION
         if enough and se > 0 and abs(t_stat) >= CONCLUSIVE_T:
             summary["conclusive"] = True
             if difference > 0:

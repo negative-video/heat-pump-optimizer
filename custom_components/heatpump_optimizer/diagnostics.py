@@ -8,7 +8,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, VERSION
+from .const import VERSION
 
 TO_REDACT = {"latitude", "longitude", "password", "token", "api_key"}
 

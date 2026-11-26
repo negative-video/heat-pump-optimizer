@@ -36,9 +36,7 @@ class OptimizerEnabledSwitch(CoordinatorEntity, SwitchEntity):
 
     _attr_has_entity_name = True
 
-    def __init__(
-        self, coordinator: HeatPumpOptimizerCoordinator, entry: ConfigEntry
-    ) -> None:
+    def __init__(self, coordinator: HeatPumpOptimizerCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self._coordinator = coordinator
         self._attr_unique_id = f"{entry.entry_id}_enabled"

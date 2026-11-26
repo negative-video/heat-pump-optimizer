@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.const import UnitOfTemperature
@@ -103,7 +103,7 @@ async def async_bootstrap_from_history(
     except ImportError:
         _LOGGER.warning("History bootstrap: recorder component not available")
         return BootstrapResult(success=False, reason="recorder_not_available")
-    except asyncio.TimeoutError:
+    except TimeoutError:
         _LOGGER.warning("History bootstrap: recorder not ready after 30s timeout")
         return BootstrapResult(success=False, reason="recorder_not_ready")
     except Exception as err:  # noqa: BLE001
@@ -125,8 +125,8 @@ async def async_bootstrap_from_history(
     # De-duplicate
     entity_ids = list(dict.fromkeys(entity_ids))
 
-    start_time = datetime.now(timezone.utc) - timedelta(days=max_days)
-    end_time = datetime.now(timezone.utc)
+    start_time = datetime.now(UTC) - timedelta(days=max_days)
+    end_time = datetime.now(UTC)
 
     try:
         from homeassistant.components.recorder.history import get_significant_states
@@ -160,12 +160,8 @@ async def async_bootstrap_from_history(
         # Validate that fallback API returned attributes (older HA may omit them)
         climate_fallback = states.get(climate_entity_id, []) if states else []
         if climate_fallback and not hasattr(climate_fallback[0], "attributes"):
-            _LOGGER.warning(
-                "History bootstrap: fallback API returned states without attributes"
-            )
-            return BootstrapResult(
-                success=False, reason="fallback_api_no_attributes"
-            )
+            _LOGGER.warning("History bootstrap: fallback API returned states without attributes")
+            return BootstrapResult(success=False, reason="fallback_api_no_attributes")
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("History bootstrap: fetch failed: %s", err)
         return BootstrapResult(success=False, reason=f"history_fetch_error: {err}")
@@ -181,29 +177,26 @@ async def async_bootstrap_from_history(
     if len(climate_states) < MIN_VALID_POINTS:
         _LOGGER.warning(
             "History bootstrap: only %d climate states (need %d) for %s",
-            len(climate_states), MIN_VALID_POINTS, climate_entity_id,
+            len(climate_states),
+            MIN_VALID_POINTS,
+            climate_entity_id,
         )
         return BootstrapResult(success=False, reason="insufficient_history")
 
     # 3. Build timelines and align to grid
     indoor_sensor_timelines = _collect_indoor_temp_timelines(
-        states, indoor_temp_entities or [],
+        states,
+        indoor_temp_entities or [],
     )
     data_points = _build_aligned_timeline(
         climate_states=climate_states,
-        outdoor_states=_collect_outdoor_states(
-            states, outdoor_temp_entities, weather_entity_ids
-        ),
+        outdoor_states=_collect_outdoor_states(states, outdoor_temp_entities, weather_entity_ids),
         indoor_sensor_timelines=indoor_sensor_timelines,
         humidity_states=_collect_sensor_states(states, humidity_entities),
-        wind_states=_collect_sensor_states(
-            states, [wind_speed_entity] if wind_speed_entity else []
-        ),
+        wind_states=_collect_sensor_states(states, [wind_speed_entity] if wind_speed_entity else []),
         start_time=start_time,
         end_time=end_time,
-        attic_states=_collect_sensor_states(
-            states, [attic_temp_entity] if attic_temp_entity else []
-        ) or None,
+        attic_states=_collect_sensor_states(states, [attic_temp_entity] if attic_temp_entity else []) or None,
         latitude=hass.config.latitude if hasattr(hass.config, "latitude") else None,
         longitude=hass.config.longitude if hasattr(hass.config, "longitude") else None,
     )
@@ -214,10 +207,12 @@ async def async_bootstrap_from_history(
         missing_indoor = sum(1 for p in data_points if p.indoor_temp is None)
         missing_outdoor = sum(1 for p in data_points if p.outdoor_temp is None)
         _LOGGER.warning(
-            "History bootstrap: only %d/%d valid points (need %d). "
-            "Missing: %d indoor temp, %d outdoor temp",
-            len(valid_points), total, MIN_VALID_POINTS,
-            missing_indoor, missing_outdoor,
+            "History bootstrap: only %d/%d valid points (need %d). Missing: %d indoor temp, %d outdoor temp",
+            len(valid_points),
+            total,
+            MIN_VALID_POINTS,
+            missing_indoor,
+            missing_outdoor,
         )
         return BootstrapResult(
             success=False,
@@ -353,9 +348,7 @@ def _build_aligned_timeline(
         # matching the live SensorHub's multi-sensor averaging behavior.
         indoor_readings: list[float] = []
 
-        climate_temp = _interpolate_numeric(
-            indoor_timeline, grid_time, MAX_TEMP_GAP_MINUTES
-        )
+        climate_temp = _interpolate_numeric(indoor_timeline, grid_time, MAX_TEMP_GAP_MINUTES)
         if climate_temp is not None:
             indoor_readings.append(climate_temp)
 
@@ -364,13 +357,8 @@ def _build_aligned_timeline(
             if val is not None:
                 indoor_readings.append(val)
 
-        indoor_temp = (
-            sum(indoor_readings) / len(indoor_readings)
-            if indoor_readings else None
-        )
-        outdoor_temp = _interpolate_numeric(
-            outdoor_states, grid_time, MAX_OUTDOOR_GAP_MINUTES
-        )
+        indoor_temp = sum(indoor_readings) / len(indoor_readings) if indoor_readings else None
+        outdoor_temp = _interpolate_numeric(outdoor_states, grid_time, MAX_OUTDOOR_GAP_MINUTES)
         hvac_mode = _forward_fill_str(mode_timeline, grid_time) or "off"
         hvac_action = _forward_fill_str(action_timeline, grid_time)
         setpoint = _forward_fill_numeric(setpoint_timeline, grid_time)
@@ -378,13 +366,11 @@ def _build_aligned_timeline(
         wind = _forward_fill_numeric(wind_states, grid_time)
 
         # Attic temp and sun elevation for solar-aware profiler binning
-        attic = (
-            _interpolate_numeric(attic_states, grid_time, MAX_OUTDOOR_GAP_MINUTES)
-            if attic_states else None
-        )
+        attic = _interpolate_numeric(attic_states, grid_time, MAX_OUTDOOR_GAP_MINUTES) if attic_states else None
         sun_elev = None
         if latitude is not None and longitude is not None:
             from ..adapters.forecast import estimate_solar_elevation
+
             sun_elev = estimate_solar_elevation(latitude, longitude, grid_time)
 
         # Derive hvac_running from action
@@ -663,7 +649,7 @@ def _state_timestamp(state: Any) -> datetime | None:
         ts = state.last_changed
         if ts is not None:
             if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+                ts = ts.replace(tzinfo=UTC)
             return ts
     except AttributeError:
         pass
@@ -693,8 +679,6 @@ def _to_fahrenheit(value: float, attrs: dict[str, Any]) -> float:
     """Convert a temperature value to Fahrenheit based on unit_of_measurement."""
     unit = attrs.get("unit_of_measurement", "")
     if unit in (UnitOfTemperature.CELSIUS, "°C"):
-        return TemperatureConverter.convert(
-            value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-        )
+        return TemperatureConverter.convert(value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
     # Assume Fahrenheit if no unit or already °F
     return value

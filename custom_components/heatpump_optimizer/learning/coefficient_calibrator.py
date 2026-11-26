@@ -19,11 +19,11 @@ It adjusts the *environment* the EKF operates in, like weather data does.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 
 import numpy as np
 
-from .coefficient_store import ALL_COEFFICIENTS, TIER_1, CoefficientStore
+from .coefficient_store import CoefficientStore
 from .sensitivity import COEFFICIENT_NAMES, compute_sensitivities
 
 _LOGGER = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ class CoefficientCalibrator:
             Diagnostic dict with keys: adjustments, experiments_detected,
             samples_used, regression_residual, dry_run.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Track first innovation time for cold-start holdoff
         if self._first_innovation_time is None and innovations:
@@ -125,10 +125,10 @@ class CoefficientCalibrator:
         if len(innovations) < MIN_SAMPLES:
             _LOGGER.debug(
                 "Calibrator: insufficient samples (%d < %d), skipping",
-                len(innovations), MIN_SAMPLES,
+                len(innovations),
+                MIN_SAMPLES,
             )
-            return {"skipped": True, "reason": "insufficient_samples",
-                    "samples": len(innovations)}
+            return {"skipped": True, "reason": "insufficient_samples", "samples": len(innovations)}
 
         # Build sensitivity matrix J (N × K) and innovation vector e (N,)
         n = len(innovations)
@@ -212,15 +212,16 @@ class CoefficientCalibrator:
             self._store.calibration_count += 1
             applied = True
             _LOGGER.info(
-                "Calibrator: applied coefficient updates (cycle %d, %d samples, "
-                "residual=%.3f°F)",
-                self._store.calibration_count, n, residual,
+                "Calibrator: applied coefficient updates (cycle %d, %d samples, residual=%.3f°F)",
+                self._store.calibration_count,
+                n,
+                residual,
             )
         else:
             _LOGGER.info(
-                "Calibrator: dry-run — proposed adjustments logged but not applied "
-                "(%d samples, residual=%.3f°F)",
-                n, residual,
+                "Calibrator: dry-run — proposed adjustments logged but not applied (%d samples, residual=%.3f°F)",
+                n,
+                residual,
             )
 
         self._last_calibration = now
@@ -242,7 +243,8 @@ class CoefficientCalibrator:
         return result
 
     def _detect_natural_experiments(
-        self, innovations: list[dict],
+        self,
+        innovations: list[dict],
     ) -> list[dict]:
         """Scan for natural experiment windows in the innovation buffer.
 
@@ -252,7 +254,7 @@ class CoefficientCalibrator:
         if self._first_innovation_time is None:
             return []
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         hours_of_data = (now - self._first_innovation_time).total_seconds() / 3600
         if hours_of_data < MIN_DAYS_FOR_EXPERIMENTS * 24:
             return []
@@ -267,10 +269,7 @@ class CoefficientCalibrator:
             is_night = sun_elev is not None and sun_elev < -6
             hvac_off = not rec.get("hvac_running", False)
             no_people = rec.get("people_count") == 0
-            low_wind = (
-                rec.get("wind_speed_mph") is not None
-                and rec.get("wind_speed_mph", 99) < _PURE_ENV_MAX_WIND_MPH
-            )
+            low_wind = rec.get("wind_speed_mph") is not None and rec.get("wind_speed_mph", 99) < _PURE_ENV_MAX_WIND_MPH
             no_rain = not rec.get("precipitation", False)
             no_doors = rec.get("doors_windows_open", 0) == 0
 
@@ -279,25 +278,29 @@ class CoefficientCalibrator:
             else:
                 if len(pure_env_window) >= _PURE_ENV_MIN_DURATION_SAMPLES:
                     inns = [r.get("innovation", 0.0) for r in pure_env_window]
-                    experiments.append({
-                        "type": "pure_envelope",
-                        "samples": len(pure_env_window),
-                        "mean_innovation": round(sum(inns) / len(inns), 4),
-                        "start": pure_env_window[0].get("timestamp", ""),
-                        "end": pure_env_window[-1].get("timestamp", ""),
-                    })
+                    experiments.append(
+                        {
+                            "type": "pure_envelope",
+                            "samples": len(pure_env_window),
+                            "mean_innovation": round(sum(inns) / len(inns), 4),
+                            "start": pure_env_window[0].get("timestamp", ""),
+                            "end": pure_env_window[-1].get("timestamp", ""),
+                        }
+                    )
                 pure_env_window = []
 
         # Flush remaining window
         if len(pure_env_window) >= _PURE_ENV_MIN_DURATION_SAMPLES:
             inns = [r.get("innovation", 0.0) for r in pure_env_window]
-            experiments.append({
-                "type": "pure_envelope",
-                "samples": len(pure_env_window),
-                "mean_innovation": round(sum(inns) / len(inns), 4),
-                "start": pure_env_window[0].get("timestamp", ""),
-                "end": pure_env_window[-1].get("timestamp", ""),
-            })
+            experiments.append(
+                {
+                    "type": "pure_envelope",
+                    "samples": len(pure_env_window),
+                    "mean_innovation": round(sum(inns) / len(inns), 4),
+                    "start": pure_env_window[0].get("timestamp", ""),
+                    "end": pure_env_window[-1].get("timestamp", ""),
+                }
+            )
 
         # ── Wind isolation detection ──────────────────────────────
         # Night, HVAC off, high wind — compare to pure envelope baseline
@@ -306,10 +309,7 @@ class CoefficientCalibrator:
             sun_elev = rec.get("sun_elevation")
             is_night = sun_elev is not None and sun_elev < -6
             hvac_off = not rec.get("hvac_running", False)
-            high_wind = (
-                rec.get("wind_speed_mph") is not None
-                and rec.get("wind_speed_mph", 0) >= _WIND_ISO_MIN_WIND_MPH
-            )
+            high_wind = rec.get("wind_speed_mph") is not None and rec.get("wind_speed_mph", 0) >= _WIND_ISO_MIN_WIND_MPH
             no_doors = rec.get("doors_windows_open", 0) == 0
 
             if is_night and hvac_off and high_wind and no_doors:
@@ -317,32 +317,34 @@ class CoefficientCalibrator:
             else:
                 if len(windy_window) >= 6:  # 30 minutes minimum
                     inns = [r.get("innovation", 0.0) for r in windy_window]
-                    experiments.append({
-                        "type": "wind_isolation",
-                        "samples": len(windy_window),
-                        "mean_innovation": round(sum(inns) / len(inns), 4),
-                        "mean_wind_mph": round(
-                            sum(r.get("wind_speed_mph", 0) for r in windy_window)
-                            / len(windy_window), 1
-                        ),
-                        "start": windy_window[0].get("timestamp", ""),
-                        "end": windy_window[-1].get("timestamp", ""),
-                    })
+                    experiments.append(
+                        {
+                            "type": "wind_isolation",
+                            "samples": len(windy_window),
+                            "mean_innovation": round(sum(inns) / len(inns), 4),
+                            "mean_wind_mph": round(
+                                sum(r.get("wind_speed_mph", 0) for r in windy_window) / len(windy_window), 1
+                            ),
+                            "start": windy_window[0].get("timestamp", ""),
+                            "end": windy_window[-1].get("timestamp", ""),
+                        }
+                    )
                 windy_window = []
 
         if len(windy_window) >= 6:
             inns = [r.get("innovation", 0.0) for r in windy_window]
-            experiments.append({
-                "type": "wind_isolation",
-                "samples": len(windy_window),
-                "mean_innovation": round(sum(inns) / len(inns), 4),
-                "mean_wind_mph": round(
-                    sum(r.get("wind_speed_mph", 0) for r in windy_window)
-                    / len(windy_window), 1
-                ),
-                "start": windy_window[0].get("timestamp", ""),
-                "end": windy_window[-1].get("timestamp", ""),
-            })
+            experiments.append(
+                {
+                    "type": "wind_isolation",
+                    "samples": len(windy_window),
+                    "mean_innovation": round(sum(inns) / len(inns), 4),
+                    "mean_wind_mph": round(
+                        sum(r.get("wind_speed_mph", 0) for r in windy_window) / len(windy_window), 1
+                    ),
+                    "start": windy_window[0].get("timestamp", ""),
+                    "end": windy_window[-1].get("timestamp", ""),
+                }
+            )
 
         return experiments
 
@@ -364,21 +366,17 @@ class CoefficientCalibrator:
     def to_dict(self) -> dict:
         """Serialize calibrator state for persistence."""
         return {
-            "last_calibration": (
-                self._last_calibration.isoformat()
-                if self._last_calibration else None
-            ),
-            "first_innovation_time": (
-                self._first_innovation_time.isoformat()
-                if self._first_innovation_time else None
-            ),
+            "last_calibration": (self._last_calibration.isoformat() if self._last_calibration else None),
+            "first_innovation_time": (self._first_innovation_time.isoformat() if self._first_innovation_time else None),
             "proposed_multipliers": dict(self._proposed_multipliers),
             "calibration_history": self._calibration_history[-10:],
         }
 
     @classmethod
     def from_dict(
-        cls, data: dict, coeff_store: CoefficientStore,
+        cls,
+        data: dict,
+        coeff_store: CoefficientStore,
     ) -> CoefficientCalibrator:
         """Restore calibrator from persisted dict."""
         cal = cls(coeff_store)

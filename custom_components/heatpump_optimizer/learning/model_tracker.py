@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class CorrectionBin:
         return sum(abs(s.error) for s in self.samples) / len(self.samples)
 
     def trim_old(self, max_age_days: int = 30) -> None:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         self.samples = [s for s in self.samples if s.timestamp > cutoff]
 
 
@@ -80,9 +80,7 @@ class ModelTracker:
     def __init__(self, learning_rate: float = LEARNING_RATE):
         self._learning_rate = learning_rate
         # Bins keyed by (mode, temp_bin)
-        self._bins: dict[tuple[str, int], CorrectionBin] = defaultdict(
-            lambda: CorrectionBin(mode="", temp_bin=0)
-        )
+        self._bins: dict[tuple[str, int], CorrectionBin] = defaultdict(lambda: CorrectionBin(mode="", temp_bin=0))
         # Global correction per mode (aggregated from bins)
         self._mode_corrections: dict[str, float] = {
             "cool": DEFAULT_CORRECTION,
@@ -110,7 +108,7 @@ class ModelTracker:
             timestamp: When this was observed
         """
         if timestamp is None:
-            timestamp = datetime.now(timezone.utc)
+            timestamp = datetime.now(UTC)
 
         error = actual_delta - predicted_delta
         sample = ErrorSample(
@@ -136,9 +134,9 @@ class ModelTracker:
         Call this periodically (e.g., weekly or after N samples).
         Returns the updated mode corrections.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        for key, bin_data in self._bins.items():
+        for bin_data in self._bins.values():
             bin_data.trim_old(max_age_days=30)
 
             if len(bin_data.samples) < MIN_SAMPLES_FOR_CORRECTION:
@@ -161,27 +159,19 @@ class ModelTracker:
             ideal_correction = (mean_predicted + mean_error) / mean_predicted
             # Smooth update: move toward ideal by learning rate
             lr = self._learning_rate
-            new_correction = (
-                bin_data.correction_factor * (1 - lr)
-                + ideal_correction * lr
-            )
-            bin_data.correction_factor = max(
-                MIN_CORRECTION, min(MAX_CORRECTION, new_correction)
-            )
+            new_correction = bin_data.correction_factor * (1 - lr) + ideal_correction * lr
+            bin_data.correction_factor = max(MIN_CORRECTION, min(MAX_CORRECTION, new_correction))
 
         # Aggregate per-mode corrections (weighted average across temp bins)
         for mode in ("cool", "heat", "resist"):
             mode_bins = [
-                b for (m, _), b in self._bins.items()
-                if m == mode and len(b.samples) >= MIN_SAMPLES_FOR_CORRECTION
+                b for (m, _), b in self._bins.items() if m == mode and len(b.samples) >= MIN_SAMPLES_FOR_CORRECTION
             ]
             if not mode_bins:
                 continue
 
             total_samples = sum(len(b.samples) for b in mode_bins)
-            weighted_correction = sum(
-                b.correction_factor * len(b.samples) for b in mode_bins
-            ) / total_samples
+            weighted_correction = sum(b.correction_factor * len(b.samples) for b in mode_bins) / total_samples
 
             old = self._mode_corrections[mode]
             self._mode_corrections[mode] = weighted_correction
@@ -189,7 +179,11 @@ class ModelTracker:
             if abs(weighted_correction - old) > 0.01:
                 _LOGGER.info(
                     "Model correction [%s]: %.3f → %.3f (%d samples across %d bins)",
-                    mode, old, weighted_correction, total_samples, len(mode_bins),
+                    mode,
+                    old,
+                    weighted_correction,
+                    total_samples,
+                    len(mode_bins),
                 )
 
             # Alert check
@@ -198,7 +192,9 @@ class ModelTracker:
                 _LOGGER.warning(
                     "Model correction for %s has drifted to %.2f (%.0f%% from baseline). "
                     "Consider resetting learning to recalibrate.",
-                    mode, weighted_correction, deviation * 100,
+                    mode,
+                    weighted_correction,
+                    deviation * 100,
                 )
                 self._alert_triggered[mode] = True
             elif deviation <= ALERT_THRESHOLD * 0.8:
@@ -222,9 +218,7 @@ class ModelTracker:
         """Generate accuracy stats for sensor entities."""
         report: dict[str, dict] = {}
         for mode in ("cool", "heat", "resist"):
-            mode_bins = [
-                b for (m, _), b in self._bins.items() if m == mode
-            ]
+            mode_bins = [b for (m, _), b in self._bins.items() if m == mode]
             all_samples = [s for b in mode_bins for s in b.samples]
             if not all_samples:
                 report[mode] = {
@@ -258,9 +252,7 @@ class ModelTracker:
         return {
             "mode_corrections": dict(self._mode_corrections),
             "alert_triggered": dict(self._alert_triggered),
-            "last_update": (
-                self._last_update.isoformat() if self._last_update else None
-            ),
+            "last_update": (self._last_update.isoformat() if self._last_update else None),
             # Don't persist individual samples — they rebuild from live observation
         }
 
@@ -270,9 +262,7 @@ class ModelTracker:
         tracker = cls()
         if "mode_corrections" in data:
             for mode, val in data["mode_corrections"].items():
-                tracker._mode_corrections[mode] = max(
-                    MIN_CORRECTION, min(MAX_CORRECTION, val)
-                )
+                tracker._mode_corrections[mode] = max(MIN_CORRECTION, min(MAX_CORRECTION, val))
         if "alert_triggered" in data:
             tracker._alert_triggered = dict(data["alert_triggered"])
         if data.get("last_update"):

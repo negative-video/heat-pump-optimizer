@@ -19,8 +19,8 @@ from __future__ import annotations
 import logging
 import statistics
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ..engine.data_types import BaselineScheduleTemplate
@@ -41,6 +41,7 @@ OVERRIDE_REFINEMENT_WEIGHT = 0.3  # blend 30% override, 70% original
 @dataclass
 class SetpointObservation:
     """A single observation of the thermostat's actual behavior."""
+
     timestamp: datetime
     hour_of_day: int  # 0-23
     day_of_week: int  # 0=Monday, 6=Sunday
@@ -165,45 +166,33 @@ class BaselineCapture:
         for hour in range(24):
             obs_list = weekday_obs.get(hour, [])
             if obs_list:
-                weekday_setpoints[hour] = round(
-                    statistics.median(o.setpoint for o in obs_list), 1
-                )
+                weekday_setpoints[hour] = round(statistics.median(o.setpoint for o in obs_list), 1)
                 weekday_modes[hour] = self._dominant_mode(obs_list)
             else:
                 # Interpolate from nearest neighbor
-                weekday_setpoints[hour] = self._interpolate_setpoint(
-                    hour, weekday_obs
-                )
+                weekday_setpoints[hour] = self._interpolate_setpoint(hour, weekday_obs)
                 weekday_modes[hour] = "off"
 
         # Fill weekend buckets
         for hour in range(24):
             obs_list = weekend_obs.get(hour, [])
             if obs_list:
-                weekend_setpoints[hour] = round(
-                    statistics.median(o.setpoint for o in obs_list), 1
-                )
+                weekend_setpoints[hour] = round(statistics.median(o.setpoint for o in obs_list), 1)
                 weekend_modes[hour] = self._dominant_mode(obs_list)
             else:
-                weekend_setpoints[hour] = self._interpolate_setpoint(
-                    hour, weekend_obs
-                )
+                weekend_setpoints[hour] = self._interpolate_setpoint(hour, weekend_obs)
                 weekend_modes[hour] = "off"
 
         # Compute confidence based on coverage and consistency
         filled_buckets = sum(
-            1 for h in range(24)
-            if weekday_obs.get(h) and len(weekday_obs[h]) >= MIN_SAMPLES_PER_BUCKET
-        ) + sum(
-            1 for h in range(24)
-            if weekend_obs.get(h) and len(weekend_obs[h]) >= MIN_SAMPLES_PER_BUCKET
-        )
+            1 for h in range(24) if weekday_obs.get(h) and len(weekday_obs[h]) >= MIN_SAMPLES_PER_BUCKET
+        ) + sum(1 for h in range(24) if weekend_obs.get(h) and len(weekend_obs[h]) >= MIN_SAMPLES_PER_BUCKET)
         coverage = filled_buckets / 48.0
 
         # Consistency: average coefficient of variation across buckets
         cvs = []
         for obs_dict in [weekday_obs, weekend_obs]:
-            for hour, obs_list in obs_dict.items():
+            for obs_list in obs_dict.values():
                 if len(obs_list) >= MIN_SAMPLES_PER_BUCKET:
                     setpoints = [o.setpoint for o in obs_list]
                     mean = statistics.mean(setpoints)
@@ -222,14 +211,13 @@ class BaselineCapture:
             weekday_modes=weekday_modes,
             weekend_modes=weekend_modes,
             capture_method="learning_period",
-            capture_date=datetime.now(timezone.utc),
+            capture_date=datetime.now(UTC),
             confidence=round(confidence, 3),
             sample_days=self.sample_days,
         )
 
         _LOGGER.info(
-            "Baseline schedule captured: %d days, %.0f%% confidence, "
-            "coverage=%.0f%%, consistency=%.0f%%",
+            "Baseline schedule captured: %d days, %.0f%% confidence, coverage=%.0f%%, consistency=%.0f%%",
             self.sample_days,
             confidence * 100,
             coverage * 100,
@@ -305,13 +293,13 @@ class BaselineCapture:
             ]:
                 if hour in setpoints:
                     original = setpoints[hour]
-                    setpoints[hour] = round(
-                        original * (1 - weight) + setpoint * weight, 1
-                    )
+                    setpoints[hour] = round(original * (1 - weight) + setpoint * weight, 1)
 
             _LOGGER.debug(
                 "Baseline refined from overrides: hour=%d, setpoint=%.1f°F (%d occurrences)",
-                hour, setpoint, count,
+                hour,
+                setpoint,
+                count,
             )
 
         self._template.capture_method = "override_inferred"
@@ -337,9 +325,7 @@ class BaselineCapture:
             for neighbor in [(hour - offset) % 24, (hour + offset) % 24]:
                 if neighbor in obs_by_hour and obs_by_hour[neighbor]:
                     return round(
-                        statistics.median(
-                            o.setpoint for o in obs_by_hour[neighbor]
-                        ),
+                        statistics.median(o.setpoint for o in obs_by_hour[neighbor]),
                         1,
                     )
         return 72.0  # absolute fallback

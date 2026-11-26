@@ -25,6 +25,9 @@ select = [
 ignore = [
     "E501",   # line too long (handled by formatter)
     "SIM108", # ternary operator
+    "SIM102", # nested ifs kept where each condition carries its own comment
+    "SIM105", # explicit try/except/pass kept over contextlib.suppress
+    "UP042",  # (str, Enum) kept: StrEnum changes str() of persisted values
 ]
 
 [tool.ruff.lint.isort]

@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
-from homeassistant.const import UnitOfTemperature
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
 from homeassistant.helpers import selector
-from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.entity_discovery import EntityDiscovery
@@ -20,31 +17,30 @@ from .const import (
     AGGRESSIVENESS_AGGRESSIVE,
     AGGRESSIVENESS_BALANCED,
     AGGRESSIVENESS_CONSERVATIVE,
+    AUX_HEAT_TYPES,
+    BLEND_MODE_MEDIAN,
     BLEND_MODE_NONE,
     BLEND_MODE_OCCUPANCY,
     BLEND_MODE_SCHEDULE,
-    BLEND_MODE_MEDIAN,
     CONF_AREA_SENSOR_CONFIG,
+    CONF_ARRIVAL_SLEEP_CUTOFF,
+    CONF_ATTIC_TEMP_ENTITY,
+    CONF_AUX_HEAT_KW,
+    CONF_AUX_HEAT_OVERRIDE_ENTITY,
+    CONF_AUX_HEAT_TYPE,
+    CONF_AUXILIARY_APPLIANCES,
+    CONF_AWAY_COMFORT_DELTA,
+    CONF_BAROMETRIC_PRESSURE_ENTITY,
     CONF_BLEND_MITIGATION_MODE,
     CONF_BLEND_OUTLIER_THRESHOLD_F,
     CONF_BLEND_SCHEDULE_END,
     CONF_BLEND_SCHEDULE_START,
-    CONF_HUMIDITY_SQUELCH_PAIRS,
-    CONF_THERMOSTAT_OCCUPANCY_ENTITY,
-    DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
-    DEFAULT_BLEND_SCHEDULE_END,
-    DEFAULT_BLEND_SCHEDULE_START,
-    CONF_AUXILIARY_APPLIANCES,
-    CONF_AWAY_COMFORT_DELTA,
-    CONF_BAROMETRIC_PRESSURE_ENTITY,
     CONF_CALENDAR_AWAY_KEYWORDS,
     CONF_CALENDAR_DEFAULT_MODE,
     CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
     CONF_CARBON_WEIGHT,
-    CONF_ATTIC_TEMP_ENTITY,
-    CONF_AUX_HEAT_OVERRIDE_ENTITY,
     CONF_CLIMATE_ENTITY,
     CONF_CO2_ENTITY,
     CONF_COMFORT_COOL_MAX,
@@ -57,23 +53,21 @@ from .const import (
     CONF_DEMAND_RESPONSE_ENTITY,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
-    CONF_DUCT_TEMP_ENTITY,
-    CONF_DOOR_WINDOW_ENTITIES,
     CONF_DEPARTURE_ZONE,
     CONF_DEPARTURE_ZONES,
+    CONF_DOOR_WINDOW_ENTITIES,
+    CONF_DUCT_TEMP_ENTITY,
     CONF_ELECTRICITY_FLAT_RATE,
     CONF_ELECTRICITY_RATE_ENTITY,
     CONF_GRID_IMPORT_ENTITY,
-    CONF_HVAC_POWER_DEFAULT_WATTS,
     CONF_HEATING_WATTS,
-    CONF_HVAC_POWER_ENTITY,
     CONF_HOME_SQFT,
-    CONF_HVAC_TONNAGE,
+    CONF_HOME_ZONE_STATES,
+    CONF_HUMIDITY_SQUELCH_PAIRS,
+    CONF_HVAC_POWER_DEFAULT_WATTS,
+    CONF_HVAC_POWER_ENTITY,
     CONF_HVAC_SEER,
-    CONF_AUX_HEAT_TYPE,
-    CONF_AUX_HEAT_KW,
-    DEFAULT_AUX_HEAT_TYPE,
-    AUX_HEAT_TYPES,
+    CONF_HVAC_TONNAGE,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
     CONF_INDOOR_WEIGHTING_MODE,
@@ -81,42 +75,31 @@ from .const import (
     CONF_MAX_SETPOINT_CHANGE_PER_HOUR,
     CONF_MODEL_IMPORT_DATA,
     CONF_MONITOR_ONLY,
-    CONF_OCCUPANCY_DEBOUNCE_MINUTES,
-    CONF_OCCUPANCY_ENTITIES,
-    CONF_HOME_ZONE_STATES,
-    CONF_PROFILE_CONTROL_ENABLED,
-    CONF_PROFILE_ENTITY,
-    CONF_PROFILE_ENTITY_TYPE,
-    CONF_PROFILE_MAP_HOME,
-    CONF_PROFILE_MAP_AWAY,
-    CONF_PROFILE_MAP_SLEEP,
-    CONF_ARRIVAL_SLEEP_CUTOFF,
-    CONF_SLEEP_AWAY_OVERRIDE,
-    CONF_SLEEP_AWAY_DELAY_MINUTES,
-    PROFILE_TYPE_SELECT,
-    PROFILE_TYPE_PRESET,
-    DEFAULT_PROFILE_CONTROL_ENABLED,
-    DEFAULT_PROFILE_ENTITY_TYPE,
-    DEFAULT_PROFILE_MAP_HOME,
-    DEFAULT_PROFILE_MAP_AWAY,
-    DEFAULT_PROFILE_MAP_SLEEP,
-    DEFAULT_ARRIVAL_SLEEP_CUTOFF,
-    DEFAULT_SLEEP_AWAY_OVERRIDE,
-    DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
-    CONF_OCCUPIED_WEIGHT_MULTIPLIER,
-    CONF_OPTIMIZATION_AGGRESSIVENESS,
-    CONF_PRECONDITIONING_BUFFER_MINUTES,
-    CONF_OUTDOOR_HUMIDITY_ENTITIES,
-    CONF_OUTDOOR_TEMP_ENTITIES,
-    CONF_OVERRIDE_GRACE_PERIOD_HOURS,
-    CONF_REOPTIMIZE_INTERVAL_HOURS,
-    CONF_SAFETY_COOL_MAX,
-    CONF_SAFETY_HEAT_MIN,
     CONF_MORNING_HOLD_TEMP,
     CONF_MORNING_RECOVERY_MODE,
     CONF_MORNING_WARM_OUTDOOR_TEMP,
     CONF_MORNING_WEEKDAY_TIME,
     CONF_MORNING_WEEKEND_TIME,
+    CONF_OCCUPANCY_DEBOUNCE_MINUTES,
+    CONF_OCCUPANCY_ENTITIES,
+    CONF_OCCUPIED_WEIGHT_MULTIPLIER,
+    CONF_OPTIMIZATION_AGGRESSIVENESS,
+    CONF_OUTDOOR_HUMIDITY_ENTITIES,
+    CONF_OUTDOOR_TEMP_ENTITIES,
+    CONF_OVERRIDE_GRACE_PERIOD_HOURS,
+    CONF_PRECONDITIONING_BUFFER_MINUTES,
+    CONF_PROFILE_CONTROL_ENABLED,
+    CONF_PROFILE_ENTITY,
+    CONF_PROFILE_ENTITY_TYPE,
+    CONF_PROFILE_MAP_AWAY,
+    CONF_PROFILE_MAP_HOME,
+    CONF_PROFILE_MAP_SLEEP,
+    CONF_REOPTIMIZE_INTERVAL_HOURS,
+    CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
+    CONF_SAFETY_COOL_MAX,
+    CONF_SAFETY_HEAT_MIN,
+    CONF_SLEEP_AWAY_DELAY_MINUTES,
+    CONF_SLEEP_AWAY_OVERRIDE,
     CONF_SLEEP_COMFORT_COOL_MAX,
     CONF_SLEEP_COMFORT_COOL_MIN,
     CONF_SLEEP_COMFORT_HEAT_MAX,
@@ -132,16 +115,21 @@ from .const import (
     CONF_SOLAR_PANEL_EFFICIENCY,
     CONF_SOLAR_PRODUCTION_ENTITY,
     CONF_SUN_ENTITY,
-    CONF_UV_INDEX_ENTITY,
+    CONF_THERMOSTAT_OCCUPANCY_ENTITY,
     CONF_TOU_SCHEDULE,
-    CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
+    CONF_UV_INDEX_ENTITY,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
     CONF_WIND_SPEED_ENTITY,
     DEFAULT_AGGRESSIVENESS,
+    DEFAULT_ARRIVAL_SLEEP_CUTOFF,
+    DEFAULT_AUX_HEAT_TYPE,
     DEFAULT_AWAY_COMFORT_DELTA,
+    DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
+    DEFAULT_BLEND_SCHEDULE_END,
+    DEFAULT_BLEND_SCHEDULE_START,
     DEFAULT_CALENDAR_AWAY_KEYWORDS,
     DEFAULT_CALENDAR_DEFAULT_MODE,
     DEFAULT_CALENDAR_HOME_KEYWORDS,
@@ -152,24 +140,27 @@ from .const import (
     DEFAULT_COMFORT_HEAT_MIN,
     DEFAULT_COST_WEIGHT,
     DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES,
-    DEFAULT_HVAC_POWER_WATTS,
     DEFAULT_INDOOR_WEIGHTING_MODE,
     DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR,
-    DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES,
-    DEFAULT_OCCUPIED_WEIGHT_MULTIPLIER,
-    DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS,
-    DEFAULT_PRECONDITIONING_BUFFER_MINUTES,
-    DEFAULT_REOPTIMIZE_INTERVAL_HOURS,
-    DEFAULT_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
-    DEFAULT_SAFETY_COOL_MAX,
-    DEFAULT_SAFETY_HEAT_MIN,
     DEFAULT_MORNING_RECOVERY_MODE,
     DEFAULT_MORNING_WARM_OUTDOOR_TEMP,
     DEFAULT_MORNING_WEEKDAY_TIME,
     DEFAULT_MORNING_WEEKEND_TIME,
-    MORNING_RECOVERY_AT_SLEEP_END,
-    MORNING_RECOVERY_WAIT_FOR_WARMTH,
-    MORNING_RECOVERY_WARM_BY,
+    DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES,
+    DEFAULT_OCCUPIED_WEIGHT_MULTIPLIER,
+    DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS,
+    DEFAULT_PRECONDITIONING_BUFFER_MINUTES,
+    DEFAULT_PROFILE_CONTROL_ENABLED,
+    DEFAULT_PROFILE_ENTITY_TYPE,
+    DEFAULT_PROFILE_MAP_AWAY,
+    DEFAULT_PROFILE_MAP_HOME,
+    DEFAULT_PROFILE_MAP_SLEEP,
+    DEFAULT_REOPTIMIZE_INTERVAL_HOURS,
+    DEFAULT_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
+    DEFAULT_SAFETY_COOL_MAX,
+    DEFAULT_SAFETY_HEAT_MIN,
+    DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
+    DEFAULT_SLEEP_AWAY_OVERRIDE,
     DEFAULT_SLEEP_COMFORT_COOL_MAX,
     DEFAULT_SLEEP_COMFORT_COOL_MIN,
     DEFAULT_SLEEP_COMFORT_HEAT_MAX,
@@ -180,27 +171,29 @@ from .const import (
     DEFAULT_SOLAR_PANEL_EFFICIENCY,
     DEFAULT_SUN_ENTITY,
     DOMAIN,
+    INIT_MODE_IMPORT,
+    INIT_MODE_LEARNING,
+    MORNING_RECOVERY_AT_SLEEP_END,
+    MORNING_RECOVERY_WAIT_FOR_WARMTH,
+    MORNING_RECOVERY_WARM_BY,
+    PROFILE_TYPE_PRESET,
+    PROFILE_TYPE_SELECT,
     WEIGHTING_MODE_EQUAL,
     WEIGHTING_MODE_OCCUPIED_ONLY,
     WEIGHTING_MODE_WEIGHTED,
-    INIT_MODE_IMPORT,
-    INIT_MODE_LEARNING,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
-from .config_flow_helpers import (
+from .config_flow_helpers import (  # noqa: E402
     _comfort_selector,
     _convert_comfort_input_to_f,
-    _display_to_f,
     _f_to_display,
     _is_metric,
-    _temp_unit,
     _validate_comfort_ranges,
     _validate_model_import,
 )
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Config Flow — 3-step initial setup
@@ -224,9 +217,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # ── Step 1: Equipment ────────────────────────────────────────────
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 1: Select thermostat and weather source(s)."""
         if user_input is not None:
             # Store weather entities as list; keep singular for backward compat
@@ -242,19 +233,19 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
         weather_suggestions = discovery.discover_weather_entities()
 
         # Pre-select the highest-confidence climate entity
-        suggested_climate = (
-            climate_suggestions[0].entity_id if climate_suggestions else None
-        )
+        suggested_climate = climate_suggestions[0].entity_id if climate_suggestions else None
         # Pre-select all weather entities (first = primary)
         suggested_weather = [s.entity_id for s in weather_suggestions]
 
         schema: dict[Any, Any] = {}
 
         if suggested_climate:
-            schema[vol.Required(
-                CONF_CLIMATE_ENTITY,
-                description={"suggested_value": suggested_climate},
-            )] = selector.EntitySelector(
+            schema[
+                vol.Required(
+                    CONF_CLIMATE_ENTITY,
+                    description={"suggested_value": suggested_climate},
+                )
+            ] = selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="climate"),
             )
         else:
@@ -263,19 +254,17 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         if suggested_weather:
-            schema[vol.Required(
-                CONF_WEATHER_ENTITIES,
-                description={"suggested_value": suggested_weather},
-            )] = selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    domain="weather", multiple=True
-                ),
+            schema[
+                vol.Required(
+                    CONF_WEATHER_ENTITIES,
+                    description={"suggested_value": suggested_weather},
+                )
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="weather", multiple=True),
             )
         else:
             schema[vol.Required(CONF_WEATHER_ENTITIES)] = selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    domain="weather", multiple=True
-                ),
+                selector.EntitySelectorConfig(domain="weather", multiple=True),
             )
 
         schema[vol.Optional(CONF_MONITOR_ONLY, default=False)] = selector.BooleanSelector()
@@ -287,9 +276,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # ── Step 2: HVAC System Specs ────────────────────────────────────
 
-    async def async_step_hvac_specs(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_hvac_specs(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 2: Optional system specs — improves cold-start accuracy.
 
         All fields are optional.  Skipping this step leaves the thermal model
@@ -304,10 +291,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                 except (ValueError, TypeError):
                     user_input.pop(CONF_HVAC_TONNAGE, None)
             # Strip empty / zero / placeholder values so they don't shadow defaults
-            cleaned = {
-                k: v for k, v in user_input.items()
-                if v is not None and v != "" and v != 0 and v != "unknown"
-            }
+            cleaned = {k: v for k, v in user_input.items() if v is not None and v != "" and v != 0 and v != "unknown"}
             self._config_data.update(cleaned)
             return await self.async_step_air_sensors()
 
@@ -320,7 +304,9 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                 description={"suggested_value": existing.get(CONF_HOME_SQFT)},
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=300, max=10000, step=100,
+                    min=300,
+                    max=10000,
+                    step=100,
                     unit_of_measurement="sq ft",
                     mode=selector.NumberSelectorMode.BOX,
                 )
@@ -348,7 +334,9 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                 description={"suggested_value": existing.get(CONF_AUX_HEAT_KW)},
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=1, max=30, step=0.5,
+                    min=1,
+                    max=30,
+                    step=0.5,
                     unit_of_measurement="kW",
                     mode=selector.NumberSelectorMode.BOX,
                 )
@@ -362,9 +350,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # ── Step 3: Air Sensors ─────────────────────────────────────────
 
-    async def async_step_air_sensors(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_air_sensors(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 2: Optional indoor/outdoor air sensors (recommended)."""
         errors: dict[str, str] = {}
 
@@ -393,15 +379,11 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             high = [s.entity_id for s in suggestions if s.confidence == "high"]
             return high[:max_count]
 
-        indoor_temp_default = _suggest(
-            CONF_INDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=False)
-        )
+        indoor_temp_default = _suggest(CONF_INDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=False))
         indoor_humidity_default = _suggest(
             CONF_INDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=False)
         )
-        outdoor_temp_default = _suggest(
-            CONF_OUTDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=True)
-        )
+        outdoor_temp_default = _suggest(CONF_OUTDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=True))
         outdoor_humidity_default = _suggest(
             CONF_OUTDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=True)
         )
@@ -457,9 +439,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # ── Step 3: Presence ──────────────────────────────────────────────
 
-    async def async_step_presence_setup(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_presence_setup(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 3: Optional presence/person entities for home/away (recommended)."""
         if user_input is not None:
             user_input = {k: v for k, v in user_input.items() if v != "" and v != []}
@@ -469,10 +449,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
         # Auto-discover person entities
         discovery = EntityDiscovery(self.hass)
         person_suggestions = discovery.discover_person_entities()
-        occupancy_default = [
-            s.entity_id for s in person_suggestions
-            if s.confidence == "high"
-        ]
+        occupancy_default = [s.entity_id for s in person_suggestions if s.confidence == "high"]
 
         return self.async_show_form(
             step_id="presence_setup",
@@ -498,9 +475,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # ── Step 4: Thermal Profile ──────────────────────────────────────
 
-    async def async_step_thermal_profile(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_thermal_profile(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 2a: Choose initialization method for the thermal model."""
         if user_input is not None:
             mode = user_input.get(CONF_INITIALIZATION_MODE, INIT_MODE_LEARNING)
@@ -515,9 +490,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="thermal_profile",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        CONF_INITIALIZATION_MODE, default=INIT_MODE_LEARNING
-                    ): selector.SelectSelector(
+                    vol.Required(CONF_INITIALIZATION_MODE, default=INIT_MODE_LEARNING): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
                                 selector.SelectOptionDict(
@@ -536,9 +509,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             ),
         )
 
-    async def async_step_thermal_profile_import(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_thermal_profile_import(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 2c: Paste exported model JSON data."""
         errors: dict[str, str] = {}
 
@@ -550,9 +521,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
                 validation_error = _validate_model_import(model_data_str)
                 if validation_error:
                     errors[CONF_MODEL_IMPORT_DATA] = "invalid_model_data"
-                    _LOGGER.error(
-                        "Model import validation failed: %s", validation_error
-                    )
+                    _LOGGER.error("Model import validation failed: %s", validation_error)
                 else:
                     self._config_data[CONF_MODEL_IMPORT_DATA] = model_data_str
 
@@ -573,9 +542,7 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
 
     # ── Step 5: Temperature Boundaries ───────────────────────────────
 
-    async def async_step_comfort(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_comfort(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Step 5: Configure safety limits and optimization range."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -584,7 +551,11 @@ class HeatPumpOptimizerConfigFlow(ConfigFlow, domain=DOMAIN):
             errors = _validate_comfort_ranges(user_input)
             if not errors:
                 self._config_data.update(user_input)
-                title = "Heat Pump Optimizer (Monitor)" if self._config_data.get(CONF_MONITOR_ONLY) else "Heat Pump Optimizer"
+                title = (
+                    "Heat Pump Optimizer (Monitor)"
+                    if self._config_data.get(CONF_MONITOR_ONLY)
+                    else "Heat Pump Optimizer"
+                )
                 return self.async_create_entry(
                     title=title,
                     data=self._config_data,
@@ -644,9 +615,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Menu ─────────────────────────────────────────────────────────
 
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show the options menu."""
         if not self._options:
             # Merge .data (from initial setup) with .options (from previous
@@ -655,12 +624,20 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             self._options = {**self.config_entry.data, **self.config_entry.options}
         return self.async_show_menu(
             step_id="init",
-            menu_options=["mode", "comfort", "sleep_schedule", "presence", "profile_control", "energy", "solar_panels", "equipment", "advanced"],
+            menu_options=[
+                "mode",
+                "comfort",
+                "sleep_schedule",
+                "presence",
+                "profile_control",
+                "energy",
+                "solar_panels",
+                "equipment",
+                "advanced",
+            ],
         )
 
-    async def async_step_mode(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_mode(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Toggle monitor-only mode."""
         if user_input is not None:
             self._options[CONF_MONITOR_ONLY] = user_input.get(CONF_MONITOR_ONLY, False)
@@ -672,18 +649,26 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         )
         return self.async_show_form(
             step_id="mode",
-            data_schema=vol.Schema({
-                vol.Optional(CONF_MONITOR_ONLY, default=current): selector.BooleanSelector(),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_MONITOR_ONLY, default=current): selector.BooleanSelector(),
+                }
+            ),
         )
 
-    async def async_step_advanced(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_advanced(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Show the advanced options menu."""
         return self.async_show_menu(
             step_id="advanced",
-            menu_options=["behavior", "schedule", "indoor_sensing", "outdoor_sensors", "blend_mitigation", "humidity_squelch", "appliances"],
+            menu_options=[
+                "behavior",
+                "schedule",
+                "indoor_sensing",
+                "outdoor_sensors",
+                "blend_mitigation",
+                "humidity_squelch",
+                "appliances",
+            ],
         )
 
     # ── Helpers ──────────────────────────────────────────────────────
@@ -695,6 +680,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         doesn't accidentally select an integration output as an input.
         """
         from homeassistant.helpers import entity_registry
+
         ent_reg = entity_registry.async_get(self.hass)
         return [
             entry.entity_id
@@ -704,9 +690,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Equipment ──────────────────────────────────────────────────
 
-    async def async_step_equipment(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_equipment(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Change thermostat, weather source, or system specs without losing learned data."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
@@ -725,9 +709,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         # below without being defined, so opening this step raised NameError.
         exclude = self._get_own_entity_ids()
 
-        current_climate = self._options.get(
-            CONF_CLIMATE_ENTITY, data.get(CONF_CLIMATE_ENTITY)
-        )
+        current_climate = self._options.get(CONF_CLIMATE_ENTITY, data.get(CONF_CLIMATE_ENTITY))
         current_weather = self._options.get(
             CONF_WEATHER_ENTITIES,
             data.get(CONF_WEATHER_ENTITIES, [data.get(CONF_WEATHER_ENTITY, "")]),
@@ -753,9 +735,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         CONF_WEATHER_ENTITIES,
                         default=current_weather,
                     ): selector.EntitySelector(
-                        selector.EntitySelectorConfig(
-                            domain="weather", multiple=True
-                        ),
+                        selector.EntitySelectorConfig(domain="weather", multiple=True),
                     ),
                     vol.Optional(
                         CONF_AUX_HEAT_OVERRIDE_ENTITY,
@@ -779,7 +759,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": current_sqft},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=300, max=10000, step=100,
+                            min=300,
+                            max=10000,
+                            step=100,
                             unit_of_measurement="sq ft",
                             mode=selector.NumberSelectorMode.BOX,
                         )
@@ -807,7 +789,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": current_aux_kw},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=1, max=30, step=0.5,
+                            min=1,
+                            max=30,
+                            step=0.5,
                             unit_of_measurement="kW",
                             mode=selector.NumberSelectorMode.BOX,
                         )
@@ -818,9 +802,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Outdoor & Building Sensors ───────────────────────────────────
 
-    async def async_step_outdoor_sensors(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_outdoor_sensors(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Outdoor and building envelope sensor configuration."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
@@ -839,9 +821,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             high = [s.entity_id for s in suggestions if s.confidence == "high"]
             return high[:max_count]
 
-        outdoor_temp_default = _suggest_multi(
-            CONF_OUTDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=True)
-        )
+        outdoor_temp_default = _suggest_multi(CONF_OUTDOOR_TEMP_ENTITIES, discovery.discover_temp_sensors(outdoor=True))
         outdoor_humidity_default = _suggest_multi(
             CONF_OUTDOOR_HUMIDITY_ENTITIES, discovery.discover_humidity_sensors(outdoor=True)
         )
@@ -952,9 +932,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Energy & Cost ────────────────────────────────────────────────
 
-    async def async_step_energy(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_energy(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Power monitoring, CO2, electricity rates, optimization weights."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -991,15 +969,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 return existing
             return suggestions[0].entity_id if suggestions else None
 
-        power_default = _suggest_single(
-            CONF_HVAC_POWER_ENTITY, discovery.discover_power_sensors()
-        )
-        co2_default = _suggest_single(
-            CONF_CO2_ENTITY, discovery.discover_co2_sensors()
-        )
-        rate_default = _suggest_single(
-            CONF_ELECTRICITY_RATE_ENTITY, discovery.discover_electricity_rate_sensors()
-        )
+        power_default = _suggest_single(CONF_HVAC_POWER_ENTITY, discovery.discover_power_sensors())
+        co2_default = _suggest_single(CONF_CO2_ENTITY, discovery.discover_co2_sensors())
+        rate_default = _suggest_single(CONF_ELECTRICITY_RATE_ENTITY, discovery.discover_electricity_rate_sensors())
 
         return self.async_show_form(
             step_id="energy",
@@ -1019,7 +991,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": self._options.get(CONF_HVAC_SEER)},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=8, max=30, step=0.5,
+                            min=8,
+                            max=30,
+                            step=0.5,
                             unit_of_measurement="SEER1",
                             mode=selector.NumberSelectorMode.BOX,
                         ),
@@ -1029,7 +1003,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": self._options.get(CONF_HVAC_POWER_DEFAULT_WATTS)},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=500, max=20000, step=100,
+                            min=500,
+                            max=20000,
+                            step=100,
                             unit_of_measurement="W",
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
@@ -1039,7 +1015,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": self._options.get(CONF_COOLING_WATTS)},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=500, max=20000, step=100,
+                            min=500,
+                            max=20000,
+                            step=100,
                             unit_of_measurement="W",
                             mode=selector.NumberSelectorMode.BOX,
                         ),
@@ -1049,7 +1027,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": self._options.get(CONF_HEATING_WATTS)},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=500, max=25000, step=100,
+                            min=500,
+                            max=25000,
+                            step=100,
                             unit_of_measurement="W",
                             mode=selector.NumberSelectorMode.BOX,
                         ),
@@ -1077,16 +1057,16 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         default=self._options.get(CONF_ELECTRICITY_FLAT_RATE, 0.0),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=0.0, max=2.0, step=0.01,
+                            min=0.0,
+                            max=2.0,
+                            step=0.01,
                             unit_of_measurement="$/kWh",
                             mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
                     vol.Optional(
                         CONF_CARBON_WEIGHT,
-                        default=self._options.get(
-                            CONF_CARBON_WEIGHT, DEFAULT_CARBON_WEIGHT
-                        ),
+                        default=self._options.get(CONF_CARBON_WEIGHT, DEFAULT_CARBON_WEIGHT),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER
@@ -1094,9 +1074,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_COST_WEIGHT,
-                        default=self._options.get(
-                            CONF_COST_WEIGHT, DEFAULT_COST_WEIGHT
-                        ),
+                        default=self._options.get(CONF_COST_WEIGHT, DEFAULT_COST_WEIGHT),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=0.0, max=1.0, step=0.1, mode=selector.NumberSelectorMode.SLIDER
@@ -1124,9 +1102,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Solar Panels ────────────────────────────────────────────────
 
-    async def async_step_solar_panels(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_solar_panels(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Solar panel configuration: entities, panel specs, efficiency."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
@@ -1143,9 +1119,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             elif user_input.get(CONF_SOLAR_PANEL_AREA):
                 # Convert total area from display units to m²
                 if not _is_metric(self.hass):
-                    user_input[CONF_SOLAR_PANEL_AREA] = round(
-                        user_input[CONF_SOLAR_PANEL_AREA] / 10.764, 2
-                    )
+                    user_input[CONF_SOLAR_PANEL_AREA] = round(user_input[CONF_SOLAR_PANEL_AREA] / 10.764, 2)
             self._options.update(user_input)
             return self.async_create_entry(title="", data=self._options)
 
@@ -1206,7 +1180,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": display_area},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=0, max=10000 if not is_metric else 1000,
+                            min=0,
+                            max=10000 if not is_metric else 1000,
                             step=0.1,
                             unit_of_measurement=area_unit,
                             mode=selector.NumberSelectorMode.BOX,
@@ -1217,7 +1192,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": self._options.get(CONF_SOLAR_PANEL_COUNT)},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=1, max=200, step=1,
+                            min=1,
+                            max=200,
+                            step=1,
                             mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
@@ -1226,7 +1203,8 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         description={"suggested_value": display_each},
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=0, max=100 if not is_metric else 10,
+                            min=0,
+                            max=100 if not is_metric else 10,
                             step=0.01,
                             unit_of_measurement=area_unit,
                             mode=selector.NumberSelectorMode.BOX,
@@ -1234,12 +1212,12 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_SOLAR_PANEL_EFFICIENCY,
-                        default=self._options.get(
-                            CONF_SOLAR_PANEL_EFFICIENCY, DEFAULT_SOLAR_PANEL_EFFICIENCY
-                        ),
+                        default=self._options.get(CONF_SOLAR_PANEL_EFFICIENCY, DEFAULT_SOLAR_PANEL_EFFICIENCY),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
-                            min=0.05, max=0.35, step=0.01,
+                            min=0.05,
+                            max=0.35,
+                            step=0.01,
                             mode=selector.NumberSelectorMode.BOX,
                         ),
                     ),
@@ -1249,9 +1227,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Behavior ─────────────────────────────────────────────────────
 
-    async def async_step_behavior(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_behavior(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Aggressiveness, override grace, reopt interval, model toggles."""
         if user_input is not None:
             self._options.update(user_input)
@@ -1265,9 +1241,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 {
                     vol.Optional(
                         CONF_OPTIMIZATION_AGGRESSIVENESS,
-                        default=self._options.get(
-                            CONF_OPTIMIZATION_AGGRESSIVENESS, DEFAULT_AGGRESSIVENESS
-                        ),
+                        default=self._options.get(CONF_OPTIMIZATION_AGGRESSIVENESS, DEFAULT_AGGRESSIVENESS),
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
@@ -1338,9 +1312,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Comfort ──────────────────────────────────────────────────────
 
-    async def async_step_comfort(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_comfort(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Reconfigure safety limits and optimization range."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -1396,9 +1368,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Sleep Schedule ────────────────────────────────────────────────
 
-    async def async_step_sleep_schedule(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_sleep_schedule(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Configure optional sleep schedule with tighter comfort bounds."""
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -1463,9 +1433,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     # Morning recovery (heating): how the floor comes back up
                     vol.Optional(
                         CONF_MORNING_RECOVERY_MODE,
-                        default=self._options.get(
-                            CONF_MORNING_RECOVERY_MODE, DEFAULT_MORNING_RECOVERY_MODE
-                        ),
+                        default=self._options.get(CONF_MORNING_RECOVERY_MODE, DEFAULT_MORNING_RECOVERY_MODE),
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=[
@@ -1487,30 +1455,21 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_MORNING_WEEKDAY_TIME,
-                        default=self._options.get(
-                            CONF_MORNING_WEEKDAY_TIME, DEFAULT_MORNING_WEEKDAY_TIME
-                        ),
+                        default=self._options.get(CONF_MORNING_WEEKDAY_TIME, DEFAULT_MORNING_WEEKDAY_TIME),
                     ): selector.TimeSelector(),
                     vol.Optional(
                         CONF_MORNING_WEEKEND_TIME,
-                        default=self._options.get(
-                            CONF_MORNING_WEEKEND_TIME, DEFAULT_MORNING_WEEKEND_TIME
-                        ),
+                        default=self._options.get(CONF_MORNING_WEEKEND_TIME, DEFAULT_MORNING_WEEKEND_TIME),
                     ): selector.TimeSelector(),
                     vol.Optional(
                         CONF_MORNING_HOLD_TEMP,
                         description={
-                            "suggested_value": (
-                                _f_to_display(hold_temp, self.hass)
-                                if hold_temp is not None else None
-                            )
+                            "suggested_value": (_f_to_display(hold_temp, self.hass) if hold_temp is not None else None)
                         },
                     ): _comfort_selector(self.hass, 45, 75),
                     vol.Optional(
                         CONF_MORNING_WARM_OUTDOOR_TEMP,
-                        default=_get(
-                            CONF_MORNING_WARM_OUTDOOR_TEMP, DEFAULT_MORNING_WARM_OUTDOOR_TEMP
-                        ),
+                        default=_get(CONF_MORNING_WARM_OUTDOOR_TEMP, DEFAULT_MORNING_WARM_OUTDOOR_TEMP),
                     ): _comfort_selector(self.hass, 10, 60),
                 }
             ),
@@ -1518,17 +1477,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Occupancy ────────────────────────────────────────────────────
 
-    async def async_step_presence(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_presence(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Presence entities, debounce, away delta, and home zone states."""
         if user_input is not None:
             # Parse home_zone_states from comma-separated text
             zones_str = user_input.pop("home_zone_states_text", "")
             if zones_str:
-                user_input[CONF_HOME_ZONE_STATES] = [
-                    z.strip() for z in zones_str.split(",") if z.strip()
-                ]
+                user_input[CONF_HOME_ZONE_STATES] = [z.strip() for z in zones_str.split(",") if z.strip()]
             else:
                 user_input[CONF_HOME_ZONE_STATES] = []
             self._options.update(user_input)
@@ -1540,10 +1495,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             discovery = EntityDiscovery(self.hass)
             person_suggestions = discovery.discover_person_entities()
             # Only auto-suggest "high" confidence (person entities)
-            occupancy_default = [
-                s.entity_id for s in person_suggestions
-                if s.confidence == "high"
-            ]
+            occupancy_default = [s.entity_id for s in person_suggestions if s.confidence == "high"]
         else:
             occupancy_default = existing_occupancy
 
@@ -1585,9 +1537,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     ),
                     vol.Optional(
                         CONF_AWAY_COMFORT_DELTA,
-                        default=self._options.get(
-                            CONF_AWAY_COMFORT_DELTA, DEFAULT_AWAY_COMFORT_DELTA
-                        ),
+                        default=self._options.get(CONF_AWAY_COMFORT_DELTA, DEFAULT_AWAY_COMFORT_DELTA),
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=2.0,
@@ -1612,9 +1562,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Thermostat profile control ───────────────────────────────────
 
-    async def async_step_profile_control(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_profile_control(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Thermostat comfort profile control (home/away/sleep presets)."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
@@ -1716,18 +1664,14 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
     # ── Schedule (calendar-based occupancy) ──────────────────────────
 
-    async def async_step_schedule(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_schedule(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Calendar-based scheduling and pre-conditioning configuration."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
             # Convert comma-separated away keywords to list
             val = user_input.get(CONF_CALENDAR_AWAY_KEYWORDS, "")
             if isinstance(val, str):
-                user_input[CONF_CALENDAR_AWAY_KEYWORDS] = [
-                    k.strip() for k in val.split(",") if k.strip()
-                ]
+                user_input[CONF_CALENDAR_AWAY_KEYWORDS] = [k.strip() for k in val.split(",") if k.strip()]
             # Extract navigation flags before storing
             configure_departures = user_input.pop("configure_departures", False)
             show_advanced = user_input.pop("show_advanced", False)
@@ -1754,15 +1698,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         if not existing_calendars:
             discovery = EntityDiscovery(self.hass)
             calendar_suggestions = discovery.discover_calendar_entities()
-            calendars_default = [
-                s.entity_id for s in calendar_suggestions
-                if s.confidence in ("high", "medium")
-            ][:2]
+            calendars_default = [s.entity_id for s in calendar_suggestions if s.confidence in ("high", "medium")][:2]
         else:
             calendars_default = existing_calendars
-
-        # Check if departure profiles already exist
-        has_profiles = bool(self._options.get(CONF_DEPARTURE_PROFILES))
 
         return self.async_show_form(
             step_id="schedule",
@@ -1826,9 +1764,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_schedule_departures(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_schedule_departures(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Configure per-person departure profiles (zone + travel sensor)."""
         if user_input is not None:
             # Build profiles from per-person fields
@@ -1847,6 +1783,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     profiles.append(profile)
 
             import json as _json
+
             self._options[CONF_DEPARTURE_PROFILES] = _json.dumps(profiles)
             return self.async_create_entry(title="", data=self._options)
 
@@ -1855,6 +1792,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         raw = self._options.get(CONF_DEPARTURE_PROFILES)
         if raw:
             import json as _json
+
             try:
                 for p in _json.loads(raw):
                     existing_profiles[p["person"]] = p
@@ -1947,17 +1885,13 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         return result
 
-    async def async_step_schedule_advanced(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_schedule_advanced(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Advanced calendar settings — home keywords, default mode."""
         if user_input is not None:
             # Convert comma-separated home keywords to list
             val = user_input.get(CONF_CALENDAR_HOME_KEYWORDS, "")
             if isinstance(val, str):
-                user_input[CONF_CALENDAR_HOME_KEYWORDS] = [
-                    k.strip() for k in val.split(",") if k.strip()
-                ]
+                user_input[CONF_CALENDAR_HOME_KEYWORDS] = [k.strip() for k in val.split(",") if k.strip()]
             self._options.update(user_input)
             return self.async_create_entry(title="", data=self._options)
 
@@ -1971,9 +1905,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 {
                     vol.Optional(
                         CONF_CALENDAR_DEFAULT_MODE,
-                        default=self._options.get(
-                            CONF_CALENDAR_DEFAULT_MODE, DEFAULT_CALENDAR_DEFAULT_MODE
-                        ),
+                        default=self._options.get(CONF_CALENDAR_DEFAULT_MODE, DEFAULT_CALENDAR_DEFAULT_MODE),
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=["home", "away"],
@@ -2040,9 +1972,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         """Save appliances list to options."""
         self._options[CONF_AUXILIARY_APPLIANCES] = json.dumps(appliances)
 
-    async def async_step_appliances(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_appliances(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Appliance hub — summary and actions."""
         self._appliance_preset = None  # clear stale preset state
         appliances = self._load_appliances()
@@ -2083,41 +2013,33 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             selector.SelectOptionDict(value="add", label="Add new appliance"),
         ]
         for i, app in enumerate(appliances):
-            name = app.get("name", f"Appliance {i+1}")
-            options.append(
-                selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {name}")
-            )
-            options.append(
-                selector.SelectOptionDict(value=f"remove_{i}", label=f"Remove: {name}")
-            )
-        options.append(
-            selector.SelectOptionDict(value="done", label="Done")
-        )
+            name = app.get("name", f"Appliance {i + 1}")
+            options.append(selector.SelectOptionDict(value=f"edit_{i}", label=f"Edit: {name}"))
+            options.append(selector.SelectOptionDict(value=f"remove_{i}", label=f"Remove: {name}"))
+        options.append(selector.SelectOptionDict(value="done", label="Done"))
 
         default = "add" if not appliances else "done"
 
         return self.async_show_form(
             step_id="appliances",
-            data_schema=vol.Schema({
-                vol.Required("appliance_action", default=default): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=options,
-                        mode=selector.SelectSelectorMode.LIST,
+            data_schema=vol.Schema(
+                {
+                    vol.Required("appliance_action", default=default): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        ),
                     ),
-                ),
-            }),
+                }
+            ),
             description_placeholders={"appliance_summary": summary},
         )
 
-    async def async_step_appliance_preset(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_appliance_preset(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Pick an appliance type preset to pre-fill the edit form."""
         if user_input is not None:
             preset_key = user_input.get("appliance_preset", "custom")
-            self._appliance_preset = dict(
-                self.APPLIANCE_PRESETS.get(preset_key, self.APPLIANCE_PRESETS["custom"])
-            )
+            self._appliance_preset = dict(self.APPLIANCE_PRESETS.get(preset_key, self.APPLIANCE_PRESETS["custom"]))
             self._appliance_device_discovery = None
             return await self.async_step_appliance_device()
 
@@ -2146,14 +2068,16 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="appliance_preset",
-            data_schema=vol.Schema({
-                vol.Required("appliance_preset", default="hpwh"): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=preset_options,
-                        mode=selector.SelectSelectorMode.LIST,
+            data_schema=vol.Schema(
+                {
+                    vol.Required("appliance_preset", default="hpwh"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=preset_options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        ),
                     ),
-                ),
-            }),
+                }
+            ),
         )
 
     def _discover_appliance_entities(self, device_id: str) -> dict[str, Any]:
@@ -2168,10 +2092,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
         if device and device.name:
             result["name"] = device.name
 
-        entities = [
-            e for e in entity_reg.entities.values()
-            if e.device_id == device_id and not e.disabled
-        ]
+        entities = [e for e in entity_reg.entities.values() if e.device_id == device_id and not e.disabled]
 
         # State entity: priority order
         state_entity = None
@@ -2203,9 +2124,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         return result
 
-    async def async_step_appliance_device(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_appliance_device(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Pick a device to auto-discover its entities, or configure manually."""
         if user_input is not None:
             skip = user_input.get("skip_device", False)
@@ -2219,17 +2138,17 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="appliance_device",
-            data_schema=vol.Schema({
-                vol.Optional("appliance_device"): selector.DeviceSelector(
-                    selector.DeviceSelectorConfig(),
-                ),
-                vol.Optional("skip_device", default=False): selector.BooleanSelector(),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("appliance_device"): selector.DeviceSelector(
+                        selector.DeviceSelectorConfig(),
+                    ),
+                    vol.Optional("skip_device", default=False): selector.BooleanSelector(),
+                }
+            ),
         )
 
-    async def async_step_appliance_edit(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_appliance_edit(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Add or edit a single appliance."""
         appliances = self._load_appliances()
         editing_idx = getattr(self, "_editing_appliance_index", None)
@@ -2294,62 +2213,74 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         return self.async_show_form(
             step_id="appliance_edit",
-            data_schema=vol.Schema({
-                vol.Required(
-                    "name",
-                    description={"suggested_value": existing.get("name", "")},
-                ): selector.TextSelector(),
-                vol.Required(
-                    "state_entity",
-                    description={"suggested_value": existing.get("state_entity", "")},
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["switch", "binary_sensor", "sensor", "input_boolean", "water_heater", "fan", "climate"],
-                        exclude_entities=own_eids,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "name",
+                        description={"suggested_value": existing.get("name", "")},
+                    ): selector.TextSelector(),
+                    vol.Required(
+                        "state_entity",
+                        description={"suggested_value": existing.get("state_entity", "")},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain=[
+                                "switch",
+                                "binary_sensor",
+                                "sensor",
+                                "input_boolean",
+                                "water_heater",
+                                "fan",
+                                "climate",
+                            ],
+                            exclude_entities=own_eids,
+                        ),
                     ),
-                ),
-                vol.Required(
-                    "active_states",
-                    default=", ".join(existing.get("active_states", ["on"])),
-                ): selector.TextSelector(),
-                vol.Optional(
-                    "power_entity",
-                    description={"suggested_value": existing.get("power_entity")},
-                ): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain="sensor",
-                        device_class="power",
-                        exclude_entities=own_eids,
+                    vol.Required(
+                        "active_states",
+                        default=", ".join(existing.get("active_states", ["on"])),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "power_entity",
+                        description={"suggested_value": existing.get("power_entity")},
+                    ): selector.EntitySelector(
+                        selector.EntitySelectorConfig(
+                            domain="sensor",
+                            device_class="power",
+                            exclude_entities=own_eids,
+                        ),
                     ),
-                ),
-                vol.Required(
-                    "estimated_watts",
-                    default=existing.get("estimated_watts", 0),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0, max=15000, step=50,
-                        unit_of_measurement="W",
-                        mode=selector.NumberSelectorMode.BOX,
+                    vol.Required(
+                        "estimated_watts",
+                        default=existing.get("estimated_watts", 0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=15000,
+                            step=50,
+                            unit_of_measurement="W",
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
                     ),
-                ),
-                vol.Required(
-                    "thermal_factor",
-                    default=existing.get("thermal_factor", 3.412),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=-15, max=5, step=0.01,
-                        unit_of_measurement="BTU/W",
-                        mode=selector.NumberSelectorMode.BOX,
+                    vol.Required(
+                        "thermal_factor",
+                        default=existing.get("thermal_factor", 3.412),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=-15,
+                            max=5,
+                            step=0.01,
+                            unit_of_measurement="BTU/W",
+                            mode=selector.NumberSelectorMode.BOX,
+                        ),
                     ),
-                ),
-            }),
+                }
+            ),
         )
 
     # ── Indoor Sensing ───────────────────────────────────────────────
 
-    async def async_step_indoor_sensing(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_indoor_sensing(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Choose between simple indoor sensors or room-aware sensing."""
         if user_input is not None:
             mode = user_input.get("indoor_sensing_mode", "simple")
@@ -2387,9 +2318,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_blend_mitigation(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_blend_mitigation(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Configure thermostat satellite sensor blend mitigation.
 
         Some thermostats (Ecobee, Nest) blend their reported temperature toward
@@ -2467,9 +2396,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_humidity_squelch(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_humidity_squelch(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Configure humidity-gated sensor squelching for wet rooms.
 
         Pairs a temperature sensor with a co-located humidity sensor so the
@@ -2526,9 +2453,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_indoor_simple(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_indoor_simple(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Simple flat list of indoor temperature and humidity sensors."""
         if user_input is not None:
             user_input = self._strip_empty_strings(user_input)
@@ -2582,9 +2507,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_indoor_rooms(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_indoor_rooms(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Room-aware occupancy-weighted indoor sensing settings."""
         if user_input is not None:
             self._options.update(user_input)
@@ -2650,9 +2573,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_indoor_rooms_discover(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_indoor_rooms_discover(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Discover and select rooms from HA area registry."""
         if user_input is not None:
             selected_area_ids = user_input.get("selected_areas", [])
@@ -2660,9 +2581,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             if selected_area_ids:
                 return await self.async_step_indoor_rooms_edit()
             # No rooms selected — save empty config and return
-            self._options[CONF_AREA_SENSOR_CONFIG] = (
-                AreaOccupancyManager.serialize_area_config([])
-            )
+            self._options[CONF_AREA_SENSOR_CONFIG] = AreaOccupancyManager.serialize_area_config([])
             return self.async_create_entry(title="", data=self._options)
 
         discovered = await AreaOccupancyManager.async_discover_areas(self.hass)
@@ -2698,9 +2617,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             else:
                 parts.append("no motion sensor")
             label = f"{area.area_name} ({', '.join(parts)})"
-            area_options.append(
-                selector.SelectOptionDict(value=area.area_id, label=label)
-            )
+            area_options.append(selector.SelectOptionDict(value=area.area_id, label=label))
             if existing_area_ids:
                 if area.area_id in existing_area_ids:
                     default_selected.append(area.area_id)
@@ -2724,23 +2641,17 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             ),
         )
 
-    async def async_step_indoor_rooms_no_areas(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_indoor_rooms_no_areas(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle case where no areas with temp sensors were found."""
         if user_input is not None:
-            self._options[CONF_AREA_SENSOR_CONFIG] = (
-                AreaOccupancyManager.serialize_area_config([])
-            )
+            self._options[CONF_AREA_SENSOR_CONFIG] = AreaOccupancyManager.serialize_area_config([])
             return self.async_create_entry(title="", data=self._options)
         return self.async_show_form(
             step_id="indoor_rooms_no_areas",
             data_schema=vol.Schema({}),
         )
 
-    async def async_step_indoor_rooms_edit(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_indoor_rooms_edit(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Edit per-room temperature, humidity, and motion sensors."""
         from .engine.data_types import AreaSensorGroup
 
@@ -2761,13 +2672,15 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 edited_temp = user_input.get(temp_key, area.temp_entities)
                 edited_hum = user_input.get(hum_key, area.humidity_entities)
                 edited_motion = user_input.get(motion_key, area.motion_entities)
-                final_areas.append(AreaSensorGroup(
-                    area_id=area.area_id,
-                    area_name=area.area_name,
-                    temp_entities=edited_temp,
-                    humidity_entities=edited_hum,
-                    motion_entities=edited_motion,
-                ))
+                final_areas.append(
+                    AreaSensorGroup(
+                        area_id=area.area_id,
+                        area_name=area.area_name,
+                        temp_entities=edited_temp,
+                        humidity_entities=edited_hum,
+                        motion_entities=edited_motion,
+                    )
+                )
                 # Collect for global derivation
                 for e in edited_temp:
                     if e not in all_temp_entities:
@@ -2776,9 +2689,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                     if e not in all_humidity_entities:
                         all_humidity_entities.append(e)
 
-            self._options[CONF_AREA_SENSOR_CONFIG] = (
-                AreaOccupancyManager.serialize_area_config(final_areas)
-            )
+            self._options[CONF_AREA_SENSOR_CONFIG] = AreaOccupancyManager.serialize_area_config(final_areas)
             # Derive global indoor entities from room union
             self._options[CONF_INDOOR_TEMP_ENTITIES] = all_temp_entities
             self._options[CONF_INDOOR_HUMIDITY_ENTITIES] = all_humidity_entities
@@ -2849,9 +2760,7 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
             )
 
         if not schema_dict:
-            self._options[CONF_AREA_SENSOR_CONFIG] = (
-                AreaOccupancyManager.serialize_area_config([])
-            )
+            self._options[CONF_AREA_SENSOR_CONFIG] = AreaOccupancyManager.serialize_area_config([])
             return self.async_create_entry(title="", data=self._options)
 
         # Build description showing room names

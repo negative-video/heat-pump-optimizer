@@ -18,163 +18,148 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 from typing import Any
 
+import homeassistant.helpers.issue_registry as ir
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.util import dt as dt_util
-import homeassistant.helpers.issue_registry as ir
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
-from .coordinator_data_builder import DataBuilderMixin
-from .coordinator_helpers import HelpersMixin
-from .coordinator_persistence import PersistenceMixin
-
+from .adapters.appliance_manager import ApplianceManager
 from .adapters.area_occupancy import AreaOccupancyManager
 from .adapters.calendar_occupancy import CalendarOccupancyAdapter
-from .adapters.forecast import async_get_forecast, async_get_forecast_multi, enrich_forecast_with_grid_data, populate_sun_elevation
+from .adapters.forecast import (
+    async_get_forecast_multi,
+    enrich_forecast_with_grid_data,
+    populate_sun_elevation,
+)
 from .adapters.occupancy import OccupancyAdapter, OccupancyMode
 from .adapters.profile import ProfileAdapter
-from .adapters.appliance_manager import ApplianceManager
 from .adapters.sensor_hub import SensorHub
 from .adapters.thermostat import ThermostatAdapter
 from .const import (
+    ACTIVATION_TIER_LEARNING,
+    AGGRESSIVENESS_AGGRESSIVE,
+    AGGRESSIVENESS_CONSERVATIVE,
+    BLEND_MODE_MEDIAN,
+    BLEND_MODE_NONE,
+    BLEND_MODE_OCCUPANCY,
+    BLEND_MODE_SCHEDULE,
+    CONF_AREA_SENSOR_CONFIG,
+    CONF_ARRIVAL_SLEEP_CUTOFF,
+    CONF_ATTIC_TEMP_ENTITY,
+    CONF_AUX_HEAT_KW,
+    CONF_AUX_HEAT_OVERRIDE_ENTITY,
+    CONF_AUX_HEAT_TYPE,
+    CONF_AUXILIARY_APPLIANCES,
     CONF_BAROMETRIC_PRESSURE_ENTITY,
+    CONF_BLEND_MITIGATION_MODE,
+    CONF_BLEND_OUTLIER_THRESHOLD_F,
+    CONF_BLEND_SCHEDULE_END,
+    CONF_BLEND_SCHEDULE_START,
     CONF_CALENDAR_AWAY_KEYWORDS,
     CONF_CALENDAR_DEFAULT_MODE,
     CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_ENTITY,
     CONF_CALENDAR_HOME_KEYWORDS,
-    CONF_ATTIC_TEMP_ENTITY,
-    CONF_AUX_HEAT_OVERRIDE_ENTITY,
     CONF_CARBON_WEIGHT,
     CONF_CO2_ENTITY,
     CONF_COOLING_WATTS,
     CONF_COST_WEIGHT,
     CONF_CRAWLSPACE_TEMP_ENTITY,
-    CONF_DUCT_TEMP_ENTITY,
-    CONF_AUXILIARY_APPLIANCES,
     CONF_DEPARTURE_PROFILES,
     CONF_DEPARTURE_TRIGGER_WINDOW_MINUTES,
     CONF_DEPARTURE_ZONE,
-    CONF_DOOR_WINDOW_ENTITIES,
     CONF_DEPARTURE_ZONES,
+    CONF_DOOR_WINDOW_ENTITIES,
+    CONF_DUCT_TEMP_ENTITY,
     CONF_ELECTRICITY_FLAT_RATE,
     CONF_ELECTRICITY_RATE_ENTITY,
     CONF_GRID_IMPORT_ENTITY,
-    CONF_HVAC_POWER_DEFAULT_WATTS,
     CONF_HEATING_WATTS,
-    CONF_HVAC_POWER_ENTITY,
     CONF_HOME_SQFT,
-    CONF_HVAC_TONNAGE,
-    CONF_HVAC_SEER,
-    CONF_AUX_HEAT_TYPE,
-    CONF_AUX_HEAT_KW,
-    BLEND_MODE_NONE,
-    BLEND_MODE_MEDIAN,
-    BLEND_MODE_OCCUPANCY,
-    BLEND_MODE_SCHEDULE,
-    CONF_AREA_SENSOR_CONFIG,
-    CONF_BLEND_MITIGATION_MODE,
-    CONF_BLEND_OUTLIER_THRESHOLD_F,
-    CONF_BLEND_SCHEDULE_END,
-    CONF_BLEND_SCHEDULE_START,
+    CONF_HOME_ZONE_STATES,
     CONF_HUMIDITY_SQUELCH_PAIRS,
-    CONF_THERMOSTAT_OCCUPANCY_ENTITY,
+    CONF_HVAC_POWER_DEFAULT_WATTS,
+    CONF_HVAC_POWER_ENTITY,
+    CONF_HVAC_SEER,
+    CONF_HVAC_TONNAGE,
     CONF_INDOOR_HUMIDITY_ENTITIES,
     CONF_INDOOR_TEMP_ENTITIES,
     CONF_INDOOR_WEIGHTING_MODE,
-    CONF_OCCUPIED_WEIGHT_MULTIPLIER,
     CONF_OCCUPANCY_DEBOUNCE_MINUTES,
-    CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
-    CONF_OCCUPANCY_ENTITIES,
-    CONF_HOME_ZONE_STATES,
+    CONF_OCCUPIED_WEIGHT_MULTIPLIER,
+    CONF_OUTDOOR_HUMIDITY_ENTITIES,
+    CONF_OUTDOOR_TEMP_ENTITIES,
+    CONF_PRECONDITIONING_BUFFER_MINUTES,
     CONF_PROFILE_CONTROL_ENABLED,
     CONF_PROFILE_ENTITY,
     CONF_PROFILE_ENTITY_TYPE,
-    CONF_PROFILE_MAP_HOME,
     CONF_PROFILE_MAP_AWAY,
+    CONF_PROFILE_MAP_HOME,
     CONF_PROFILE_MAP_SLEEP,
-    CONF_ARRIVAL_SLEEP_CUTOFF,
-    CONF_SLEEP_AWAY_OVERRIDE,
+    CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_SLEEP_AWAY_DELAY_MINUTES,
-    DEFAULT_PROFILE_CONTROL_ENABLED,
-    DEFAULT_PROFILE_ENTITY_TYPE,
-    DEFAULT_PROFILE_MAP_HOME,
-    DEFAULT_PROFILE_MAP_AWAY,
-    DEFAULT_PROFILE_MAP_SLEEP,
-    DEFAULT_ARRIVAL_SLEEP_CUTOFF,
-    DEFAULT_SLEEP_AWAY_OVERRIDE,
-    DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
-    EVENT_PROFILE_CHANGED,
-    CONF_PRECONDITIONING_BUFFER_MINUTES,
-    CONF_TRAVEL_TIME_SENSOR,
-    CONF_TRAVEL_TIME_SENSORS,
-    CONF_OUTDOOR_HUMIDITY_ENTITIES,
-    CONF_OUTDOOR_TEMP_ENTITIES,
+    CONF_SLEEP_AWAY_OVERRIDE,
     CONF_SOLAR_EXPORT_RATE_ENTITY,
     CONF_SOLAR_IRRADIANCE_ENTITY,
     CONF_SOLAR_PRODUCTION_ENTITY,
     CONF_SUN_ENTITY,
-    CONF_UV_INDEX_ENTITY,
+    CONF_THERMOSTAT_OCCUPANCY_ENTITY,
     CONF_TOU_SCHEDULE,
-    CONF_CALIBRATION_ENABLED,
+    CONF_TRAVEL_TIME_SENSOR,
+    CONF_TRAVEL_TIME_SENSORS,
+    CONF_UV_INDEX_ENTITY,
     CONF_WIND_SPEED_ENTITY,
-    DEFAULT_CALENDAR_AWAY_KEYWORDS,
-    DEFAULT_CALENDAR_DEFAULT_MODE,
-    DEFAULT_CALENDAR_HOME_KEYWORDS,
-    DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES,
+    DEFAULT_ARRIVAL_SLEEP_CUTOFF,
     DEFAULT_BLEND_OUTLIER_THRESHOLD_F,
     DEFAULT_BLEND_SCHEDULE_END,
     DEFAULT_BLEND_SCHEDULE_START,
+    DEFAULT_CALENDAR_AWAY_KEYWORDS,
+    DEFAULT_CALENDAR_DEFAULT_MODE,
+    DEFAULT_CALENDAR_HOME_KEYWORDS,
+    DEFAULT_CARBON_WEIGHT,
+    DEFAULT_COST_WEIGHT,
+    DEFAULT_DEPARTURE_TRIGGER_WINDOW_MINUTES,
+    DEFAULT_FORECAST_CACHE_MAX_AGE_HOURS,
+    DEFAULT_HVAC_POWER_WATTS,
     DEFAULT_INDOOR_WEIGHTING_MODE,
+    DEFAULT_MODEL_CONFIDENCE_THRESHOLD,
     DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES,
     DEFAULT_OCCUPIED_WEIGHT_MULTIPLIER,
     DEFAULT_PRECONDITIONING_BUFFER_MINUTES,
+    DEFAULT_PROFILE_CONTROL_ENABLED,
+    DEFAULT_PROFILE_ENTITY_TYPE,
+    DEFAULT_PROFILE_MAP_AWAY,
+    DEFAULT_PROFILE_MAP_HOME,
+    DEFAULT_PROFILE_MAP_SLEEP,
     DEFAULT_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
-    DEFAULT_SUN_ENTITY,
-    DEFAULT_CARBON_WEIGHT,
-    DEFAULT_COST_WEIGHT,
-    DEFAULT_DUCT_AUX_RATE_MIN,
-    DEFAULT_DUCT_AUX_RATE_THRESHOLD_F,
-    DEFAULT_DUCT_AUX_THRESHOLD_F,
-    DEFAULT_HVAC_POWER_WATTS,
-    DEFAULT_MODEL_CONFIDENCE_THRESHOLD,
-    ACTIVATION_TIER_LEARNING,
-    ACTIVATION_TIER_CONSERVATIVE,
-    ACTIVATION_TIER_STANDARD,
-    ACTIVATION_TIER_CONFIDENT,
-    CONSERVATIVE_DRIFT_CONFIDENCE,
-    CONSERVATIVE_MIN_MODE_OBS,
-    AGGRESSIVENESS_AGGRESSIVE,
-    AGGRESSIVENESS_CONSERVATIVE,
-    DEFAULT_FORECAST_CACHE_MAX_AGE_HOURS,
-    DEFAULT_HISTORY_BOOTSTRAP_DAYS,
     DEFAULT_SAFETY_COOL_MAX,
     DEFAULT_SAFETY_HEAT_MIN,
-    DEFAULT_STALE_FORECAST_HOURS,
+    DEFAULT_SLEEP_AWAY_DELAY_MINUTES,
+    DEFAULT_SLEEP_AWAY_OVERRIDE,
+    DEFAULT_SUN_ENTITY,
     DEFAULT_THERMOSTAT_TOLERANCE_CYCLES,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
-    EVENT_ACCURACY_TIER_CHANGED,
-    EVENT_BASELINE_COMPLETE,
     EVENT_CALENDAR_OVERRIDE,
     EVENT_CONFIDENCE_REACHED,
     EVENT_DISTURBED,
     EVENT_MODE_CHANGED,
-    EVENT_MODEL_ALERT,
     EVENT_OPTIMIZATION_COMPLETE,
     EVENT_OVERRIDE_DETECTED,
-    EVENT_PRECONDITIONING_COMPLETE,
     EVENT_PRECONDITIONING_START,
+    EVENT_PROFILE_CHANGED,
     EVENT_SAFE_MODE_ENTERED,
-    PHASE_PRECONDITIONING,
     PHASE_IDLE,
     PHASE_LEARNING,
     PHASE_PAUSED,
+    PHASE_PRECONDITIONING,
     PHASE_SAFE_MODE,
     STORAGE_KEY,
     STORAGE_VERSION,
@@ -182,6 +167,14 @@ from .const import (
 from .controllers.strategic import StrategicPlanner
 from .controllers.tactical import TacticalController, TacticalState
 from .controllers.watchdog import WatchdogController
+from .coordinator_data_builder import DataBuilderMixin
+from .coordinator_helpers import HelpersMixin
+from .coordinator_persistence import PersistenceMixin
+from .engine.comfort import (
+    calculate_apparent_temperature,
+    derive_effective_comfort_band,
+)
+from .engine.counterfactual_simulator import CounterfactualSimulator
 from .engine.data_types import (
     ForecastPoint,
     OccupancyForecastPoint,
@@ -189,36 +182,38 @@ from .engine.data_types import (
     PreconditionPlan,
     ScheduleEntry,
 )
-from .engine.comfort import (
-    calculate_apparent_temperature,
-    derive_effective_comfort_band,
-)
 from .engine.morning_recovery import (
     RECOVERY_MODES,
     MorningRecoveryConfig,
     parse_time,
 )
 from .engine.optimizer import ScheduleOptimizer
-from .engine.precondition_planner import PreconditionPlanner
 from .engine.performance_model import PerformanceModel
+from .engine.precondition_planner import PreconditionPlanner
 from .engine.thermal_simulator import ThermalSimulator
-from .engine.counterfactual_simulator import CounterfactualSimulator
 from .learning.ab_trial import (
     DEFAULT_PERIOD_DAYS as AB_TRIAL_DEFAULT_PERIOD_DAYS,
+)
+from .learning.ab_trial import (
     DEFAULT_TOTAL_DAYS as AB_TRIAL_DEFAULT_TOTAL_DAYS,
+)
+from .learning.ab_trial import (
     ABTrial,
 )
 from .learning.aux_heat_learner import AuxHeatLearner
 from .learning.baseline_capture import BaselineCapture
+from .learning.coefficient_calibrator import CoefficientCalibrator
+from .learning.coefficient_store import CoefficientStore
 from .learning.energy_baseline import EnergyBaseline
 from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
-from .learning.thermal_profile import derive_thermal_profile, thermal_mass_for
 from .learning.solar_adjuster import SolarAdjuster
-from .learning.coefficient_calibrator import CoefficientCalibrator
-from .learning.coefficient_store import CoefficientStore
-from .savings_tracker import SavingsTracker, TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED
+from .learning.thermal_profile import derive_thermal_profile, thermal_mass_for
+from .savings_tracker import (
+    TIER_LEARNING,
+    SavingsTracker,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -241,7 +236,10 @@ def _float_or_none(value: object) -> float | None:
 
 
 class HeatPumpOptimizerCoordinator(
-    DataBuilderMixin, HelpersMixin, PersistenceMixin, DataUpdateCoordinator,
+    DataBuilderMixin,
+    HelpersMixin,
+    PersistenceMixin,
+    DataUpdateCoordinator,
 ):
     """Coordinator that manages the full optimization lifecycle."""
 
@@ -325,14 +323,17 @@ class HeatPumpOptimizerCoordinator(
             self._power_default_watts = (self._hvac_tonnage * 12000.0) / self._hvac_seer
             _LOGGER.debug(
                 "Derived power_default_watts=%.0f W from tonnage=%.1f + SEER=%.1f",
-                self._power_default_watts, self._hvac_tonnage, self._hvac_seer,
+                self._power_default_watts,
+                self._hvac_tonnage,
+                self._hvac_seer,
             )
         elif self._hvac_tonnage:
             # Estimate: ~850 W/ton ≈ 14 SEER (conservative — slightly overestimates cost)
             self._power_default_watts = self._hvac_tonnage * 850.0
             _LOGGER.debug(
                 "Estimated power_default_watts=%.0f W from tonnage=%.1f (no SEER provided)",
-                self._power_default_watts, self._hvac_tonnage,
+                self._power_default_watts,
+                self._hvac_tonnage,
             )
         else:
             self._power_default_watts = float(DEFAULT_HVAC_POWER_WATTS)
@@ -343,6 +344,7 @@ class HeatPumpOptimizerCoordinator(
         self._blend_outlier_threshold_f: float = float(
             opts.get(CONF_BLEND_OUTLIER_THRESHOLD_F, DEFAULT_BLEND_OUTLIER_THRESHOLD_F)
         )
+
         # Parse schedule start/end as datetime.time objects
         def _parse_time(s: str, default: str) -> dt_time:
             try:
@@ -351,6 +353,7 @@ class HeatPumpOptimizerCoordinator(
             except (ValueError, AttributeError):
                 h, m = default.split(":")
                 return dt_time(int(h), int(m))
+
         self._blend_schedule_start: dt_time = _parse_time(
             opts.get(CONF_BLEND_SCHEDULE_START, DEFAULT_BLEND_SCHEDULE_START),
             DEFAULT_BLEND_SCHEDULE_START,
@@ -392,15 +395,11 @@ class HeatPumpOptimizerCoordinator(
             flat_rate=self._flat_rate,
             blend_mode=self._blend_mode,
             blend_outlier_threshold_f=self._blend_outlier_threshold_f,
-            humidity_squelch_pairs=self._parse_squelch_pairs(
-                opts.get(CONF_HUMIDITY_SQUELCH_PAIRS, "")
-            ),
+            humidity_squelch_pairs=self._parse_squelch_pairs(opts.get(CONF_HUMIDITY_SQUELCH_PAIRS, "")),
         )
 
         # Auxiliary appliance manager (optional — HPWH, dryer, etc.)
-        self.appliance_manager = ApplianceManager(
-            hass, opts.get(CONF_AUXILIARY_APPLIANCES)
-        )
+        self.appliance_manager = ApplianceManager(hass, opts.get(CONF_AUXILIARY_APPLIANCES))
         if self.appliance_manager.configured:
             _LOGGER.info(
                 "Auxiliary appliances configured: %d appliance(s)",
@@ -439,9 +438,7 @@ class HeatPumpOptimizerCoordinator(
         # Read current indoor temp (may not be available yet)
         _init_state = ThermostatAdapter(hass, climate_entity_id).read_state()
         _init_indoor = (
-            _init_state.indoor_temp
-            if _init_state.available and _init_state.indoor_temp is not None
-            else 72.0
+            _init_state.indoor_temp if _init_state.available and _init_state.indoor_temp is not None else 72.0
         )
 
         # Conservative static defaults. The profiler supersedes these within
@@ -451,10 +448,7 @@ class HeatPumpOptimizerCoordinator(
 
         if initialization_mode == "import" and model_import_data:
             try:
-                parsed = (
-                    json.loads(model_import_data)
-                    if isinstance(model_import_data, str) else model_import_data
-                )
+                parsed = json.loads(model_import_data) if isinstance(model_import_data, str) else model_import_data
                 imported = parsed.get("profiler", parsed.get("state", parsed))
                 self.profiler = PerformanceProfiler.from_dict(imported)
                 _LOGGER.info(
@@ -464,7 +458,8 @@ class HeatPumpOptimizerCoordinator(
             except (KeyError, ValueError, TypeError) as err:
                 _LOGGER.error(
                     "Failed to import model (%s) — starting fresh",
-                    type(err).__name__, exc_info=True,
+                    type(err).__name__,
+                    exc_info=True,
                 )
                 self.profiler = PerformanceProfiler()
         else:
@@ -486,9 +481,7 @@ class HeatPumpOptimizerCoordinator(
         self.coeff_calibrator = CoefficientCalibrator(self.coeff_store)
 
         # Aux heat activation learner
-        self.aux_heat_learner = AuxHeatLearner(
-            default_hp_watts=self._power_default_watts
-        )
+        self.aux_heat_learner = AuxHeatLearner(default_hp_watts=self._power_default_watts)
         self._cached_aux_heat_active: bool = False
         # Whether the most recent power reading came from a real power sensor
         self._power_is_measured: bool = False
@@ -498,9 +491,7 @@ class HeatPumpOptimizerCoordinator(
         self.occupancy = OccupancyAdapter(
             hass,
             entity_ids=occupancy_entity_ids,
-            debounce_minutes=opts.get(
-                CONF_OCCUPANCY_DEBOUNCE_MINUTES, DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES
-            ),
+            debounce_minutes=opts.get(CONF_OCCUPANCY_DEBOUNCE_MINUTES, DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES),
             home_zone_states=opts.get(CONF_HOME_ZONE_STATES, []),
         )
         self.occupancy.away_comfort_delta = self._away_comfort_delta
@@ -509,9 +500,7 @@ class HeatPumpOptimizerCoordinator(
         self._profile_adapter: ProfileAdapter | None = None
         if opts.get(CONF_PROFILE_CONTROL_ENABLED, DEFAULT_PROFILE_CONTROL_ENABLED):
             profile_entity = opts.get(CONF_PROFILE_ENTITY)
-            profile_type = opts.get(
-                CONF_PROFILE_ENTITY_TYPE, DEFAULT_PROFILE_ENTITY_TYPE
-            )
+            profile_type = opts.get(CONF_PROFILE_ENTITY_TYPE, DEFAULT_PROFILE_ENTITY_TYPE)
             if profile_entity or profile_type == "preset":
                 self._profile_adapter = ProfileAdapter(
                     hass,
@@ -524,15 +513,9 @@ class HeatPumpOptimizerCoordinator(
                         "sleep": opts.get(CONF_PROFILE_MAP_SLEEP, DEFAULT_PROFILE_MAP_SLEEP),
                     },
                 )
-        self._arrival_sleep_cutoff: str = opts.get(
-            CONF_ARRIVAL_SLEEP_CUTOFF, DEFAULT_ARRIVAL_SLEEP_CUTOFF
-        )
-        self._sleep_away_override: bool = opts.get(
-            CONF_SLEEP_AWAY_OVERRIDE, DEFAULT_SLEEP_AWAY_OVERRIDE
-        )
-        self._sleep_away_delay_minutes: int = opts.get(
-            CONF_SLEEP_AWAY_DELAY_MINUTES, DEFAULT_SLEEP_AWAY_DELAY_MINUTES
-        )
+        self._arrival_sleep_cutoff: str = opts.get(CONF_ARRIVAL_SLEEP_CUTOFF, DEFAULT_ARRIVAL_SLEEP_CUTOFF)
+        self._sleep_away_override: bool = opts.get(CONF_SLEEP_AWAY_OVERRIDE, DEFAULT_SLEEP_AWAY_OVERRIDE)
+        self._sleep_away_delay_minutes: int = opts.get(CONF_SLEEP_AWAY_DELAY_MINUTES, DEFAULT_SLEEP_AWAY_DELAY_MINUTES)
         self._last_profile_mode: str | None = None
         self._away_delay_pending_since: datetime | None = None
 
@@ -609,9 +592,7 @@ class HeatPumpOptimizerCoordinator(
         # Savings tracking
         self.savings_tracker = SavingsTracker()
         self.baseline_capture = BaselineCapture()
-        self.counterfactual = CounterfactualSimulator(
-            deadband=self._thermostat_deadband
-        )
+        self.counterfactual = CounterfactualSimulator(deadband=self._thermostat_deadband)
 
         # Measured, weather-normalized savings (headline) and the A/B trial
         # that can validate them. These deliberately do not depend on the
@@ -688,12 +669,8 @@ class HeatPumpOptimizerCoordinator(
         if stored:
             self._restore_learning_state(stored)
             # Track whether a previous bootstrap succeeded (persisted flag)
-            self._history_bootstrap_completed = stored.get(
-                "_history_bootstrap_completed", False
-            )
-            self._bootstrap_retry_count = stored.get(
-                "_bootstrap_retry_count", 0
-            )
+            self._history_bootstrap_completed = stored.get("_history_bootstrap_completed", False)
+            self._bootstrap_retry_count = stored.get("_bootstrap_retry_count", 0)
 
         # NOTE: History bootstrap moved to async_at_started callback
         # (called from __init__.py) where the recorder is guaranteed ready.
@@ -764,14 +741,16 @@ class HeatPumpOptimizerCoordinator(
         except Exception as err:
             _LOGGER.error(
                 "Update cycle failed: %s: %s",
-                type(err).__name__, err, exc_info=True,
+                type(err).__name__,
+                err,
+                exc_info=True,
             )
             raise UpdateFailed(f"{type(err).__name__}: {err}") from err
 
     async def _update_cycle(self) -> dict[str, Any]:
         """Full 5-minute update cycle."""
         self._cached_activation_tier = None  # Invalidate per-cycle cache
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Always fetch weather early — panel needs it even when paused/override
         try:
@@ -779,7 +758,7 @@ class HeatPumpOptimizerCoordinator(
                 async_get_forecast_multi(self.hass, self._weather_entity_ids),
                 timeout=FORECAST_FETCH_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.warning(
                 "Forecast fetch timed out after %.0fs — using last-good forecast",
                 FORECAST_FETCH_TIMEOUT_S,
@@ -874,12 +853,8 @@ class HeatPumpOptimizerCoordinator(
             self.area_manager.update_readings()
 
         # Read indoor humidity from SensorHub (weighted → entity average → thermostat)
-        indoor_humidity_reading = self.sensor_hub.read_weighted_indoor_humidity(
-            thermo_state.humidity
-        )
-        self._current_indoor_humidity = (
-            indoor_humidity_reading.value if indoor_humidity_reading else None
-        )
+        indoor_humidity_reading = self.sensor_hub.read_weighted_indoor_humidity(thermo_state.humidity)
+        self._current_indoor_humidity = indoor_humidity_reading.value if indoor_humidity_reading else None
 
         # Thermostat satellite blend detection (occupancy/schedule modes).
         # For median mode, SensorHub handles detection internally during read_indoor_temp.
@@ -892,26 +867,19 @@ class HeatPumpOptimizerCoordinator(
         # When blend is suspected (occupancy or schedule modes), pass None so
         # SensorHub falls back to indoor entity averaging only (e.g. EP1).
         effective_thermo_temp = (
-            None if (
-                self._thermostat_blend_suspected
-                and self._blend_mode in (BLEND_MODE_OCCUPANCY, BLEND_MODE_SCHEDULE)
-            )
+            None
+            if (self._thermostat_blend_suspected and self._blend_mode in (BLEND_MODE_OCCUPANCY, BLEND_MODE_SCHEDULE))
             else thermo_state.indoor_temp
         )
 
         # Read weighted indoor temp (falls back to thermostat if no area manager)
-        indoor_temp_reading = self.sensor_hub.read_weighted_indoor_temp(
-            effective_thermo_temp
-        )
+        indoor_temp_reading = self.sensor_hub.read_weighted_indoor_temp(effective_thermo_temp)
 
         # For median mode, update the blend flag after SensorHub has run its filter
         if self._blend_mode == BLEND_MODE_MEDIAN:
             self._thermostat_blend_suspected = self.sensor_hub.thermostat_blend_suspected
 
-        effective_indoor_temp = (
-            indoor_temp_reading.value if indoor_temp_reading
-            else thermo_state.indoor_temp
-        )
+        effective_indoor_temp = indoor_temp_reading.value if indoor_temp_reading else thermo_state.indoor_temp
         self._effective_indoor_temp = effective_indoor_temp
 
         # Noise scale for EKF: inflate R_meas only when thermostat is the sole
@@ -924,7 +892,8 @@ class HeatPumpOptimizerCoordinator(
             and "thermostat" in (indoor_temp_reading.source or "")
         )
         self._last_indoor_noise_scale = (
-            4.0 if (
+            4.0
+            if (
                 self._thermostat_blend_suspected
                 and self._blend_mode in (BLEND_MODE_OCCUPANCY, BLEND_MODE_SCHEDULE)
                 and thermostat_is_only_source
@@ -937,15 +906,10 @@ class HeatPumpOptimizerCoordinator(
         if thermo_state.indoor_temp is not None and self.sensor_hub._indoor_temp_entities:
             entity_only_reading = self.sensor_hub.read_indoor_temp(thermostat_temp=None)
             if entity_only_reading is not None:
-                self._cross_sensor_spread_f = abs(
-                    thermo_state.indoor_temp - entity_only_reading.value
-                )
+                self._cross_sensor_spread_f = abs(thermo_state.indoor_temp - entity_only_reading.value)
 
         # Calculate apparent temperature (humidity-adjusted feels-like temp)
-        if (
-            effective_indoor_temp is not None
-            and self._current_indoor_humidity is not None
-        ):
+        if effective_indoor_temp is not None and self._current_indoor_humidity is not None:
             self._current_apparent_temp = calculate_apparent_temperature(
                 effective_indoor_temp, self._current_indoor_humidity
             )
@@ -955,9 +919,7 @@ class HeatPumpOptimizerCoordinator(
         # ── Sensor health checks (HA issue reporting) ────────────────
 
         # Outdoor temp staleness
-        outdoor_reading = self.sensor_hub.read_outdoor_temp(
-            forecast_snapshot=self.strategic.forecast_snapshot
-        )
+        outdoor_reading = self.sensor_hub.read_outdoor_temp(forecast_snapshot=self.strategic.forecast_snapshot)
         if (outdoor_reading and outdoor_reading.stale) or self.sensor_hub.outdoor_sensor_stale:
             ir.async_create_issue(
                 self.hass,
@@ -991,9 +953,9 @@ class HeatPumpOptimizerCoordinator(
         dw_entities = self.sensor_hub._door_window_entities
         if dw_entities:
             unavailable_dw = [
-                eid for eid in dw_entities
-                if (s := self.hass.states.get(eid)) is None
-                or s.state in ("unknown", "unavailable")
+                eid
+                for eid in dw_entities
+                if (s := self.hass.states.get(eid)) is None or s.state in ("unknown", "unavailable")
             ]
             if unavailable_dw:
                 ir.async_create_issue(
@@ -1074,15 +1036,15 @@ class HeatPumpOptimizerCoordinator(
         # (unsmoothed) confidence; see PerformanceProfiler.confidence.
 
         profiler_conf = self.profiler.confidence(raw=True)
-        if (
-            not self._confidence_threshold_reached
-            and profiler_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD
-        ):
+        if not self._confidence_threshold_reached and profiler_conf >= DEFAULT_MODEL_CONFIDENCE_THRESHOLD:
             self._confidence_threshold_reached = True
-            self._fire_event(EVENT_CONFIDENCE_REACHED, {
-                "confidence": round(profiler_conf * 100, 1),
-                "observations": self.profiler.total_observations,
-            })
+            self._fire_event(
+                EVENT_CONFIDENCE_REACHED,
+                {
+                    "confidence": round(profiler_conf * 100, 1),
+                    "observations": self.profiler.total_observations,
+                },
+            )
 
         # ── Shared sensor reads (used by savings, counterfactual, profiler) ──
 
@@ -1103,9 +1065,7 @@ class HeatPumpOptimizerCoordinator(
         elec_rate = self.sensor_hub.read_electricity_rate()
         solar_reading = self.sensor_hub.read_solar_production()
         grid_import_reading = self.sensor_hub.read_grid_import()
-        outdoor_reading = self.sensor_hub.read_outdoor_temp(
-            self.strategic.forecast_snapshot
-        )
+        outdoor_reading = self.sensor_hub.read_outdoor_temp(self.strategic.forecast_snapshot)
         outdoor_temp = outdoor_reading.value if outdoor_reading else None
 
         # Effective outdoor temp for aux learner (wind-chill-adjusted if available)
@@ -1120,12 +1080,9 @@ class HeatPumpOptimizerCoordinator(
         try:
             if outdoor_temp is not None and thermo_state.indoor_temp is not None:
                 _setpoint_delta = abs(
-                    thermo_state.indoor_temp
-                    - (thermo_state.effective_setpoint or thermo_state.indoor_temp)
+                    thermo_state.indoor_temp - (thermo_state.effective_setpoint or thermo_state.indoor_temp)
                 )
-                _hum_reading = self.sensor_hub.read_outdoor_humidity(
-                    forecast_snapshot=self.strategic.forecast_snapshot
-                )
+                _hum_reading = self.sensor_hub.read_outdoor_humidity(forecast_snapshot=self.strategic.forecast_snapshot)
                 _outdoor_humidity = (_hum_reading.value if _hum_reading else None) or 50.0
                 self.aux_heat_learner.record_interval(
                     aux_heat_active=aux_heat_active,
@@ -1170,16 +1127,18 @@ class HeatPumpOptimizerCoordinator(
         try:
             if outdoor_temp is not None:
                 # Construct baseline setpoints from user's comfort config
-                effective_mode = self.occupancy.get_effective_mode(
-                    self._occupancy_timeline or None
-                )
+                effective_mode = self.occupancy.get_effective_mode(self._occupancy_timeline or None)
                 adj_cool = OccupancyAdapter.adjust_comfort_for_mode(
-                    self.comfort_cool, "cool", effective_mode,
+                    self.comfort_cool,
+                    "cool",
+                    effective_mode,
                     away_delta=self._away_comfort_delta,
                     safety_limits=self.safety_limits,
                 )
                 adj_heat = OccupancyAdapter.adjust_comfort_for_mode(
-                    self.comfort_heat, "heat", effective_mode,
+                    self.comfort_heat,
+                    "heat",
+                    effective_mode,
                     away_delta=self._away_comfort_delta,
                     safety_limits=self.safety_limits,
                 )
@@ -1208,10 +1167,7 @@ class HeatPumpOptimizerCoordinator(
                     carbon_intensity=co2_intensity,
                     electricity_rate=elec_rate,
                     real_indoor_temp=thermo_state.indoor_temp,
-                    aux_threshold_f=(
-                        self.aux_heat_learner.threshold_f
-                        if self.aux_heat_learner.is_learned else None
-                    ),
+                    aux_threshold_f=(self.aux_heat_learner.threshold_f if self.aux_heat_learner.is_learned else None),
                 )
         except (ValueError, TypeError, ZeroDivisionError, KeyError):
             _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
@@ -1255,8 +1211,7 @@ class HeatPumpOptimizerCoordinator(
                 )
                 if self.baseline_capture.is_ready and self.baseline_capture.template is None:
                     self.baseline_capture.build_template()
-                    _LOGGER.info("Baseline schedule captured after %d days",
-                                 self.baseline_capture.sample_days)
+                    _LOGGER.info("Baseline schedule captured after %d days", self.baseline_capture.sample_days)
         except (ValueError, TypeError, KeyError):
             _LOGGER.warning("Baseline capture failed", exc_info=True)
 
@@ -1272,10 +1227,7 @@ class HeatPumpOptimizerCoordinator(
         _profiler_sun_elev = self.sensor_hub.read_sun_elevation()
 
         try:
-            if (
-                thermo_state.indoor_temp is not None
-                and outdoor_temp is not None
-            ):
+            if thermo_state.indoor_temp is not None and outdoor_temp is not None:
                 # Seeded from floor area, not estimated. This used to read the
                 # EKF's C_inv state, so the appliance-BTU conversion moved
                 # whenever the filter wandered -- the profiler's own training
@@ -1304,7 +1256,8 @@ class HeatPumpOptimizerCoordinator(
                 self._last_profiler_status = "skipped_no_temps"
                 _LOGGER.warning(
                     "Profiler skipped — missing temps: indoor=%s, outdoor=%s",
-                    thermo_state.indoor_temp, outdoor_temp,
+                    thermo_state.indoor_temp,
+                    outdoor_temp,
                 )
         except Exception:  # noqa: BLE001
             self._last_profiler_status = "error"
@@ -1356,8 +1309,7 @@ class HeatPumpOptimizerCoordinator(
             await self._run_strategic_optimization(forecast=new_forecast)
         elif (
             self._planned_occupancy is not None
-            and self.occupancy.get_effective_mode(self._occupancy_timeline or None)
-            != self._planned_occupancy
+            and self.occupancy.get_effective_mode(self._occupancy_timeline or None) != self._planned_occupancy
         ):
             # The plan's bands were built for a different occupancy. Someone
             # coming home should not wait for the next scheduled re-plan.
@@ -1377,9 +1329,12 @@ class HeatPumpOptimizerCoordinator(
                 # five minutes for as long as the weather service was down.
                 self._in_safe_mode = True
                 _LOGGER.warning("Forecast stale — entering safe mode")
-                self._fire_event(EVENT_SAFE_MODE_ENTERED, {
-                    "reason": "forecast_stale",
-                })
+                self._fire_event(
+                    EVENT_SAFE_MODE_ENTERED,
+                    {
+                        "reason": "forecast_stale",
+                    },
+                )
                 ir.async_create_issue(
                     self.hass,
                     DOMAIN,
@@ -1399,7 +1354,13 @@ class HeatPumpOptimizerCoordinator(
         schedule = self.strategic.schedule
         current_entry = self._get_current_entry(now)
 
-        if schedule and self._active and current_entry and thermo_state.indoor_temp is not None and self._baseline_ready_for_control:
+        if (
+            schedule
+            and self._active
+            and current_entry
+            and thermo_state.indoor_temp is not None
+            and self._baseline_ready_for_control
+        ):
             # Run tactical evaluation
             tactical_result = self.tactical.evaluate(
                 actual_indoor_temp=thermo_state.indoor_temp,
@@ -1420,15 +1381,26 @@ class HeatPumpOptimizerCoordinator(
                 # Don't write setpoints while disturbed (window open, etc.)
                 _LOGGER.debug("Tactical: %s", tactical_result.reason)
                 # Fire event only on transition into disturbed (not every cycle)
-                if self.tactical._disturbed_since and (now - self.tactical._disturbed_since).total_seconds() < DEFAULT_UPDATE_INTERVAL_MINUTES * 60 + 30:
-                    self._fire_event(EVENT_DISTURBED, {
-                        "error": round(tactical_result.error, 1),
-                        "actual_temp": round(tactical_result.actual_temp, 1),
-                        "predicted_temp": round(tactical_result.predicted_temp, 1) if tactical_result.predicted_temp else None,
-                    })
+                if (
+                    self.tactical._disturbed_since
+                    and (now - self.tactical._disturbed_since).total_seconds()
+                    < DEFAULT_UPDATE_INTERVAL_MINUTES * 60 + 30
+                ):
+                    self._fire_event(
+                        EVENT_DISTURBED,
+                        {
+                            "error": round(tactical_result.error, 1),
+                            "actual_temp": round(tactical_result.actual_temp, 1),
+                            "predicted_temp": round(tactical_result.predicted_temp, 1)
+                            if tactical_result.predicted_temp
+                            else None,
+                        },
+                    )
             elif tactical_result.should_write_setpoint and tactical_result.corrected_setpoint is not None:
                 await self._write_setpoint(
-                    now, thermo_state, current_entry,
+                    now,
+                    thermo_state,
+                    current_entry,
                     corrected=tactical_result.corrected_setpoint,
                 )
             else:
@@ -1457,9 +1429,7 @@ class HeatPumpOptimizerCoordinator(
         # ── Departure detection (Stage 2 pre-conditioning) ───────────
 
         if self._precondition_plan and thermo_state.indoor_temp is not None:
-            await self._check_departure_trigger(
-                now, thermo_state.indoor_temp, new_forecast
-            )
+            await self._check_departure_trigger(now, thermo_state.indoor_temp, new_forecast)
 
     # ── Setpoint writes ─────────────────────────────────────────────
 
@@ -1526,14 +1496,18 @@ class HeatPumpOptimizerCoordinator(
             low = self._apply_rate_limit(heat_target, cur_low)
             high = self._apply_rate_limit(cool_target, cur_high)
             if (
-                cur_low is not None and cur_high is not None
-                and abs(cur_low - low) <= 0.5 and abs(cur_high - high) <= 0.5
+                cur_low is not None
+                and cur_high is not None
+                and abs(cur_low - low) <= 0.5
+                and abs(cur_high - high) <= 0.5
             ):
                 return False
             if not self._check_dwell_time(now):
                 return False
             wrote = await self.thermostat.async_set_dual_setpoints(
-                low, high, primary=mode,
+                low,
+                high,
+                primary=mode,
             )
         elif thermo_state.hvac_mode in ("heat", "cool"):
             # The thermostat's own mode decides which target it can use.
@@ -1576,7 +1550,7 @@ class HeatPumpOptimizerCoordinator(
         heat_band, cool_band = self._write_bands()
         floor, ceiling = heat_band[0], cool_band[1]
         # A morning recovery already under way keeps its setpoint
-        planned_heat = self.strategic.heat_target_at(datetime.now(timezone.utc))
+        planned_heat = self.strategic.heat_target_at(datetime.now(UTC))
         if isinstance(planned_heat, (int, float)):
             floor = max(heat_band[0], min(heat_band[1], float(planned_heat)))
         if state.hvac_mode == "heat_cool":
@@ -1594,10 +1568,14 @@ class HeatPumpOptimizerCoordinator(
                 return False
         _LOGGER.info(
             "Restoring flat setpoints (%s): heat %.1f°F / cool %.1f°F",
-            reason, floor, ceiling,
+            reason,
+            floor,
+            ceiling,
         )
         return await self.thermostat.async_write_flat_default(
-            floor, ceiling, self._plan_mode(),
+            floor,
+            ceiling,
+            self._plan_mode(),
         )
 
     # ── Strategic optimization ──────────────────────────────────────
@@ -1612,26 +1590,23 @@ class HeatPumpOptimizerCoordinator(
             _LOGGER.error("Background re-optimization failed", exc_info=True)
 
     async def _run_strategic_optimization(
-        self, forecast: list[ForecastPoint] | None = None,
+        self,
+        forecast: list[ForecastPoint] | None = None,
     ) -> None:
         """Run the strategic planner."""
         _LOGGER.info("Running strategic re-optimization")
 
         if forecast is None:
-            forecast, source = await async_get_forecast_multi(
-                self.hass, self._weather_entity_ids
-            )
+            forecast, source = await async_get_forecast_multi(self.hass, self._weather_entity_ids)
             if forecast:
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 self._last_good_forecast = forecast
                 self._last_forecast_time = now
                 self._last_forecast_source = source
         if not forecast:
             # Try cached forecast as last resort
             if self._last_good_forecast and self._last_forecast_time:
-                cache_age_hours = (
-                    datetime.now(timezone.utc) - self._last_forecast_time
-                ).total_seconds() / 3600
+                cache_age_hours = (datetime.now(UTC) - self._last_forecast_time).total_seconds() / 3600
                 if cache_age_hours < DEFAULT_FORECAST_CACHE_MAX_AGE_HOURS:
                     _LOGGER.warning(
                         "All weather entities failed — using cached forecast (%.1fh old)",
@@ -1664,9 +1639,7 @@ class HeatPumpOptimizerCoordinator(
         occupancy_timeline: list[OccupancyForecastPoint] | None = None
         if self.calendar_occupancy is not None:
             try:
-                occupancy_timeline = (
-                    await self.calendar_occupancy.async_get_occupancy_timeline()
-                )
+                occupancy_timeline = await self.calendar_occupancy.async_get_occupancy_timeline()
                 self._occupancy_timeline = occupancy_timeline or []
             except Exception:
                 _LOGGER.warning(
@@ -1684,20 +1657,18 @@ class HeatPumpOptimizerCoordinator(
         comfort_heat = self.comfort_heat
 
         # If reactive overrides calendar (person came home early), fire event
-        if (
-            occupancy_timeline
-            and effective_mode == OccupancyMode.HOME
-        ):
-            cal_mode = StrategicPlanner._lookup_occupancy_at(
-                datetime.now(timezone.utc), occupancy_timeline
-            )
+        if occupancy_timeline and effective_mode == OccupancyMode.HOME:
+            cal_mode = StrategicPlanner._lookup_occupancy_at(datetime.now(UTC), occupancy_timeline)
             if cal_mode == OccupancyMode.AWAY:
                 _LOGGER.info("Reactive occupancy overrides calendar (person came home early)")
-                self._fire_event(EVENT_CALENDAR_OVERRIDE, {
-                    "reason": "reactive_home_override",
-                    "calendar_mode": "away",
-                    "effective_mode": "home",
-                })
+                self._fire_event(
+                    EVENT_CALENDAR_OVERRIDE,
+                    {
+                        "reason": "reactive_home_override",
+                        "calendar_mode": "away",
+                        "effective_mode": "home",
+                    },
+                )
 
         # Profile control: update thermostat profile on occupancy transitions
         if self._profile_adapter is not None and not self._monitor_only:
@@ -1707,25 +1678,20 @@ class HeatPumpOptimizerCoordinator(
         # all narrow or shift the band the optimizer may work in. They go
         # through one documented derivation (engine/comfort.py) so they cannot
         # compound into a 1-2°F slot the way they used to.
-        now_hour = datetime.now(timezone.utc).hour
+        now_hour = datetime.now(UTC).hour
         override_adj = self.override_tracker.get_comfort_adjustment(now_hour)
         if override_adj != 0.0:
             _LOGGER.debug(
                 "Override learning: adjusting comfort by %+.1f°F at hour %d",
-                override_adj, now_hour,
+                override_adj,
+                now_hour,
             )
 
-        dr_delta = (
-            self._demand_response_delta if self._demand_response_active else 0.0
-        )
+        dr_delta = self._demand_response_delta if self._demand_response_active else 0.0
         # Aggressiveness is a caution signal, not a constraint, so it is
         # expressed as the conservative tier and is floored at the minimum
         # usable band width.
-        band_tier = (
-            ACTIVATION_TIER_LEARNING
-            if self._aggressiveness == AGGRESSIVENESS_CONSERVATIVE
-            else None
-        )
+        band_tier = ACTIVATION_TIER_LEARNING if self._aggressiveness == AGGRESSIVENESS_CONSERVATIVE else None
 
         comfort_cool = derive_effective_comfort_band(
             comfort_cool,
@@ -1764,10 +1730,7 @@ class HeatPumpOptimizerCoordinator(
 
         # Run optimizer in executor (synchronous engine)
         try:
-            _aux_threshold = (
-                self.aux_heat_learner.threshold_f
-                if self.aux_heat_learner.is_learned else None
-            )
+            _aux_threshold = self.aux_heat_learner.threshold_f if self.aux_heat_learner.is_learned else None
             _aux_active = getattr(self, "_cached_aux_heat_active", False)
             schedule = await asyncio.wait_for(
                 self.hass.async_add_executor_job(
@@ -1809,9 +1772,7 @@ class HeatPumpOptimizerCoordinator(
             schedule.baseline_runtime_minutes = 0
             schedule.optimized_runtime_minutes = 0
             schedule.savings_pct = 0
-            _LOGGER.debug(
-                "Learning mode: replaced schedule simulation with passive-only forecast"
-            )
+            _LOGGER.debug("Learning mode: replaced schedule simulation with passive-only forecast")
 
         if schedule:
             self._active = True
@@ -1830,19 +1791,20 @@ class HeatPumpOptimizerCoordinator(
                     schedule.baseline_runtime_minutes,
                     schedule.optimized_runtime_minutes,
                 )
-            self._fire_event(EVENT_OPTIMIZATION_COMPLETE, {
-                "mode": self.strategic.mode,
-                "savings_pct": round(schedule.savings_pct, 1),
-                "schedule_entries": len(schedule.entries),
-                "baseline_runtime": round(schedule.baseline_runtime_minutes, 1),
-                "optimized_runtime": round(schedule.optimized_runtime_minutes, 1),
-                "plan": schedule.plan_label,
-            })
+            self._fire_event(
+                EVENT_OPTIMIZATION_COMPLETE,
+                {
+                    "mode": self.strategic.mode,
+                    "savings_pct": round(schedule.savings_pct, 1),
+                    "schedule_entries": len(schedule.entries),
+                    "baseline_runtime": round(schedule.baseline_runtime_minutes, 1),
+                    "optimized_runtime": round(schedule.optimized_runtime_minutes, 1),
+                    "plan": schedule.plan_label,
+                },
+            )
 
             # Plan pre-conditioning for next AWAY→HOME transition
-            await self._plan_preconditioning(
-                forecast, occupancy_timeline, thermo_state.indoor_temp
-            )
+            await self._plan_preconditioning(forecast, occupancy_timeline, thermo_state.indoor_temp)
         else:
             self._active = False
             self._phase = PHASE_IDLE
@@ -1871,18 +1833,14 @@ class HeatPumpOptimizerCoordinator(
             self._precondition_plan = None
             return
 
-        arrival_time = self.calendar_occupancy.get_next_transition(
-            occupancy_timeline, "away", "home"
-        )
+        arrival_time = self.calendar_occupancy.get_next_transition(occupancy_timeline, "away", "home")
         if arrival_time is None:
             self._precondition_plan = None
             return
 
         # Determine comfort ranges
         home_comfort = self.comfort_cool if mode == "cool" else self.comfort_heat
-        away_comfort = OccupancyAdapter.adjust_comfort_for_mode(
-            home_comfort, mode, OccupancyMode.AWAY
-        )
+        away_comfort = OccupancyAdapter.adjust_comfort_for_mode(home_comfort, mode, OccupancyMode.AWAY)
 
         plan = self.precondition_planner.plan(
             arrival_time=arrival_time,
@@ -1947,12 +1905,7 @@ class HeatPumpOptimizerCoordinator(
         try:
             pairs = json.loads(raw)
             if isinstance(pairs, list):
-                return [
-                    p for p in pairs
-                    if isinstance(p, dict)
-                    and p.get("temp_entity")
-                    and p.get("humidity_entity")
-                ]
+                return [p for p in pairs if isinstance(p, dict) and p.get("temp_entity") and p.get("humidity_entity")]
         except (ValueError, TypeError):
             pass
         return []
@@ -2009,9 +1962,7 @@ class HeatPumpOptimizerCoordinator(
                 mode = self.strategic.mode
                 if mode and mode != "off" and forecast:
                     home_comfort = self.comfort_cool if mode == "cool" else self.comfort_heat
-                    away_comfort = OccupancyAdapter.adjust_comfort_for_mode(
-                        home_comfort, mode, OccupancyMode.AWAY
-                    )
+                    away_comfort = OccupancyAdapter.adjust_comfort_for_mode(home_comfort, mode, OccupancyMode.AWAY)
                     new_plan = self.precondition_planner.plan(
                         arrival_time=refined_arrival,
                         current_indoor_temp=indoor_temp,
@@ -2031,12 +1982,15 @@ class HeatPumpOptimizerCoordinator(
         if plan.should_start_now or (plan.start_time <= now):
             if self._phase != PHASE_PRECONDITIONING:
                 self._phase = PHASE_PRECONDITIONING
-                self._fire_event(EVENT_PRECONDITIONING_START, {
-                    "arrival_time": plan.arrival_time.isoformat(),
-                    "estimated_runtime_minutes": plan.estimated_runtime_minutes,
-                    "temperature_gap": plan.temperature_gap,
-                    "arrival_source": plan.arrival_source,
-                })
+                self._fire_event(
+                    EVENT_PRECONDITIONING_START,
+                    {
+                        "arrival_time": plan.arrival_time.isoformat(),
+                        "estimated_runtime_minutes": plan.estimated_runtime_minutes,
+                        "temperature_gap": plan.temperature_gap,
+                        "arrival_source": plan.arrival_source,
+                    },
+                )
 
     def _has_person_left_zone(self, person_eid: str, zone_eid: str) -> bool:
         """Check if a specific person has left their configured departure zone."""
@@ -2119,9 +2073,7 @@ class HeatPumpOptimizerCoordinator(
 
         # Reset baseline capture and counterfactual
         self.baseline_capture = BaselineCapture()
-        self.counterfactual = CounterfactualSimulator(
-            deadband=self._thermostat_deadband
-        )
+        self.counterfactual = CounterfactualSimulator(deadband=self._thermostat_deadband)
         self._set_counterfactual_capacity()
 
         # The weather-normalized energy baseline is deliberately NOT reset:
@@ -2223,9 +2175,7 @@ class HeatPumpOptimizerCoordinator(
             hvac_action=hvac_action,
             aux_heat_active=self._cached_aux_heat_active,
         )
-        outdoor_reading = self.sensor_hub.read_outdoor_temp(
-            forecast_snapshot=self.strategic.forecast_snapshot
-        )
+        outdoor_reading = self.sensor_hub.read_outdoor_temp(forecast_snapshot=self.strategic.forecast_snapshot)
         self.energy_baseline.record_interval(
             now=dt_util.as_local(now),
             interval_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
@@ -2299,27 +2249,15 @@ class HeatPumpOptimizerCoordinator(
         trial = self.ab_trial.result()
 
         return {
-            "measured_savings_kwh_today": (
-                round(today["saved_kwh"], 3) if today else None
-            ),
-            "measured_savings_kwh_30d": (
-                round(window["saved_kwh"], 2) if window else None
-            ),
+            "measured_savings_kwh_today": (round(today["saved_kwh"], 3) if today else None),
+            "measured_savings_kwh_30d": (round(window["saved_kwh"], 2) if window else None),
             "measured_savings_pct_30d": (
-                round(window["saved_pct"], 1)
-                if window and window["saved_pct"] is not None
-                else None
+                round(window["saved_pct"], 1) if window and window["saved_pct"] is not None else None
             ),
-            "measured_baseline_kwh_today": (
-                round(today["baseline_kwh"], 3) if today else None
-            ),
-            "measured_actual_kwh_today": (
-                round(today["actual_kwh"], 3) if today else None
-            ),
+            "measured_baseline_kwh_today": (round(today["baseline_kwh"], 3) if today else None),
+            "measured_actual_kwh_today": (round(today["actual_kwh"], 3) if today else None),
             "measured_savings_uncertainty_kwh": (
-                round(window["uncertainty_kwh"], 2)
-                if window and window["uncertainty_kwh"] is not None
-                else None
+                round(window["uncertainty_kwh"], 2) if window and window["uncertainty_kwh"] is not None else None
             ),
             "measured_savings_window_days": window["days"] if window else 0,
             "energy_baseline_source": fit.source,
@@ -2328,9 +2266,7 @@ class HeatPumpOptimizerCoordinator(
             "energy_baseline_days": diagnostics["baseline_days"],
             "energy_baseline_optimized_days": diagnostics["optimized_days"],
             "energy_baseline_days_remaining": diagnostics["days_until_measured_fit"],
-            "energy_source": (
-                "measured" if self._power_is_measured else "estimated"
-            ),
+            "energy_source": ("measured" if self._power_is_measured else "estimated"),
             "ab_trial": trial,
             "ab_trial_active": trial["active"],
             "ab_trial_phase": self.ab_trial.current_phase(dt_util.now()),
@@ -2365,11 +2301,14 @@ class HeatPumpOptimizerCoordinator(
         if success:
             self._last_profile_mode = desired
             self._away_delay_pending_since = None
-            self._fire_event(EVENT_PROFILE_CHANGED, {
-                "old_profile": old_profile,
-                "new_profile": desired,
-                "effective_mode": effective_mode.value,
-            })
+            self._fire_event(
+                EVENT_PROFILE_CHANGED,
+                {
+                    "old_profile": old_profile,
+                    "new_profile": desired,
+                    "effective_mode": effective_mode.value,
+                },
+            )
 
     def _determine_desired_profile(self, effective_mode: OccupancyMode) -> str:
         """Map occupancy mode + time-of-day to thermostat profile name."""
@@ -2377,11 +2316,8 @@ class HeatPumpOptimizerCoordinator(
             return "away"
 
         # HOME: check sleep window
-        if (
-            self.sleep_config.get("enabled")
-            and StrategicPlanner._is_in_sleep_window(
-                datetime.now(timezone.utc), self.sleep_config
-            )
+        if self.sleep_config.get("enabled") and StrategicPlanner._is_in_sleep_window(
+            datetime.now(UTC), self.sleep_config
         ):
             return "sleep"
 
@@ -2408,12 +2344,11 @@ class HeatPumpOptimizerCoordinator(
         if hvac_action not in ("heating", "cooling"):
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         if self._away_delay_pending_since is None:
             self._away_delay_pending_since = now
             _LOGGER.info(
-                "Delaying away profile transition -- HVAC is %s "
-                "(will wait up to %d min)",
+                "Delaying away profile transition -- HVAC is %s (will wait up to %d min)",
                 hvac_action,
                 self._sleep_away_delay_minutes,
             )
@@ -2448,20 +2383,23 @@ class HeatPumpOptimizerCoordinator(
             return
 
         from .const import DEFAULT_DEMAND_RESPONSE_DELTA_F
+
         self._demand_response_active = True
         self._demand_response_delta = DEFAULT_DEMAND_RESPONSE_DELTA_F
-        self._demand_response_end = (
-            datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
-        )
+        self._demand_response_end = datetime.now(UTC) + timedelta(minutes=duration_minutes)
         _LOGGER.info(
             "Demand response activated: widening comfort by ±%.1f°F for %d min",
-            DEFAULT_DEMAND_RESPONSE_DELTA_F, duration_minutes,
+            DEFAULT_DEMAND_RESPONSE_DELTA_F,
+            duration_minutes,
         )
-        self._fire_event(f"{DOMAIN}_demand_response", {
-            "mode": "reduce",
-            "duration_minutes": duration_minutes,
-            "delta_f": DEFAULT_DEMAND_RESPONSE_DELTA_F,
-        })
+        self._fire_event(
+            f"{DOMAIN}_demand_response",
+            {
+                "mode": "reduce",
+                "duration_minutes": duration_minutes,
+                "delta_f": DEFAULT_DEMAND_RESPONSE_DELTA_F,
+            },
+        )
         await self._run_strategic_optimization()
 
     async def async_set_constraint(
@@ -2476,56 +2414,59 @@ class HeatPumpOptimizerCoordinator(
         Supported types: max_temp, min_temp, max_power, pause_until.
         Auto-expires after duration_minutes.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         expires = now + timedelta(minutes=duration_minutes)
 
         if constraint_type == "pause_until":
             self._paused = True
             self._phase = PHASE_PAUSED
             # Schedule auto-resume
-            self._active_constraints.append({
-                "type": "pause_until",
-                "value": 0,
-                "expires": expires,
-                "source": source,
-            })
+            self._active_constraints.append(
+                {
+                    "type": "pause_until",
+                    "value": 0,
+                    "expires": expires,
+                    "source": source,
+                }
+            )
             _LOGGER.info(
                 "Constraint from %s: paused for %d min",
-                source, duration_minutes,
+                source,
+                duration_minutes,
             )
         else:
-            self._active_constraints.append({
-                "type": constraint_type,
-                "value": value,
-                "expires": expires,
-                "source": source,
-            })
+            self._active_constraints.append(
+                {
+                    "type": constraint_type,
+                    "value": value,
+                    "expires": expires,
+                    "source": source,
+                }
+            )
             _LOGGER.info(
                 "Constraint from %s: %s=%.1f for %d min",
-                source, constraint_type, value, duration_minutes,
+                source,
+                constraint_type,
+                value,
+                duration_minutes,
             )
             # Re-optimize with new constraints in effect
             await self._run_strategic_optimization()
 
     def _expire_constraints(self) -> None:
         """Remove expired constraints."""
-        now = datetime.now(timezone.utc)
-        was_paused_by_constraint = any(
-            c["type"] == "pause_until" for c in self._active_constraints
-        )
-        self._active_constraints = [
-            c for c in self._active_constraints if c["expires"] > now
-        ]
+        now = datetime.now(UTC)
+        was_paused_by_constraint = any(c["type"] == "pause_until" for c in self._active_constraints)
+        self._active_constraints = [c for c in self._active_constraints if c["expires"] > now]
         # Auto-resume if pause constraint expired
-        if was_paused_by_constraint and not any(
-            c["type"] == "pause_until" for c in self._active_constraints
-        ):
+        if was_paused_by_constraint and not any(c["type"] == "pause_until" for c in self._active_constraints):
             if not self._paused:  # don't override user-initiated pause
                 return
             self._paused = False
             _LOGGER.info("Pause constraint expired -- resuming optimization")
             self._schedule_background_task(
-                self._safe_reoptimize(), "hpo.reoptimize_pause_expired",
+                self._safe_reoptimize(),
+                "hpo.reoptimize_pause_expired",
             )
 
     def export_model(self) -> dict:
@@ -2568,10 +2509,13 @@ class HeatPumpOptimizerCoordinator(
     def _on_override_detected(self, event) -> None:
         _LOGGER.info("Watchdog: override detected, pausing optimization")
         self._phase = PHASE_PAUSED
-        self._fire_event(EVENT_OVERRIDE_DETECTED, {
-            "expected_setpoint": self.thermostat.last_written_setpoint,
-            "actual_setpoint": getattr(event, "actual_setpoint", None),
-        })
+        self._fire_event(
+            EVENT_OVERRIDE_DETECTED,
+            {
+                "expected_setpoint": self.thermostat.last_written_setpoint,
+                "actual_setpoint": getattr(event, "actual_setpoint", None),
+            },
+        )
 
     def _on_override_cleared(self) -> None:
         _LOGGER.info("Watchdog: override cleared, will re-optimize on next cycle")
@@ -2579,12 +2523,16 @@ class HeatPumpOptimizerCoordinator(
     def _on_mode_change(self, new_mode: str) -> None:
         old_mode = self.strategic.mode
         _LOGGER.info("Watchdog: mode changed to %s, triggering re-optimization", new_mode)
-        self._fire_event(EVENT_MODE_CHANGED, {
-            "old_mode": old_mode,
-            "new_mode": new_mode,
-        })
+        self._fire_event(
+            EVENT_MODE_CHANGED,
+            {
+                "old_mode": old_mode,
+                "new_mode": new_mode,
+            },
+        )
         self._schedule_background_task(
-            self._safe_reoptimize(), "hpo.reoptimize_mode_change",
+            self._safe_reoptimize(),
+            "hpo.reoptimize_mode_change",
         )
 
     @callback
@@ -2599,7 +2547,8 @@ class HeatPumpOptimizerCoordinator(
         if old_state and old_state.state != new_state.state:
             if self.watchdog.check_mode_change(new_state.state):
                 self._schedule_background_task(
-                    self._safe_reoptimize(), "hpo.reoptimize_hvac_mode",
+                    self._safe_reoptimize(),
+                    "hpo.reoptimize_hvac_mode",
                 )
 
     @callback
@@ -2607,7 +2556,8 @@ class HeatPumpOptimizerCoordinator(
         """React to person entity state changes for immediate profile updates."""
         if self._profile_adapter and not self._monitor_only:
             self._schedule_background_task(
-                self.async_request_refresh(), "hpo.refresh_occupancy",
+                self.async_request_refresh(),
+                "hpo.refresh_occupancy",
             )
 
     def _schedule_background_task(self, coro, name: str) -> None:
@@ -2687,6 +2637,7 @@ class HeatPumpOptimizerCoordinator(
 
         if self._blend_mode == BLEND_MODE_SCHEDULE:
             from homeassistant.util import dt as dt_util
+
             now_time = dt_util.now().time()
             start = self._blend_schedule_start
             end = self._blend_schedule_end
@@ -2761,4 +2712,3 @@ class HeatPumpOptimizerCoordinator(
             return profiler_model
 
         return self.model
-

@@ -56,9 +56,7 @@ class _LearningNullMixin:
     def _suppress_during_learning(self, value):
         if value is None:
             return None
-        tier = (self.coordinator.data or {}).get(
-            "savings_accuracy_tier", "learning"
-        )
+        tier = (self.coordinator.data or {}).get("savings_accuracy_tier", "learning")
         if tier == "learning":
             return None
         return value
@@ -66,9 +64,7 @@ class _LearningNullMixin:
     @property
     def _is_projected(self) -> bool:
         """Whether current savings values are projected (early estimates)."""
-        tier = (self.coordinator.data or {}).get(
-            "savings_accuracy_tier", "learning"
-        )
+        tier = (self.coordinator.data or {}).get("savings_accuracy_tier", "learning")
         return tier == "projected"
 
 
@@ -77,9 +73,7 @@ class _DailyResetMixin:
 
     @property
     def last_reset(self) -> datetime:
-        return dt_util.now().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        return dt_util.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 class _ThermalLoadMixin:

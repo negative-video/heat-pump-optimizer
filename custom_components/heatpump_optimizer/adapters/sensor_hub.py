@@ -13,7 +13,10 @@ from __future__ import annotations
 import logging
 import statistics
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+# Avoid circular import — AreaOccupancyManager is only used for type hints
+from typing import TYPE_CHECKING
 
 from homeassistant.const import (
     UnitOfPressure,
@@ -39,9 +42,6 @@ from ..const import (
     DEFAULT_SENSOR_STALE_MINUTES,
 )
 from ..engine.data_types import ForecastPoint
-
-# Avoid circular import — AreaOccupancyManager is only used for type hints
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .area_occupancy import AreaOccupancyManager
@@ -142,9 +142,7 @@ class SensorHub:
         self._power_default_watts = power_default_watts
         # Mode-aware power estimation
         self._cooling_watts = cooling_watts or power_default_watts
-        self._heating_watts = heating_watts or (
-            cooling_watts * 1.15 if cooling_watts else power_default_watts * 1.15
-        )
+        self._heating_watts = heating_watts or (cooling_watts * 1.15 if cooling_watts else power_default_watts * 1.15)
         self._aux_heat_kw = aux_heat_kw
         self._co2_entity = co2_entity
         self._rate_entity = rate_entity
@@ -174,8 +172,8 @@ class SensorHub:
         # Humidity-gated sensor squelching (wet rooms)
         self._humidity_squelch_pairs: list[dict] = humidity_squelch_pairs or []
         self._squelch_active: dict[str, bool] = {}  # hysteresis state per pair
-        self._current_squelched: set[str] = set()    # cached per cycle
-        self.squelched_entities: list[str] = []       # public diagnostic
+        self._current_squelched: set[str] = set()  # cached per cycle
+        self.squelched_entities: list[str] = []  # public diagnostic
 
     # ── Core validation ─────────────────────────────────────────────
 
@@ -197,7 +195,11 @@ class SensorHub:
         if value < min_val or value > max_val:
             _LOGGER.warning(
                 "%s sensor %s value %.2f outside valid range [%.1f, %.1f] — ignoring",
-                label, entity_id, value, min_val, max_val,
+                label,
+                entity_id,
+                value,
+                min_val,
+                max_val,
             )
             return None
         return value
@@ -221,7 +223,11 @@ class SensorHub:
         if value < min_val or value > max_val:
             _LOGGER.warning(
                 "%s sensor %s value %.2f outside valid range [%.1f, %.1f] — ignoring",
-                label, entity_id, value, min_val, max_val,
+                label,
+                entity_id,
+                value,
+                min_val,
+                max_val,
             )
             return None, unit
         return value, unit
@@ -230,11 +236,11 @@ class SensorHub:
         """Check if a state object's last_updated is too old."""
         if state is None or state.last_updated is None:
             return True
-        age_min = (datetime.now(timezone.utc) - state.last_updated).total_seconds() / 60
+        age_min = (datetime.now(UTC) - state.last_updated).total_seconds() / 60
         return age_min > DEFAULT_SENSOR_STALE_MINUTES
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     # ── EMA smoothing ────────────────────────────────────────────────
 
@@ -317,9 +323,7 @@ class SensorHub:
                 continue
             # Convert to °F if needed
             if unit == UnitOfTemperature.CELSIUS or unit == "°C":
-                value = TemperatureConverter.convert(
-                    value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-                )
+                value = TemperatureConverter.convert(value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
             state = self.hass.states.get(eid)
             if self._is_stale(state):
                 stale_values.append(value)
@@ -338,10 +342,7 @@ class SensorHub:
 
         avg = sum(values) / len(values)
         spread = (max(values) - min(values)) if len(values) > 1 else 0.0
-        source = (
-            f"entity:{entities_used[0]}" if len(values) == 1
-            else f"average:{len(values)}"
-        )
+        source = f"entity:{entities_used[0]}" if len(values) == 1 else f"average:{len(values)}"
         return SensorReading(
             value=avg,
             source=source,
@@ -391,10 +392,7 @@ class SensorHub:
             return None
 
         avg = sum(values) / len(values)
-        source = (
-            f"entity:{entities_used[0]}" if len(values) == 1
-            else f"average:{len(values)}"
-        )
+        source = f"entity:{entities_used[0]}" if len(values) == 1 else f"average:{len(values)}"
         return SensorReading(
             value=avg,
             source=source,
@@ -417,13 +415,9 @@ class SensorHub:
         reading = self._read_multi_temp(self._outdoor_temp_entities, "Outdoor temp")
         # A configured sensor that has gone quiet is worth telling the user
         # about even though the forecast quietly covers for it below.
-        self.outdoor_sensor_stale = bool(self._outdoor_temp_entities) and (
-            reading is None or reading.stale
-        )
+        self.outdoor_sensor_stale = bool(self._outdoor_temp_entities) and (reading is None or reading.stale)
         if reading and not reading.stale:
-            self._ema_outdoor_temp = self._apply_ema(
-                reading.value, self._ema_outdoor_temp, self._ema_alpha
-            )
+            self._ema_outdoor_temp = self._apply_ema(reading.value, self._ema_outdoor_temp, self._ema_alpha)
             reading = SensorReading(
                 value=self._ema_outdoor_temp,
                 source=reading.source,
@@ -476,9 +470,7 @@ class SensorHub:
     ) -> SensorReading | None:
         """Outdoor humidity: entity average → forecast → None."""
         # 1. Standalone sensor entities
-        reading = self._read_multi_humidity(
-            self._outdoor_humidity_entities, "Outdoor humidity"
-        )
+        reading = self._read_multi_humidity(self._outdoor_humidity_entities, "Outdoor humidity")
         if reading and not reading.stale:
             self._last_outdoor_humidity = reading
             return reading
@@ -490,10 +482,7 @@ class SensorHub:
                 forecast_snapshot,
                 key=lambda pt: abs((pt.time - now).total_seconds()),
             )
-            if (
-                closest.humidity is not None
-                and abs((closest.time - now).total_seconds()) < 7200
-            ):
+            if closest.humidity is not None and abs((closest.time - now).total_seconds()) < 7200:
                 return SensorReading(
                     value=closest.humidity,
                     source="forecast",
@@ -519,7 +508,8 @@ class SensorHub:
     # ── Indoor temperature ────────────────────────────────────────────
 
     def _get_fresh_indoor_entity_values(
-        self, exclude_entities: set[str] | None = None,
+        self,
+        exclude_entities: set[str] | None = None,
     ) -> list[float]:
         """Return fresh °F readings from each configured indoor temp entity.
 
@@ -535,9 +525,7 @@ class SensorHub:
             if value is None:
                 continue
             if unit == UnitOfTemperature.CELSIUS or unit == "°C":
-                value = TemperatureConverter.convert(
-                    value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-                )
+                value = TemperatureConverter.convert(value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
             state = self.hass.states.get(eid)
             if not self._is_stale(state):
                 values.append(value)
@@ -577,10 +565,7 @@ class SensorHub:
         if not filtered:
             filtered = pool  # safety fallback: never discard everything
 
-        thermostat_excluded = (
-            thermostat_temp is not None
-            and abs(thermostat_temp - median_val) > threshold_f
-        )
+        thermostat_excluded = thermostat_temp is not None and abs(thermostat_temp - median_val) > threshold_f
         avg = sum(filtered) / len(filtered)
         excluded_count = len(pool) - len(filtered)
         source = f"median_filtered:{len(filtered)}"
@@ -614,16 +599,13 @@ class SensorHub:
             self.thermostat_blend_suspected = excluded
             if excluded:
                 _LOGGER.debug(
-                    "Thermostat excluded by median filter: "
-                    "thermostat=%.1f°F, median=%.1f°F, threshold=%.1f°F",
+                    "Thermostat excluded by median filter: thermostat=%.1f°F, median=%.1f°F, threshold=%.1f°F",
                     thermostat_temp,
                     statistics.median(entity_values + ([thermostat_temp] if thermostat_temp is not None else [])),
                     self._blend_outlier_threshold_f,
                 )
             if filtered_avg is not None:
-                self._ema_indoor_temp = self._apply_ema(
-                    filtered_avg, self._ema_indoor_temp, self._ema_alpha
-                )
+                self._ema_indoor_temp = self._apply_ema(filtered_avg, self._ema_indoor_temp, self._ema_alpha)
                 total_sensors = len(entity_values) + (1 if thermostat_temp is not None else 0)
                 return SensorReading(
                     value=self._ema_indoor_temp,
@@ -637,7 +619,8 @@ class SensorHub:
         # ── Standard mode (occupancy/schedule exclusion handled by caller via thermostat_temp=None)
         # 1. Additional room sensors
         reading = self._read_multi_temp(
-            self._indoor_temp_entities, "Indoor temp",
+            self._indoor_temp_entities,
+            "Indoor temp",
             exclude_entities=squelched,
         )
         if reading and not reading.stale:
@@ -660,9 +643,7 @@ class SensorHub:
             return None
 
         # Apply EMA smoothing
-        self._ema_indoor_temp = self._apply_ema(
-            raw_value, self._ema_indoor_temp, self._ema_alpha
-        )
+        self._ema_indoor_temp = self._apply_ema(raw_value, self._ema_indoor_temp, self._ema_alpha)
 
         return SensorReading(
             value=self._ema_indoor_temp,
@@ -681,7 +662,8 @@ class SensorHub:
         """Indoor humidity: entity average → thermostat."""
         squelched = self._current_squelched or self._get_squelched_entities()
         reading = self._read_multi_humidity(
-            self._indoor_humidity_entities, "Indoor humidity",
+            self._indoor_humidity_entities,
+            "Indoor humidity",
             exclude_entities=squelched,
         )
         if reading and not reading.stale:
@@ -738,9 +720,7 @@ class SensorHub:
         if self._area_manager is None:
             return self.read_indoor_humidity(thermostat_humidity)
 
-        value, source = self._area_manager.get_weighted_indoor_humidity(
-            thermostat_humidity
-        )
+        value, source = self._area_manager.get_weighted_indoor_humidity(thermostat_humidity)
         if value is None:
             return self.read_indoor_humidity(thermostat_humidity)
 
@@ -759,9 +739,7 @@ class SensorHub:
     ) -> SensorReading | None:
         """Wind speed in mph: entity → forecast."""
         if self._wind_speed_entity:
-            value, unit = self._read_entity_with_unit(
-                self._wind_speed_entity, 0.0, 200.0, "Wind speed"
-            )
+            value, unit = self._read_entity_with_unit(self._wind_speed_entity, 0.0, 200.0, "Wind speed")
             if value is not None:
                 # Convert to mph
                 if unit in (
@@ -794,10 +772,7 @@ class SensorHub:
                 forecast_snapshot,
                 key=lambda pt: abs((pt.time - now).total_seconds()),
             )
-            if (
-                closest.wind_speed_mph is not None
-                and abs((closest.time - now).total_seconds()) < 7200
-            ):
+            if closest.wind_speed_mph is not None and abs((closest.time - now).total_seconds()) < 7200:
                 return SensorReading(
                     value=closest.wind_speed_mph,
                     source="forecast",
@@ -813,9 +788,7 @@ class SensorHub:
         """Direct solar irradiance in W/m². No fallback — entity or None."""
         if not self._solar_irradiance_entity:
             return None
-        value = self._read_entity(
-            self._solar_irradiance_entity, 0.0, 1500.0, "Solar irradiance"
-        )
+        value = self._read_entity(self._solar_irradiance_entity, 0.0, 1500.0, "Solar irradiance")
         if value is None:
             return None
         state = self.hass.states.get(self._solar_irradiance_entity)
@@ -832,9 +805,7 @@ class SensorHub:
         """UV index from weather integration (e.g. OpenWeatherMap). No fallback."""
         if not self._uv_index_entity:
             return None
-        value = self._read_entity(
-            self._uv_index_entity, 0.0, 15.0, "UV index"
-        )
+        value = self._read_entity(self._uv_index_entity, 0.0, 15.0, "UV index")
         if value is None:
             return None
         state = self.hass.states.get(self._uv_index_entity)
@@ -862,23 +833,19 @@ class SensorHub:
 
         # Convert to hPa before validation
         if unit in (UnitOfPressure.INHG, "inHg"):
-            value = PressureConverter.convert(
-                value, UnitOfPressure.INHG, UnitOfPressure.HPA
-            )
+            value = PressureConverter.convert(value, UnitOfPressure.INHG, UnitOfPressure.HPA)
         elif unit in (UnitOfPressure.MBAR, "mbar"):
             pass  # mbar == hPa
         elif unit in (UnitOfPressure.PSI, "psi"):
-            value = PressureConverter.convert(
-                value, UnitOfPressure.PSI, UnitOfPressure.HPA
-            )
+            value = PressureConverter.convert(value, UnitOfPressure.PSI, UnitOfPressure.HPA)
         # else assume hPa
 
         # Validate after conversion to hPa
         if value < 500.0 or value > 1200.0:
             _LOGGER.warning(
-                "Barometric pressure sensor %s value %.2f hPa outside valid range "
-                "[500.0, 1200.0] — ignoring",
-                self._barometric_pressure_entity, value,
+                "Barometric pressure sensor %s value %.2f hPa outside valid range [500.0, 1200.0] — ignoring",
+                self._barometric_pressure_entity,
+                value,
             )
             return None
 
@@ -956,7 +923,9 @@ class SensorHub:
                     if elapsed >= self._dw_debounce_seconds:
                         _LOGGER.debug(
                             "Door/window %s confirmed %s after %ds debounce",
-                            eid, "open" if raw_open else "closed", int(elapsed),
+                            eid,
+                            "open" if raw_open else "closed",
+                            int(elapsed),
                         )
                         self._dw_debounced[eid] = raw_open
                         del self._dw_last_raw[eid]
@@ -997,9 +966,7 @@ class SensorHub:
         """Solar panel production in watts."""
         if not self._solar_production_entity:
             return None
-        value = self._read_entity(
-            self._solar_production_entity, 0.0, 100000.0, "Solar production"
-        )
+        value = self._read_entity(self._solar_production_entity, 0.0, 100000.0, "Solar production")
         if value is None:
             return None
         state = self.hass.states.get(self._solar_production_entity)
@@ -1014,9 +981,7 @@ class SensorHub:
         """Net grid import in watts (negative = exporting)."""
         if not self._grid_import_entity:
             return None
-        value = self._read_entity(
-            self._grid_import_entity, -100000.0, 100000.0, "Grid import"
-        )
+        value = self._read_entity(self._grid_import_entity, -100000.0, 100000.0, "Grid import")
         if value is None:
             return None
         state = self.hass.states.get(self._grid_import_entity)
@@ -1031,9 +996,7 @@ class SensorHub:
         """Solar export/feed-in tariff rate in $/kWh."""
         if not self._solar_export_rate_entity:
             return None
-        return self._read_entity(
-            self._solar_export_rate_entity, 0.0, 10.0, "Solar export rate"
-        )
+        return self._read_entity(self._solar_export_rate_entity, 0.0, 10.0, "Solar export rate")
 
     def derive_solar_irradiance_from_panels(
         self,
@@ -1073,9 +1036,7 @@ class SensorHub:
             aux_heat_active: True if aux/emergency heat is detected (from
                 duct sensor, override entity, or thermostat attribute).
         """
-        return self.read_power_draw_source(
-            hvac_action=hvac_action, aux_heat_active=aux_heat_active
-        )[0]
+        return self.read_power_draw_source(hvac_action=hvac_action, aux_heat_active=aux_heat_active)[0]
 
     def read_power_draw_source(
         self,
@@ -1090,9 +1051,7 @@ class SensorHub:
         them. See savings_tracker.record_interval(power_measured=...).
         """
         if self._power_entity:
-            value = self._read_entity(
-                self._power_entity, 0.0, 100000.0, "HVAC power"
-            )
+            value = self._read_entity(self._power_entity, 0.0, 100000.0, "HVAC power")
             if value is not None:
                 return value, True
             # Entity configured but unavailable — fall through to estimation
@@ -1127,9 +1086,7 @@ class SensorHub:
     def read_electricity_rate(self) -> float | None:
         """Electricity rate in $/kWh. Entity → flat rate."""
         if self._rate_entity:
-            value = self._read_entity(
-                self._rate_entity, 0.0, 10.0, "Electricity rate"
-            )
+            value = self._read_entity(self._rate_entity, 0.0, 10.0, "Electricity rate")
             if value is not None:
                 return value
         return self._flat_rate
@@ -1179,16 +1136,12 @@ class SensorHub:
             return forecast
 
         # Outdoor temperature
-        temp_reading = self._read_multi_temp(
-            self._outdoor_temp_entities, "Outdoor temp"
-        )
+        temp_reading = self._read_multi_temp(self._outdoor_temp_entities, "Outdoor temp")
         if temp_reading and not temp_reading.stale:
             closest.outdoor_temp = temp_reading.value
 
         # Outdoor humidity
-        humidity_reading = self._read_multi_humidity(
-            self._outdoor_humidity_entities, "Outdoor humidity"
-        )
+        humidity_reading = self._read_multi_humidity(self._outdoor_humidity_entities, "Outdoor humidity")
         if humidity_reading and not humidity_reading.stale:
             closest.humidity = humidity_reading.value
 

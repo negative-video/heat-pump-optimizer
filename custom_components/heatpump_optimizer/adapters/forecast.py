@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from homeassistant.components.weather import (
     ATTR_FORECAST_CLOUD_COVERAGE,
     ATTR_FORECAST_TEMP,
     ATTR_FORECAST_TIME,
     ATTR_FORECAST_WIND_SPEED,
-    WeatherEntityFeature,
 )
 from homeassistant.const import UnitOfSpeed, UnitOfTemperature
 from homeassistant.core import HomeAssistant
@@ -60,7 +59,7 @@ async def async_get_forecast(
 
         # Ensure timezone-aware
         if forecast_time.tzinfo is None:
-            forecast_time = forecast_time.replace(tzinfo=timezone.utc)
+            forecast_time = forecast_time.replace(tzinfo=UTC)
 
         # Convert temperature to °F if needed
         temp_f = _ensure_fahrenheit(hass, weather_entity_id, temp)
@@ -149,19 +148,21 @@ async def _fetch_forecast(
             return result[entity_id].get("forecast", [])
         _LOGGER.debug(
             "weather.get_forecasts(%s, %s) returned: %s",
-            entity_id, forecast_type, result,
+            entity_id,
+            forecast_type,
+            result,
         )
     except Exception as err:
         _LOGGER.warning(
             "Failed to get %s forecast from %s: %s",
-            forecast_type, entity_id, err,
+            forecast_type,
+            entity_id,
+            err,
         )
     return None
 
 
-def _ensure_fahrenheit(
-    hass: HomeAssistant, entity_id: str, temp: float
-) -> float:
+def _ensure_fahrenheit(hass: HomeAssistant, entity_id: str, temp: float) -> float:
     """Convert temperature to °F if the weather entity reports in °C."""
     state = hass.states.get(entity_id)
     if state is not None:
@@ -171,9 +172,7 @@ def _ensure_fahrenheit(
         unit = hass.config.units.temperature_unit
 
     if unit == UnitOfTemperature.CELSIUS:
-        return TemperatureConverter.convert(
-            temp, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-        )
+        return TemperatureConverter.convert(temp, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
     return temp
 
 
@@ -186,13 +185,9 @@ def _ensure_mph(hass: HomeAssistant, entity_id: str, wind_speed: float) -> float
         # Fall back to HA unit system — metric uses km/h
         unit = hass.config.units.wind_speed_unit
     if unit in (UnitOfSpeed.KILOMETERS_PER_HOUR, "km/h"):
-        return SpeedConverter.convert(
-            wind_speed, UnitOfSpeed.KILOMETERS_PER_HOUR, UnitOfSpeed.MILES_PER_HOUR
-        )
+        return SpeedConverter.convert(wind_speed, UnitOfSpeed.KILOMETERS_PER_HOUR, UnitOfSpeed.MILES_PER_HOUR)
     if unit in (UnitOfSpeed.METERS_PER_SECOND, "m/s"):
-        return SpeedConverter.convert(
-            wind_speed, UnitOfSpeed.METERS_PER_SECOND, UnitOfSpeed.MILES_PER_HOUR
-        )
+        return SpeedConverter.convert(wind_speed, UnitOfSpeed.METERS_PER_SECOND, UnitOfSpeed.MILES_PER_HOUR)
     return wind_speed
 
 
@@ -271,10 +266,7 @@ async def enrich_forecast_with_grid_data(
         elif rate_current is not None:
             pt.electricity_rate = rate_current
 
-    enriched_count = sum(
-        1 for pt in forecast
-        if pt.carbon_intensity is not None or pt.electricity_rate is not None
-    )
+    enriched_count = sum(1 for pt in forecast if pt.carbon_intensity is not None or pt.electricity_rate is not None)
     _LOGGER.debug(
         "Enriched %d/%d forecast points with grid data (CO2=%s, rate=%s)",
         enriched_count,
@@ -328,7 +320,7 @@ def has_forecast_deviated(
     if not old_forecast or not new_forecast:
         return True  # No old forecast = always re-optimize
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff = now.replace(hour=now.hour + lookahead_hours)
 
     # Build lookup from old forecast: hour -> temp
@@ -367,7 +359,7 @@ def estimate_solar_elevation(
     (negative = below horizon / nighttime).
     """
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
 
     # Convert to UTC for calculation
     utc = dt.utctimetuple() if hasattr(dt, "utctimetuple") else dt.timetuple()
@@ -385,10 +377,7 @@ def estimate_solar_elevation(
     dec_rad = math.radians(declination)
     ha_rad = math.radians(hour_angle)
 
-    sin_elevation = (
-        math.sin(lat_rad) * math.sin(dec_rad)
-        + math.cos(lat_rad) * math.cos(dec_rad) * math.cos(ha_rad)
-    )
+    sin_elevation = math.sin(lat_rad) * math.sin(dec_rad) + math.cos(lat_rad) * math.cos(dec_rad) * math.cos(ha_rad)
 
     return math.degrees(math.asin(max(-1.0, min(1.0, sin_elevation))))
 

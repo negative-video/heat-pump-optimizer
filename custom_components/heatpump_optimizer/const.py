@@ -54,7 +54,7 @@ DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS = 2
 DEFAULT_STALE_FORECAST_HOURS = 6
 DEFAULT_UPDATE_INTERVAL_MINUTES = 5
 DEFAULT_HVAC_POWER_WATTS = 3500  # typical heat pump cooling draw; overridden by tonnage+SEER if provided
-DEFAULT_FAN_ONLY_WATTS = 300     # blower fan only, no compressor
+DEFAULT_FAN_ONLY_WATTS = 300  # blower fan only, no compressor
 
 # Mode-aware power estimation (optional overrides for when no power sensor exists)
 CONF_COOLING_WATTS = "cooling_watts"
@@ -104,10 +104,10 @@ DEFAULT_MODEL_CONFIDENCE_THRESHOLD = 0.5  # fall back to static model below this
 # Conservative: wider comfort bands, no aggressive pre-conditioning
 # Standard: normal operation with full optimization
 # Confident: aggressive pre-conditioning and rate arbitrage
-ACTIVATION_TIER_LEARNING = "learning"       # not yet activated
+ACTIVATION_TIER_LEARNING = "learning"  # not yet activated
 ACTIVATION_TIER_CONSERVATIVE = "conservative"  # early activation with guardrails
-ACTIVATION_TIER_STANDARD = "standard"       # full optimization
-ACTIVATION_TIER_CONFIDENT = "confident"     # aggressive strategies enabled
+ACTIVATION_TIER_STANDARD = "standard"  # full optimization
+ACTIVATION_TIER_CONFIDENT = "confident"  # aggressive strategies enabled
 
 # Conservative mode activates when:
 # - Baseline is captured (7 days)
@@ -165,9 +165,9 @@ CONF_AUX_HEAT_OVERRIDE_ENTITY = "aux_heat_override_entity"
 
 # Duct-based aux heat detection (optional — supply air temp sensor)
 CONF_DUCT_TEMP_ENTITY = "duct_temp_entity"
-DEFAULT_DUCT_AUX_THRESHOLD_F = 110.0     # absolute supply temp = aux heat
+DEFAULT_DUCT_AUX_THRESHOLD_F = 110.0  # absolute supply temp = aux heat
 DEFAULT_DUCT_AUX_RATE_THRESHOLD_F = 100.0  # supply temp requiring rate check
-DEFAULT_DUCT_AUX_RATE_MIN = 3.0           # F/min rise rate = aux heat
+DEFAULT_DUCT_AUX_RATE_MIN = 3.0  # F/min rise rate = aux heat
 
 # Occupancy (multi-entity, replaces singular CONF_OCCUPANCY_ENTITY)
 CONF_OCCUPANCY_ENTITIES = "occupancy_entities"
@@ -269,9 +269,9 @@ BLEND_MODE_OCCUPANCY = "occupancy"
 BLEND_MODE_SCHEDULE = "schedule"
 BLEND_MODE_MEDIAN = "median"
 
-DEFAULT_BLEND_OUTLIER_THRESHOLD_F = 3.0   # °F from median to count as outlier
-DEFAULT_BLEND_SCHEDULE_START = "22:00"    # start of nightly suppression window
-DEFAULT_BLEND_SCHEDULE_END = "08:00"      # end of nightly suppression window
+DEFAULT_BLEND_OUTLIER_THRESHOLD_F = 3.0  # °F from median to count as outlier
+DEFAULT_BLEND_SCHEDULE_START = "22:00"  # start of nightly suppression window
+DEFAULT_BLEND_SCHEDULE_END = "08:00"  # end of nightly suppression window
 
 # Sleep schedule (optional — tighter comfort bounds during sleeping hours)
 CONF_SLEEP_SCHEDULE_ENABLED = "sleep_schedule_enabled"
@@ -309,19 +309,19 @@ DEFAULT_MORNING_WARM_OUTDOOR_TEMP = 35.0
 
 # Humidity-gated sensor squelching (wet room exclusion)
 CONF_HUMIDITY_SQUELCH_PAIRS = "humidity_squelch_pairs"
-DEFAULT_HUMIDITY_SQUELCH_ON = 65.0    # %RH — activate squelch above this
-DEFAULT_HUMIDITY_SQUELCH_OFF = 55.0   # %RH — deactivate squelch below this
+DEFAULT_HUMIDITY_SQUELCH_ON = 65.0  # %RH — activate squelch above this
+DEFAULT_HUMIDITY_SQUELCH_OFF = 55.0  # %RH — deactivate squelch below this
 
 # Setpoint switching penalty
 DEFAULT_SWITCHING_PENALTY_WEIGHT = 0.3  # soft penalty for consecutive setpoint changes
 
 # Zone-aware presence (extends existing presence detection)
 CONF_HOME_ZONE_STATES = "home_zone_states"  # extra person states that count as home
-DEFAULT_HOME_ZONE_STATES: list[str] = []    # empty = only "home"/"on" count
+DEFAULT_HOME_ZONE_STATES: list[str] = []  # empty = only "home"/"on" count
 
 # Thermostat profile control (optional — controls home/away/sleep comfort profile)
 CONF_PROFILE_CONTROL_ENABLED = "profile_control_enabled"
-CONF_PROFILE_ENTITY = "profile_entity"            # select.* entity ID
+CONF_PROFILE_ENTITY = "profile_entity"  # select.* entity ID
 CONF_PROFILE_ENTITY_TYPE = "profile_entity_type"  # "select" or "preset"
 CONF_PROFILE_MAP_HOME = "profile_map_home"
 CONF_PROFILE_MAP_AWAY = "profile_map_away"

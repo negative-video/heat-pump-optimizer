@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from .data_types import ForecastPoint, PreconditionPlan
 from .performance_model import PerformanceModel
@@ -55,14 +55,20 @@ class PreconditionPlanner:
         Returns:
             PreconditionPlan, or None if no pre-conditioning is needed.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         deadline = arrival_time - timedelta(minutes=buffer_minutes)
 
         if deadline <= now:
             # No time left — must start immediately if needed
             return self._immediate_plan(
-                now, arrival_time, current_indoor_temp, forecast, mode,
-                home_comfort, power_watts, arrival_source,
+                now,
+                arrival_time,
+                current_indoor_temp,
+                forecast,
+                mode,
+                home_comfort,
+                power_watts,
+                arrival_source,
             )
 
         # Determine the target temp we need to reach
@@ -78,9 +84,7 @@ class PreconditionPlanner:
         temp_at_time = self._build_temp_lookup(forecast)
 
         # Simulate passive drift from now to deadline
-        drift_trajectory = self._simulate_drift(
-            current_indoor_temp, now, deadline, temp_at_time
-        )
+        drift_trajectory = self._simulate_drift(current_indoor_temp, now, deadline, temp_at_time)
 
         # Evaluate candidate start times
         best_plan: PreconditionPlan | None = None
@@ -139,8 +143,7 @@ class PreconditionPlanner:
                 best_plan.should_start_now = True
 
             _LOGGER.info(
-                "Pre-conditioning plan: start %s for %s arrival "
-                "(%.0f min runtime, %.1f°F gap, %.2f kWh)",
+                "Pre-conditioning plan: start %s for %s arrival (%.0f min runtime, %.1f°F gap, %.2f kWh)",
                 best_plan.start_time.strftime("%H:%M"),
                 arrival_time.strftime("%H:%M"),
                 best_plan.estimated_runtime_minutes,
@@ -227,9 +230,7 @@ class PreconditionPlanner:
         return trajectory
 
     @staticmethod
-    def _lookup_drift(
-        trajectory: list[tuple[datetime, float]], time: datetime
-    ) -> float:
+    def _lookup_drift(trajectory: list[tuple[datetime, float]], time: datetime) -> float:
         """Find indoor temp at a given time from the drift trajectory."""
         if not trajectory:
             return 75.0

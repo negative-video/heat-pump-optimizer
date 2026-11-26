@@ -15,26 +15,20 @@ import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.util.unit_conversion import TemperatureConverter
 
 from ..const import (
-    CONF_AREA_SENSOR_CONFIG,
-    CONF_INDOOR_HUMIDITY_ENTITIES,
-    CONF_INDOOR_TEMP_ENTITIES,
     DEFAULT_OCCUPIED_WEIGHT_MULTIPLIER,
     DEFAULT_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
-    DEFAULT_SENSOR_STALE_MINUTES,
     DEFAULT_SPIKE_HISTORY_MINUTES,
     DEFAULT_SPIKE_HUMIDITY_THRESHOLD,
     DEFAULT_SPIKE_TEMP_THRESHOLD,
     DEFAULT_SPIKE_WINDOW_MINUTES,
     WEIGHTING_MODE_EQUAL,
-    WEIGHTING_MODE_OCCUPIED_ONLY,
-    WEIGHTING_MODE_WEIGHTED,
 )
 from ..engine.comfort import calculate_apparent_temperature
 from ..engine.data_types import AreaSensorGroup, IndoorWeightingMode
@@ -220,7 +214,7 @@ class AreaOccupancyManager:
         - Stale/unavailable motion sensor -> treated as occupied (graceful degradation)
         - No motion sensors for a room -> always treated as occupied
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for area in self._areas:
             if not area.motion_entities:
@@ -260,7 +254,7 @@ class AreaOccupancyManager:
 
     def update_readings(self) -> None:
         """Read temperature and humidity for each area and compute apparent temp."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for area in self._areas:
             area.current_temp = self._read_area_temp(area)
@@ -278,9 +272,7 @@ class AreaOccupancyManager:
 
             # Compute apparent temp if both readings available
             if area.current_temp is not None and area.current_humidity is not None:
-                area.current_apparent_temp = calculate_apparent_temperature(
-                    area.current_temp, area.current_humidity
-                )
+                area.current_apparent_temp = calculate_apparent_temperature(area.current_temp, area.current_humidity)
             elif area.current_temp is not None:
                 area.current_apparent_temp = area.current_temp
             else:
@@ -299,9 +291,7 @@ class AreaOccupancyManager:
             return None
         unit = state.attributes.get("unit_of_measurement")
         if unit == UnitOfTemperature.CELSIUS or unit == "°C":
-            value = TemperatureConverter.convert(
-                value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-            )
+            value = TemperatureConverter.convert(value, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
         return value
 
     def _read_single_humidity(self, entity_id: str) -> float | None:
@@ -337,9 +327,7 @@ class AreaOccupancyManager:
 
     # ── Spike detection ──────────────────────────────────────────────
 
-    def _record_reading(
-        self, entity_id: str, value: float, now: datetime
-    ) -> None:
+    def _record_reading(self, entity_id: str, value: float, now: datetime) -> None:
         """Record a sensor reading for spike detection history."""
         if entity_id not in self._sensor_history:
             self._sensor_history[entity_id] = _SensorHistory()
@@ -385,7 +373,7 @@ class AreaOccupancyManager:
 
     def _check_all_spikes(self) -> dict[str, bool]:
         """Check all tracked sensors for spikes. Returns entity_id -> is_spiking."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result: dict[str, bool] = {}
         for entity_id in self._sensor_history:
             result[entity_id] = self._is_sensor_spiking(entity_id, now)
@@ -430,17 +418,13 @@ class AreaOccupancyManager:
         # Fallback: if all weights are zero (occupied_only with no one detected),
         # revert to equal weighting to avoid no-data situation
         if all(w == 0.0 for w in weights.values()) and weights:
-            _LOGGER.debug(
-                "All area weights are zero — falling back to equal weighting"
-            )
+            _LOGGER.debug("All area weights are zero — falling back to equal weighting")
             for area_id in weights:
                 weights[area_id] = 1.0
 
         return weights
 
-    def get_weighted_indoor_temp(
-        self, thermostat_temp: float | None = None
-    ) -> tuple[float | None, str]:
+    def get_weighted_indoor_temp(self, thermostat_temp: float | None = None) -> tuple[float | None, str]:
         """Compute weighted indoor temperature across all areas.
 
         Args:
@@ -480,9 +464,7 @@ class AreaOccupancyManager:
         source = f"weighted:{n_occupied}/{n_total}"
         return avg, source
 
-    def get_weighted_indoor_humidity(
-        self, thermostat_humidity: float | None = None
-    ) -> tuple[float | None, str]:
+    def get_weighted_indoor_humidity(self, thermostat_humidity: float | None = None) -> tuple[float | None, str]:
         """Compute weighted indoor humidity across all areas.
 
         Args:

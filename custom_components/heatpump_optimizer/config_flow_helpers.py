@@ -45,18 +45,14 @@ def _is_metric(hass: HomeAssistant) -> bool:
 def _f_to_display(temp_f: float, hass: HomeAssistant) -> float:
     """Convert °F to the user's display unit (°F or °C), rounded to int."""
     if _is_metric(hass):
-        return round(TemperatureConverter.convert(
-            temp_f, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS
-        ))
+        return round(TemperatureConverter.convert(temp_f, UnitOfTemperature.FAHRENHEIT, UnitOfTemperature.CELSIUS))
     return temp_f
 
 
 def _display_to_f(temp_display: float, hass: HomeAssistant) -> float:
     """Convert from user's display unit back to °F for internal storage."""
     if _is_metric(hass):
-        return TemperatureConverter.convert(
-            temp_display, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT
-        )
+        return TemperatureConverter.convert(temp_display, UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
     return temp_display
 
 
@@ -83,12 +79,18 @@ def _convert_comfort_input_to_f(user_input: dict[str, Any], hass: HomeAssistant)
     if not _is_metric(hass):
         return user_input
     temp_keys = {
-        CONF_COMFORT_COOL_MIN, CONF_COMFORT_COOL_MAX,
-        CONF_COMFORT_HEAT_MIN, CONF_COMFORT_HEAT_MAX,
-        CONF_SAFETY_HEAT_MIN, CONF_SAFETY_COOL_MAX,
-        CONF_SLEEP_COMFORT_COOL_MIN, CONF_SLEEP_COMFORT_COOL_MAX,
-        CONF_SLEEP_COMFORT_HEAT_MIN, CONF_SLEEP_COMFORT_HEAT_MAX,
-        CONF_MORNING_HOLD_TEMP, CONF_MORNING_WARM_OUTDOOR_TEMP,
+        CONF_COMFORT_COOL_MIN,
+        CONF_COMFORT_COOL_MAX,
+        CONF_COMFORT_HEAT_MIN,
+        CONF_COMFORT_HEAT_MAX,
+        CONF_SAFETY_HEAT_MIN,
+        CONF_SAFETY_COOL_MAX,
+        CONF_SLEEP_COMFORT_COOL_MIN,
+        CONF_SLEEP_COMFORT_COOL_MAX,
+        CONF_SLEEP_COMFORT_HEAT_MIN,
+        CONF_SLEEP_COMFORT_HEAT_MAX,
+        CONF_MORNING_HOLD_TEMP,
+        CONF_MORNING_WARM_OUTDOOR_TEMP,
     }
     converted = dict(user_input)
     for key in temp_keys:

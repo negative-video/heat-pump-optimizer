@@ -46,16 +46,12 @@ class ApplianceManager:
                 continue
 
             # Check if the entity's state matches any of the configured active states
-            app_state.is_active = state_obj.state.lower() in [
-                s.lower() for s in cfg.active_states
-            ]
+            app_state.is_active = state_obj.state.lower() in [s.lower() for s in cfg.active_states]
 
             # Determine power draw
             app_state.current_power_watts = self._read_power(cfg, app_state.is_active)
 
-    def _read_power(
-        self, cfg: ApplianceConfig, is_active: bool
-    ) -> float | None:
+    def _read_power(self, cfg: ApplianceConfig, is_active: bool) -> float | None:
         """Read or estimate instantaneous power draw in watts."""
         if not is_active:
             return 0.0
@@ -116,9 +112,7 @@ class ApplianceManager:
     def total_humidity_impact(self) -> float | None:
         """Sum of %RH/hr from all currently active appliances, or None if none configured."""
         impacts = [
-            s.config.humidity_impact
-            for s in self._states
-            if s.is_active and s.config.humidity_impact is not None
+            s.config.humidity_impact for s in self._states if s.is_active and s.config.humidity_impact is not None
         ]
         return sum(impacts) if impacts else None
 
@@ -134,14 +128,16 @@ class ApplianceManager:
         """Per-appliance status dict for sensor/panel exposure."""
         appliances = []
         for s in self._states:
-            appliances.append({
-                "id": s.config.id,
-                "name": s.config.name,
-                "active": s.is_active,
-                "thermal_impact_btu": self._thermal_impact_btu_for(s),
-                "power_watts": s.current_power_watts,
-                "state_entity": s.config.state_entity,
-            })
+            appliances.append(
+                {
+                    "id": s.config.id,
+                    "name": s.config.name,
+                    "active": s.is_active,
+                    "thermal_impact_btu": self._thermal_impact_btu_for(s),
+                    "power_watts": s.current_power_watts,
+                    "state_entity": s.config.state_entity,
+                }
+            )
         return {
             "appliances": appliances,
             "total_thermal_impact_btu": self.total_thermal_impact_btu(),
@@ -184,21 +180,21 @@ class ApplianceManager:
                         thermal_factor = 3.412
                     else:
                         thermal_factor = None
-                configs.append(ApplianceConfig(
-                    id=item["id"],
-                    name=item["name"],
-                    state_entity=item["state_entity"],
-                    active_states=item.get("active_states", ["on"]),
-                    thermal_impact_btu=float(item.get("thermal_impact_btu", 0)),
-                    thermal_factor=thermal_factor,
-                    power_entity=item.get("power_entity"),
-                    estimated_watts=item.get("estimated_watts"),
-                    humidity_impact=item.get("humidity_impact"),
-                    controllable=item.get("controllable", False),
-                    control_entity=item.get("control_entity"),
-                ))
-            except (KeyError, ValueError, TypeError) as exc:
-                _LOGGER.warning(
-                    "Skipping invalid appliance config %s: %s", item, exc
+                configs.append(
+                    ApplianceConfig(
+                        id=item["id"],
+                        name=item["name"],
+                        state_entity=item["state_entity"],
+                        active_states=item.get("active_states", ["on"]),
+                        thermal_impact_btu=float(item.get("thermal_impact_btu", 0)),
+                        thermal_factor=thermal_factor,
+                        power_entity=item.get("power_entity"),
+                        estimated_watts=item.get("estimated_watts"),
+                        humidity_impact=item.get("humidity_impact"),
+                        controllable=item.get("controllable", False),
+                        control_entity=item.get("control_entity"),
+                    )
                 )
+            except (KeyError, ValueError, TypeError) as exc:
+                _LOGGER.warning("Skipping invalid appliance config %s: %s", item, exc)
         return configs

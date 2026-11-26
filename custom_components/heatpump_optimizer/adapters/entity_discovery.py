@@ -84,12 +84,14 @@ class EntityDiscovery:
             else:
                 confidence = "medium"
                 reason = "Climate entity"
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence=confidence,
-                reason=reason,
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
 
         # Sort high confidence first
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
@@ -112,12 +114,14 @@ class EntityDiscovery:
             else:
                 confidence = "medium"
                 reason = "Weather entity"
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence=confidence,
-                reason=reason,
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results
@@ -143,11 +147,7 @@ class EntityDiscovery:
             if outdoor:
                 if is_outdoor_name or is_outdoor_area:
                     confidence = "high"
-                    reason = (
-                        "Name indicates outdoor"
-                        if is_outdoor_name
-                        else "Assigned to outdoor area"
-                    )
+                    reason = "Name indicates outdoor" if is_outdoor_name else "Assigned to outdoor area"
                 elif not is_indoor_name:
                     confidence = "low"
                     reason = "Unclassified temperature sensor"
@@ -164,12 +164,14 @@ class EntityDiscovery:
                 else:
                     continue  # Skip clearly outdoor sensors when looking for indoor
 
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence=confidence,
-                reason=reason,
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results
@@ -194,11 +196,7 @@ class EntityDiscovery:
             if outdoor:
                 if is_outdoor_name or is_outdoor_area:
                     confidence = "high"
-                    reason = (
-                        "Name indicates outdoor"
-                        if is_outdoor_name
-                        else "Assigned to outdoor area"
-                    )
+                    reason = "Name indicates outdoor" if is_outdoor_name else "Assigned to outdoor area"
                 elif not is_indoor_name:
                     confidence = "low"
                     reason = "Unclassified humidity sensor"
@@ -214,12 +212,14 @@ class EntityDiscovery:
                 else:
                     continue
 
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence=confidence,
-                reason=reason,
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results
@@ -235,29 +235,32 @@ class EntityDiscovery:
             name = self._entity_name(entry)
 
             if entry.domain == "person":
-                results.append(EntitySuggestion(
-                    entity_id=entry.entity_id,
-                    friendly_name=name,
-                    confidence="high",
-                    reason="Person entity",
-                ))
+                results.append(
+                    EntitySuggestion(
+                        entity_id=entry.entity_id,
+                        friendly_name=name,
+                        confidence="high",
+                        reason="Person entity",
+                    )
+                )
             elif entry.domain == "device_tracker":
-                results.append(EntitySuggestion(
-                    entity_id=entry.entity_id,
-                    friendly_name=name,
-                    confidence="medium",
-                    reason="Device tracker",
-                ))
-            elif (
-                entry.domain == "binary_sensor"
-                and entry.original_device_class in ("occupancy", "presence")
-            ):
-                results.append(EntitySuggestion(
-                    entity_id=entry.entity_id,
-                    friendly_name=name,
-                    confidence="medium",
-                    reason=f"Presence sensor ({entry.original_device_class})",
-                ))
+                results.append(
+                    EntitySuggestion(
+                        entity_id=entry.entity_id,
+                        friendly_name=name,
+                        confidence="medium",
+                        reason="Device tracker",
+                    )
+                )
+            elif entry.domain == "binary_sensor" and entry.original_device_class in ("occupancy", "presence"):
+                results.append(
+                    EntitySuggestion(
+                        entity_id=entry.entity_id,
+                        friendly_name=name,
+                        confidence="medium",
+                        reason=f"Presence sensor ({entry.original_device_class})",
+                    )
+                )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results
@@ -286,12 +289,14 @@ class EntityDiscovery:
                 confidence = "low"
                 reason = "Power sensor (unclassified)"
 
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence=confidence,
-                reason=reason,
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results
@@ -317,12 +322,14 @@ class EntityDiscovery:
             else:
                 continue  # Only suggest clearly solar sensors
 
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence=confidence,
-                reason=reason,
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results
@@ -336,12 +343,14 @@ class EntityDiscovery:
             if entry.domain != "calendar" or entry.disabled:
                 continue
             name = self._entity_name(entry)
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence="medium",
-                reason="Calendar entity",
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence="medium",
+                    reason="Calendar entity",
+                )
+            )
 
         return results
 
@@ -356,12 +365,14 @@ class EntityDiscovery:
             if entry.original_device_class != "wind_speed":
                 continue
             name = self._entity_name(entry)
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence="high",
-                reason="Wind speed sensor",
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence="high",
+                    reason="Wind speed sensor",
+                )
+            )
 
         return results
 
@@ -376,12 +387,14 @@ class EntityDiscovery:
             if entry.original_device_class != "irradiance":
                 continue
             name = self._entity_name(entry)
-            results.append(EntitySuggestion(
-                entity_id=entry.entity_id,
-                friendly_name=name,
-                confidence="high",
-                reason="Solar irradiance sensor",
-            ))
+            results.append(
+                EntitySuggestion(
+                    entity_id=entry.entity_id,
+                    friendly_name=name,
+                    confidence="high",
+                    reason="Solar irradiance sensor",
+                )
+            )
 
         return results
 
@@ -396,15 +409,17 @@ class EntityDiscovery:
             name = self._entity_name(entry)
             name_lower = name.lower()
             eid_lower = entry.entity_id.lower()
-            if any(kw in name_lower or kw in eid_lower for kw in (
-                "co2", "carbon", "grid_intensity", "carbon_intensity"
-            )):
-                results.append(EntitySuggestion(
-                    entity_id=entry.entity_id,
-                    friendly_name=name,
-                    confidence="medium",
-                    reason="Carbon intensity sensor",
-                ))
+            if any(
+                kw in name_lower or kw in eid_lower for kw in ("co2", "carbon", "grid_intensity", "carbon_intensity")
+            ):
+                results.append(
+                    EntitySuggestion(
+                        entity_id=entry.entity_id,
+                        friendly_name=name,
+                        confidence="medium",
+                        reason="Carbon intensity sensor",
+                    )
+                )
 
         return results
 
@@ -426,21 +441,25 @@ class EntityDiscovery:
             # Sensor with monetary device class + rate keyword → high confidence
             if entry.domain == "sensor" and entry.original_device_class == "monetary":
                 if any(kw in name_lower or kw in eid_lower for kw in _rate_keywords):
-                    results.append(EntitySuggestion(
-                        entity_id=entry.entity_id,
-                        friendly_name=name,
-                        confidence="high",
-                        reason="Electricity rate sensor",
-                    ))
+                    results.append(
+                        EntitySuggestion(
+                            entity_id=entry.entity_id,
+                            friendly_name=name,
+                            confidence="high",
+                            reason="Electricity rate sensor",
+                        )
+                    )
             # input_number with rate/cost/energy keyword → medium confidence
             elif entry.domain == "input_number":
                 if any(kw in name_lower or kw in eid_lower for kw in _rate_keywords):
-                    results.append(EntitySuggestion(
-                        entity_id=entry.entity_id,
-                        friendly_name=name,
-                        confidence="medium",
-                        reason="Input number (may contain electricity rate)",
-                    ))
+                    results.append(
+                        EntitySuggestion(
+                            entity_id=entry.entity_id,
+                            friendly_name=name,
+                            confidence="medium",
+                            reason="Input number (may contain electricity rate)",
+                        )
+                    )
 
         results.sort(key=lambda s: {"high": 0, "medium": 1, "low": 2}[s.confidence])
         return results

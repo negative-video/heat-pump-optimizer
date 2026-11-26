@@ -44,6 +44,7 @@ class EntitySuggestion:
 @dataclass
 class ForecastPoint:
     """A single point in a weather forecast timeline."""
+
     time: datetime
     outdoor_temp: float
     carbon_intensity: float | None = None
@@ -81,8 +82,8 @@ class ForecastPoint:
             wc = (
                 35.74
                 + 0.6215 * temp
-                - 35.75 * (self.wind_speed_mph ** 0.16)
-                + 0.4275 * temp * (self.wind_speed_mph ** 0.16)
+                - 35.75 * (self.wind_speed_mph**0.16)
+                + 0.4275 * temp * (self.wind_speed_mph**0.16)
             )
             return min(temp, wc)  # wind chill only makes it feel colder
 
@@ -92,6 +93,7 @@ class ForecastPoint:
 @dataclass
 class OccupancyForecastPoint:
     """Predicted occupancy for a time window (from calendar or reactive sensors)."""
+
     start_time: datetime
     end_time: datetime
     mode: str  # "home", "away", "vacation"
@@ -102,6 +104,7 @@ class OccupancyForecastPoint:
 @dataclass
 class PreconditionPlan:
     """Result of the pre-conditioning planner."""
+
     start_time: datetime
     arrival_time: datetime
     estimated_runtime_minutes: float
@@ -122,13 +125,14 @@ class ScheduleEntry:
     arbitrate between a heat floor and a cool ceiling itself, instead of the
     integration whipsawing a single setpoint between the two representations.
     """
+
     start_time: datetime
     end_time: datetime
     target_temp: float
     mode: str  # "cool", "heat", "off"
     reason: str = ""
     # Dual setpoint pair (both set, or both None)
-    target_temp_low: float | None = None   # heat floor
+    target_temp_low: float | None = None  # heat floor
     target_temp_high: float | None = None  # cool ceiling
 
     @property
@@ -140,6 +144,7 @@ class ScheduleEntry:
 @dataclass
 class SimulationPoint:
     """A single point in a thermal simulation timeline."""
+
     time: datetime
     indoor_temp: float
     outdoor_temp: float
@@ -153,6 +158,7 @@ class SimulationPoint:
 @dataclass
 class OptimizedSchedule:
     """Result of the optimizer: a schedule with savings estimate."""
+
     entries: list[ScheduleEntry]
     baseline_runtime_minutes: float
     optimized_runtime_minutes: float
@@ -178,14 +184,16 @@ class OptimizedSchedule:
 @dataclass
 class OptimizationWeights:
     """Weights for multi-objective optimization."""
+
     energy_efficiency: float = 1.0  # always on
-    carbon_intensity: float = 0.0   # 0 = ignore, 1 = full weight
-    electricity_cost: float = 0.0   # 0 = ignore, 1 = full weight
+    carbon_intensity: float = 0.0  # 0 = ignore, 1 = full weight
+    electricity_cost: float = 0.0  # 0 = ignore, 1 = full weight
 
 
 @dataclass
 class HourScore:
     """Efficiency score for a single hour in the forecast."""
+
     hour: datetime
     outdoor_temp: float
     efficiency_score: float  # lower = better time to run HVAC
@@ -274,7 +282,7 @@ class HourlySavingsRecord:
     rate_arbitrage_savings: float | None = None  # cost savings from cheaper hours
 
     # Aux heat tracking
-    aux_heat_kwh: float = 0.0       # incremental resistive kWh above HP draw this hour
+    aux_heat_kwh: float = 0.0  # incremental resistive kWh above HP draw this hour
     avoided_aux_heat_kwh: float = 0.0  # kWh saved by not triggering aux vs baseline
 
     # Provenance of actual_kwh: "measured" (power sensor), "estimated"
@@ -384,9 +392,9 @@ class DailySavingsReport:
     def baseline_comfort_violations(self) -> int:
         """Count of hours where baseline virtual house exceeded comfort bounds."""
         return sum(
-            1 for h in self.hours
-            if h.baseline_indoor_temp is not None
-            and h.baseline_cop is not None  # indicates counterfactual was active
+            1
+            for h in self.hours
+            if h.baseline_indoor_temp is not None and h.baseline_cop is not None  # indicates counterfactual was active
         )
 
     @property
@@ -429,6 +437,7 @@ class ApplianceState:
 @dataclass
 class ValidationReport:
     """Results from validating model predictions against observed data."""
+
     n_samples: int
     mean_absolute_error: float  # degrees F
     r_squared: float
@@ -439,6 +448,7 @@ class ValidationReport:
 @dataclass
 class DayAnalysis:
     """Analysis of a single day's optimization potential."""
+
     date: str
     mode: str
     actual_runtime_minutes: float

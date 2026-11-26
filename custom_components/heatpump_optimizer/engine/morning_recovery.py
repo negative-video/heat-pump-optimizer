@@ -34,7 +34,8 @@ driven by the caller through ``warm_by_candidates``.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dt_time
 
 RECOVERY_WARM_BY = "warm_by"
 RECOVERY_WAIT_FOR_WARMTH = "wait_for_warmth"
@@ -71,19 +72,19 @@ class MorningRecoveryConfig:
 class HourFacts:
     """What the recovery planner needs to know about one schedule hour."""
 
-    hour: datetime          # schedule hour key (timezone-aware)
-    local: datetime         # the same instant in local time
-    in_sleep: bool          # inside the configured sleep window
-    home: bool              # occupied, so comfort preferences apply
-    day_floor: float        # daytime (non-sleep) heat floor for this hour
-    outdoor_temp: float     # forecast outdoor temperature
+    hour: datetime  # schedule hour key (timezone-aware)
+    local: datetime  # the same instant in local time
+    in_sleep: bool  # inside the configured sleep window
+    home: bool  # occupied, so comfort preferences apply
+    day_floor: float  # daytime (non-sleep) heat floor for this hour
+    outdoor_temp: float  # forecast outdoor temperature
 
 
 @dataclass
 class MorningWindow:
     """One morning's recovery problem."""
 
-    deadline: datetime                     # the configured time, as an instant
+    deadline: datetime  # the configured time, as an instant
     night_floor: float
     day_floor: float
     # Hours after the sleep window ends and before the deadline, in order.
@@ -141,9 +142,7 @@ def find_morning_windows(
         if target <= sleep_end:
             continue  # nothing between the end of sleep and the target
 
-        deadline_local = first.local.replace(
-            hour=target.hour, minute=target.minute, second=0, microsecond=0
-        )
+        deadline_local = first.local.replace(hour=target.hour, minute=target.minute, second=0, microsecond=0)
         deadline = first.hour + (deadline_local - first.local)
         earliest = deadline - timedelta(hours=max(1, config.max_lead_hours))
 
@@ -166,9 +165,7 @@ def find_morning_windows(
         if not hold and not early:
             continue
         if day_floor is None:
-            day_floor = next(
-                (f.day_floor for f in day_hours if f.home), night_floor
-            )
+            day_floor = next((f.day_floor for f in day_hours if f.home), night_floor)
         if day_floor <= night_floor:
             continue
 
@@ -190,18 +187,12 @@ def find_morning_windows(
 def hold_floor(window: MorningWindow, config: MorningRecoveryConfig) -> float:
     """The floor held between the end of sleep and the start of recovery."""
     if config.mode == RECOVERY_WAIT_FOR_WARMTH:
-        interim = (
-            config.hold_temp
-            if config.hold_temp is not None
-            else (window.night_floor + window.day_floor) / 2.0
-        )
+        interim = config.hold_temp if config.hold_temp is not None else (window.night_floor + window.day_floor) / 2.0
         return max(window.night_floor, min(window.day_floor, interim))
     return window.night_floor
 
 
-def wait_for_warmth_start(
-    window: MorningWindow, config: MorningRecoveryConfig
-) -> datetime:
+def wait_for_warmth_start(window: MorningWindow, config: MorningRecoveryConfig) -> datetime:
     """First post-sleep hour warm enough outside, else the latest time."""
     for hour in window.hold_hours:
         if window.outdoor_by_hour.get(hour, float("-inf")) >= config.warm_outdoor_temp:
@@ -209,9 +200,7 @@ def wait_for_warmth_start(
     return window.deadline
 
 
-def warm_by_candidates(
-    window: MorningWindow, config: MorningRecoveryConfig, now_hour: datetime
-) -> list[datetime]:
+def warm_by_candidates(window: MorningWindow, config: MorningRecoveryConfig, now_hour: datetime) -> list[datetime]:
     """Recovery start hours to try, latest first.
 
     The caller simulates each and keeps the first (latest) one that is warm

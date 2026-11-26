@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 
 from ..engine.data_types import OptimizedSchedule, ScheduleEntry, SimulationPoint
@@ -84,7 +84,7 @@ class TacticalController:
             TacticalResult with correction advice.
         """
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
         predicted = self._find_predicted_temp(schedule, now)
         self._last_predicted_temp = predicted
@@ -117,9 +117,7 @@ class TacticalController:
 
         # Check disturbed state recovery
         if self._state == TacticalState.DISTURBED:
-            result = self._handle_disturbed(
-                actual_indoor_temp, predicted, error, current_entry, now
-            )
+            result = self._handle_disturbed(actual_indoor_temp, predicted, error, current_entry, now)
             result.apparent_temp = apparent_temp
             return result
 
@@ -127,16 +125,12 @@ class TacticalController:
         abs_error = abs(error)
 
         if abs_error > LARGE_ERROR_F:
-            result = self._enter_disturbed(
-                actual_indoor_temp, predicted, error, now
-            )
+            result = self._enter_disturbed(actual_indoor_temp, predicted, error, now)
             result.apparent_temp = apparent_temp
             return result
 
         if abs_error > SMALL_ERROR_F:
-            result = self._apply_correction(
-                actual_indoor_temp, predicted, error, current_entry
-            )
+            result = self._apply_correction(actual_indoor_temp, predicted, error, current_entry)
             result.apparent_temp = apparent_temp
             return result
 
@@ -195,7 +189,9 @@ class TacticalController:
         self._disturbed_since = now
         _LOGGER.warning(
             "Entering disturbed state: actual=%.1f°F, predicted=%.1f°F, error=%+.1f°F",
-            actual, predicted, error,
+            actual,
+            predicted,
+            error,
         )
         return TacticalResult(
             state=TacticalState.DISTURBED,
@@ -224,9 +220,9 @@ class TacticalController:
             disturbed_hours = (now - self._disturbed_since).total_seconds() / 3600
             if disturbed_hours >= DISTURBED_MAX_HOURS:
                 _LOGGER.warning(
-                    "Disturbed state exceeded %.0f-hour timeout (error %+.1f°F) "
-                    "— forcing recovery and re-optimization",
-                    DISTURBED_MAX_HOURS, error,
+                    "Disturbed state exceeded %.0f-hour timeout (error %+.1f°F) — forcing recovery and re-optimization",
+                    DISTURBED_MAX_HOURS,
+                    error,
                 )
                 self._state = TacticalState.NOMINAL
                 self._disturbed_since = None
@@ -244,10 +240,7 @@ class TacticalController:
 
         if abs_error < DISTURBED_RECOVERY_THRESHOLD_F:
             # Check if we've been below threshold long enough
-            recent = [
-                e for t, e in self._error_history
-                if (now - t).total_seconds() < DISTURBED_RECOVERY_MINUTES * 60
-            ]
+            recent = [e for t, e in self._error_history if (now - t).total_seconds() < DISTURBED_RECOVERY_MINUTES * 60]
             if recent and all(abs(e) < DISTURBED_RECOVERY_THRESHOLD_F for e in recent):
                 _LOGGER.info("Recovering from disturbed state — errors normalized")
                 self._state = TacticalState.NOMINAL
@@ -275,9 +268,7 @@ class TacticalController:
         )
 
     @staticmethod
-    def _find_predicted_temp(
-        schedule: OptimizedSchedule | None, now: datetime
-    ) -> float | None:
+    def _find_predicted_temp(schedule: OptimizedSchedule | None, now: datetime) -> float | None:
         """Find the predicted indoor temp from the simulation timeline closest to *now*."""
         if schedule is None or not schedule.simulation:
             return None
@@ -294,9 +285,7 @@ class TacticalController:
         """Store error and trim history to 24 hours."""
         self._error_history.append((now, error))
         cutoff = now - timedelta(hours=24)
-        self._error_history = [
-            (t, e) for t, e in self._error_history if t > cutoff
-        ]
+        self._error_history = [(t, e) for t, e in self._error_history if t > cutoff]
 
     @property
     def state(self) -> TacticalState:
@@ -334,7 +323,7 @@ class TacticalController:
 
     def get_recent_errors(self, minutes: int = 60) -> list[float]:
         """Get errors from the last N minutes."""
-        cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
         return [e for t, e in self._error_history if t > cutoff]
 
     @property

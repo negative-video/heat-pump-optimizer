@@ -31,14 +31,13 @@ that survive HA restarts via Store persistence.
 from __future__ import annotations
 
 import dataclasses
-
 import logging
 from collections import deque
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, tzinfo
 from typing import Any
 
 from .engine.counterfactual_simulator import CounterfactualSimulator
-from .engine.data_types import BaselineHourResult, DailySavingsReport, HourlySavingsRecord
+from .engine.data_types import DailySavingsReport, HourlySavingsRecord
 from .learning.energy_baseline import (
     LABEL_OPTIMIZED,
     MIN_DEGREE_DAYS_FOR_FIT,
@@ -172,10 +171,7 @@ class SavingsTracker:
         if tier in (TIER_LEARNING, TIER_PROJECTED, TIER_ESTIMATED, TIER_SIMULATED, TIER_CALIBRATED):
             # Reset cumulative totals when upgrading from pre-baseline tiers
             # to prevent stale phantom data from polluting real savings.
-            if (
-                self._accuracy_tier in (TIER_LEARNING, TIER_PROJECTED)
-                and tier not in (TIER_LEARNING, TIER_PROJECTED)
-            ):
+            if self._accuracy_tier in (TIER_LEARNING, TIER_PROJECTED) and tier not in (TIER_LEARNING, TIER_PROJECTED):
                 self._reset_cumulative()
             self._accuracy_tier = tier
 
@@ -286,9 +282,7 @@ class SavingsTracker:
                 self_consumption = max(0.0, power_watts - grid_import_watts)
                 solar_offset_kwh = self_consumption * (interval_minutes / 60.0) / 1000.0
                 self._hour_solar_offset_kwh += solar_offset_kwh
-                self._hour_grid_import_kwh += (
-                    grid_import_watts * (interval_minutes / 60.0) / 1000.0
-                )
+                self._hour_grid_import_kwh += grid_import_watts * (interval_minutes / 60.0) / 1000.0
             elif solar_production_watts is not None and power_watts is not None:
                 solar_offset_watts = min(solar_production_watts, power_watts)
                 solar_offset_kwh = solar_offset_watts * (interval_minutes / 60.0) / 1000.0
@@ -305,9 +299,7 @@ class SavingsTracker:
         if self._current_hour is None:
             return
 
-        hour_dt = datetime.fromtimestamp(
-            self._current_hour * 3600, tz=timezone.utc
-        )
+        hour_dt = datetime.fromtimestamp(self._current_hour * 3600, tz=UTC)
 
         actual_min = self._hour_actual_runtime_min
         worst_case_min = 60.0
@@ -322,9 +314,7 @@ class SavingsTracker:
 
         # Average actual COP this hour
         avg_actual_cop = (
-            sum(self._hour_cop_readings) / len(self._hour_cop_readings)
-            if self._hour_cop_readings
-            else None
+            sum(self._hour_cop_readings) / len(self._hour_cop_readings) if self._hour_cop_readings else None
         )
 
         # Actual energy: the integrated total when every running interval had a
@@ -374,9 +364,7 @@ class SavingsTracker:
 
             # Decompose savings
             avg_actual_rate = (
-                sum(self._hour_rate_readings) / len(self._hour_rate_readings)
-                if self._hour_rate_readings
-                else None
+                sum(self._hour_rate_readings) / len(self._hour_rate_readings) if self._hour_rate_readings else None
             )
             decomposition = self._counterfactual.decompose_savings(
                 baseline_result=baseline_result,
@@ -412,8 +400,7 @@ class SavingsTracker:
         # monitor-only mode lands in the ledger as a saving or a loss. That
         # is how an install that never wrote a setpoint showed -1,565 kWh.
         controlled = (
-            self._hour_observed_minutes <= 0
-            or self._hour_controlled_minutes >= 0.5 * self._hour_observed_minutes
+            self._hour_observed_minutes <= 0 or self._hour_controlled_minutes >= 0.5 * self._hour_observed_minutes
         )
         if not controlled:
             baseline_min = actual_min
@@ -529,8 +516,7 @@ class SavingsTracker:
 
         source = "counterfactual" if baseline_result else "ratio"
         _LOGGER.debug(
-            "Hour finalized [%s]: actual=%.1f min, baseline=%.1f min, "
-            "saved=%.3f kWh (runtime=%.3f, cop=%.3f), mode=%s",
+            "Hour finalized [%s]: actual=%.1f min, baseline=%.1f min, saved=%.3f kWh (runtime=%.3f, cop=%.3f), mode=%s",
             source,
             actual_min,
             baseline_min,
@@ -549,11 +535,8 @@ class SavingsTracker:
         if tz is not None:
             today_str = datetime.now(tz).strftime("%Y-%m-%d")
         else:
-            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        today_hours = [
-            r for r in self._hourly_records
-            if r.hour.strftime("%Y-%m-%d") == today_str
-        ]
+            today_str = datetime.now(UTC).strftime("%Y-%m-%d")
+        today_hours = [r for r in self._hourly_records if r.hour.strftime("%Y-%m-%d") == today_str]
         return DailySavingsReport(date=today_str, hours=today_hours)
 
     # ── Headline: measured vs weather-normalized baseline ────────────
@@ -632,17 +615,17 @@ class SavingsTracker:
 
         recent = list(self._hourly_records)[-24:]
         rates = [r.electricity_rate for r in recent if r.electricity_rate is not None]
-        carbon = [
-            r.carbon_intensity_gco2_kwh for r in recent
-            if r.carbon_intensity_gco2_kwh is not None
-        ]
+        carbon = [r.carbon_intensity_gco2_kwh for r in recent if r.carbon_intensity_gco2_kwh is not None]
         if rates:
             self._cumulative_cost_saved += saved * (sum(rates) / len(rates))
         if carbon:
             self._cumulative_co2_saved_grams += saved * (sum(carbon) / len(carbon))
         _LOGGER.debug(
             "Lifetime ledger: %s measured %.2f kWh vs expected %.2f (saved %.2f)",
-            record.date, record.kwh, expected, saved,
+            record.date,
+            record.kwh,
+            expected,
+            saved,
         )
 
     @property
@@ -704,13 +687,9 @@ class SavingsTracker:
             "baseline_to_optimized_ratio": self._baseline_to_optimized_ratio,
             "accuracy_tier": self._accuracy_tier,
             "ledger_version": LEDGER_VERSION,
-            "ledger_reset_at": (
-                self._ledger_reset_at.isoformat() if self._ledger_reset_at else None
-            ),
+            "ledger_reset_at": (self._ledger_reset_at.isoformat() if self._ledger_reset_at else None),
             # Recent hours, so "today" survives a restart
-            "hourly_records": [
-                _record_to_dict(r) for r in list(self._hourly_records)[-PERSISTED_HOURLY_RECORDS:]
-            ],
+            "hourly_records": [_record_to_dict(r) for r in list(self._hourly_records)[-PERSISTED_HOURLY_RECORDS:]],
         }
 
     @classmethod
@@ -729,9 +708,7 @@ class SavingsTracker:
         tracker._cumulative_comfort_violations = data.get("cumulative_comfort_violations", 0)
         tracker._cumulative_aux_heat_kwh = data.get("cumulative_aux_heat_kwh", 0.0)
         tracker._cumulative_avoided_aux_kwh = data.get("cumulative_avoided_aux_kwh", 0.0)
-        tracker._baseline_to_optimized_ratio = data.get(
-            "baseline_to_optimized_ratio", 1.0
-        )
+        tracker._baseline_to_optimized_ratio = data.get("baseline_to_optimized_ratio", 1.0)
         tracker._accuracy_tier = data.get("accuracy_tier", TIER_LEARNING)
 
         reset_at = data.get("ledger_reset_at")
@@ -754,10 +731,9 @@ class SavingsTracker:
             had = tracker._cumulative_kwh_saved
             if any(abs(v) > 1e-9 for v in tracker.cumulative_totals().values()):
                 tracker._reset_cumulative()
-                tracker._ledger_reset_at = datetime.now(timezone.utc)
+                tracker._ledger_reset_at = datetime.now(UTC)
                 _LOGGER.info(
-                    "Lifetime savings ledger predates control gating "
-                    "(%.1f kWh recorded); starting a fresh ledger",
+                    "Lifetime savings ledger predates control gating (%.1f kWh recorded); starting a fresh ledger",
                     had,
                 )
         return tracker

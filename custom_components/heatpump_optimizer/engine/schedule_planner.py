@@ -117,9 +117,7 @@ class PlanCandidate:
         finer comparison lets rounding-level comfort noise buy an unbounded
         amount of energy.
         """
-        bucket = round(
-            self.excursion_degree_minutes / EXCURSION_EQUIVALENCE_DEGREE_MINUTES
-        )
+        bucket = round(self.excursion_degree_minutes / EXCURSION_EQUIVALENCE_DEGREE_MINUTES)
         return (float(bucket), round(self.energy_kwh, 4))
 
 
@@ -165,49 +163,75 @@ class SchedulePlanner:
         if not hour_keys:
             empty = PlanCandidate(label="flat", entries=[])
             return PlanResult(
-                chosen=empty, flat=empty, gate_open=False,
+                chosen=empty,
+                flat=empty,
+                gate_open=False,
                 gate_reason="no forecast hours",
             )
 
         flat_entries = self.build_flat_schedule(
-            hour_keys, forecast, comfort_range, mode, per_hour_comfort,
+            hour_keys,
+            forecast,
+            comfort_range,
+            mode,
+            per_hour_comfort,
             per_hour_target,
         )
         flat = self._evaluate(
-            "flat", flat_entries, indoor_temp, forecast,
-            comfort_range, per_hour_comfort,
+            "flat",
+            flat_entries,
+            indoor_temp,
+            forecast,
+            comfort_range,
+            per_hour_comfort,
         )
 
         gate_open, event_hour, gate_reason = self._gate(
-            mode, forecast, flat, hour_keys, comfort_range,
+            mode,
+            forecast,
+            flat,
+            hour_keys,
+            comfort_range,
         )
 
         if not gate_open or event_hour is None:
             _LOGGER.debug(
-                "Planner [%s]: flat schedule, gate closed (%s)", mode, gate_reason,
+                "Planner [%s]: flat schedule, gate closed (%s)",
+                mode,
+                gate_reason,
             )
             return PlanResult(
-                chosen=flat, flat=flat, gate_open=False, gate_reason=gate_reason,
+                chosen=flat,
+                flat=flat,
+                gate_open=False,
+                gate_reason=gate_reason,
             )
 
         candidates = [flat]
         for lead in CANDIDATE_LEAD_HOURS:
             for depth in CANDIDATE_DEPTHS_F:
                 entries = self._window_schedule(
-                    hour_keys, forecast, comfort_range, mode,
-                    per_hour_comfort, event_hour, lead, depth,
+                    hour_keys,
+                    forecast,
+                    comfort_range,
+                    mode,
+                    per_hour_comfort,
+                    event_hour,
+                    lead,
+                    depth,
                     per_hour_target,
                 )
                 if entries is None:
                     continue
-                label = (
-                    f"{'pre-cool' if mode == 'cool' else 'pre-heat'} "
-                    f"{lead}h @ {depth:.1f}F"
-                )
+                label = f"{'pre-cool' if mode == 'cool' else 'pre-heat'} {lead}h @ {depth:.1f}F"
                 candidates.append(
                     self._evaluate(
-                        label, entries, indoor_temp, forecast,
-                        comfort_range, per_hour_comfort,
+                        label,
+                        entries,
+                        indoor_temp,
+                        forecast,
+                        comfort_range,
+                        per_hour_comfort,
                     )
                 )
 
@@ -215,12 +239,20 @@ class SchedulePlanner:
         _LOGGER.info(
             "Planner [%s]: gate open (%s), %d candidates, chose '%s' "
             "(%.2f kWh, %.0f degree-min excursion) vs flat (%.2f kWh, %.0f)",
-            mode, gate_reason, len(candidates), best.label,
-            best.energy_kwh, best.excursion_degree_minutes,
-            flat.energy_kwh, flat.excursion_degree_minutes,
+            mode,
+            gate_reason,
+            len(candidates),
+            best.label,
+            best.energy_kwh,
+            best.excursion_degree_minutes,
+            flat.energy_kwh,
+            flat.excursion_degree_minutes,
         )
         return PlanResult(
-            chosen=best, flat=flat, gate_open=True, gate_reason=gate_reason,
+            chosen=best,
+            flat=flat,
+            gate_open=True,
+            gate_reason=gate_reason,
             candidates_evaluated=len(candidates),
         )
 
@@ -244,9 +276,7 @@ class SchedulePlanner:
             action = "coasting" if self._is_passive_hour(mode, outdoor) else "maintaining"
             if mode == "heat" and target > h_min + 1e-6:
                 action = "recovering"
-            entries.append(
-                self._entry(hour, target, mode, outdoor, action)
-            )
+            entries.append(self._entry(hour, target, mode, outdoor, action))
         return entries
 
     def build_dual_setpoint_schedule(
@@ -281,9 +311,7 @@ class SchedulePlanner:
         for hour in hour_keys:
             outdoor = self._hour_outdoor_temp(hour, forecast)
             heat_floor, cool_ceiling = (
-                per_hour_bounds.get(hour, (flat_floor, flat_ceiling))
-                if per_hour_bounds
-                else (flat_floor, flat_ceiling)
+                per_hour_bounds.get(hour, (flat_floor, flat_ceiling)) if per_hour_bounds else (flat_floor, flat_ceiling)
             )
             primary = heat_floor if mode == "heat" else cool_ceiling
             entries.append(
@@ -293,8 +321,7 @@ class SchedulePlanner:
                     target_temp=round(primary * 2) / 2,
                     mode=mode,
                     reason=(
-                        f"{outdoor:.0f}°F outdoor: maintaining "
-                        f"(heat {heat_floor:.1f}°F / cool {cool_ceiling:.1f}°F)"
+                        f"{outdoor:.0f}°F outdoor: maintaining (heat {heat_floor:.1f}°F / cool {cool_ceiling:.1f}°F)"
                     ),
                     target_temp_low=round(heat_floor * 2) / 2,
                     target_temp_high=round(cool_ceiling * 2) / 2,
@@ -312,9 +339,7 @@ class SchedulePlanner:
         per_hour_comfort: dict[datetime, tuple[float, float]] | None = None,
     ) -> PlanCandidate:
         """Simulate an externally-built schedule and price it in kWh."""
-        return self._evaluate(
-            label, entries, indoor_temp, forecast, comfort_range, per_hour_comfort
-        )
+        return self._evaluate(label, entries, indoor_temp, forecast, comfort_range, per_hour_comfort)
 
     def _window_schedule(
         self,
@@ -362,9 +387,7 @@ class SchedulePlanner:
                     action = "maintaining"
             else:
                 target = flat_target
-                action = (
-                    "coasting" if self._is_passive_hour(mode, outdoor) else "maintaining"
-                )
+                action = "coasting" if self._is_passive_hour(mode, outdoor) else "maintaining"
 
             entries.append(self._entry(hour, target, mode, outdoor, action))
 
@@ -462,7 +485,8 @@ class SchedulePlanner:
         # below the floor in cool mode is not something more cooling can fix.
         if flat.excursion_over_degree_minutes <= SATURATION_EXCURSION_DEGREE_MINUTES:
             return (
-                False, None,
+                False,
+                None,
                 "flat plan holds the comfort ceiling; pre-cooling would only add load",
             )
 
@@ -470,7 +494,8 @@ class SchedulePlanner:
         if event_hour is None:
             return (False, None, "saturation predicted but no hour identified")
         return (
-            True, event_hour,
+            True,
+            event_hour,
             f"unit saturates from {event_hour.strftime('%H:%M')} "
             f"({flat.excursion_over_degree_minutes:.0f} degree-min over ceiling)",
         )
@@ -502,7 +527,8 @@ class SchedulePlanner:
             aux_hour = self._first_hour_at_or_below(forecast, hour_keys, aux_threshold)
             if aux_hour is not None:
                 return (
-                    True, aux_hour,
+                    True,
+                    aux_hour,
                     f"aux strip heat expected from {aux_hour.strftime('%H:%M')} "
                     f"(outdoor at or below {aux_threshold:.0f}F)",
                 )
@@ -520,12 +546,14 @@ class SchedulePlanner:
             event_hour = self._first_excursion_hour(stalled, hour_keys)
             if event_hour is not None:
                 return (
-                    True, event_hour,
+                    True,
+                    event_hour,
                     f"unit saturates from {event_hour.strftime('%H:%M')}",
                 )
 
         return (
-            False, None,
+            False,
+            None,
             "no aux hours forecast; pre-heating a moderate cold day costs energy",
         )
 
@@ -546,11 +574,7 @@ class SchedulePlanner:
         stalled: list[datetime] = []
         previous = None
         for point in simulation:
-            if (
-                previous is not None
-                and point.time in under
-                and point.indoor_temp <= previous.indoor_temp + 1e-6
-            ):
+            if previous is not None and point.time in under and point.indoor_temp <= previous.indoor_temp + 1e-6:
                 stalled.append(point.time)
             previous = point
         if len(simulation) > 1:
@@ -632,16 +656,17 @@ class SchedulePlanner:
         one, so an AWAY hour is not judged against a HOME band.
         """
         empty = {
-            "violations": 0, "over": 0.0, "under": 0.0,
-            "over_points": [], "under_points": [],
+            "violations": 0,
+            "over": 0.0,
+            "under": 0.0,
+            "over_points": [],
+            "under_points": [],
         }
         if len(simulation) < 2:
             return empty
 
         tolerance = self.simulator.violation_tolerance()
-        dt_minutes = (
-            simulation[1].time - simulation[0].time
-        ).total_seconds() / 60.0
+        dt_minutes = (simulation[1].time - simulation[0].time).total_seconds() / 60.0
         if dt_minutes <= 0:
             return empty
 
@@ -697,11 +722,7 @@ class SchedulePlanner:
 
     @staticmethod
     def _hour_outdoor_temp(hour: datetime, forecast: list[ForecastPoint]) -> float:
-        temps = [
-            pt.outdoor_temp
-            for pt in forecast
-            if pt.time.replace(minute=0, second=0, microsecond=0) == hour
-        ]
+        temps = [pt.outdoor_temp for pt in forecast if pt.time.replace(minute=0, second=0, microsecond=0) == hour]
         if temps:
             return sum(temps) / len(temps)
         if forecast:

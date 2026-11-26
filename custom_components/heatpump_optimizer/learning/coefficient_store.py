@@ -51,14 +51,10 @@ class CoefficientStore:
     """
 
     # Multiplier for each calibratable coefficient (default 1.0 = no change)
-    _multipliers: dict[str, float] = field(default_factory=lambda: {
-        name: 1.0 for name in ALL_COEFFICIENTS
-    })
+    _multipliers: dict[str, float] = field(default_factory=lambda: {name: 1.0 for name in ALL_COEFFICIENTS})
 
     # Per-coefficient confidence from the last calibration (0.0–1.0)
-    _confidence: dict[str, float] = field(default_factory=lambda: {
-        name: 0.0 for name in ALL_COEFFICIENTS
-    })
+    _confidence: dict[str, float] = field(default_factory=lambda: {name: 0.0 for name in ALL_COEFFICIENTS})
 
     # Metadata
     last_calibration: datetime | None = None
@@ -78,7 +74,9 @@ class CoefficientStore:
         if clamped != value:
             _LOGGER.debug(
                 "Coefficient %s multiplier clamped: %.4f → %.4f",
-                name, value, clamped,
+                name,
+                value,
+                clamped,
             )
         self._multipliers[name] = clamped
 
@@ -105,9 +103,7 @@ class CoefficientStore:
         return {
             "multipliers": dict(self._multipliers),
             "confidence": dict(self._confidence),
-            "last_calibration": (
-                self.last_calibration.isoformat() if self.last_calibration else None
-            ),
+            "last_calibration": (self.last_calibration.isoformat() if self.last_calibration else None),
             "calibration_count": self.calibration_count,
         }
 

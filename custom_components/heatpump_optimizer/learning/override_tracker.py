@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class OverrideTracker:
     ) -> None:
         """Record a new override event."""
         if timestamp is None:
-            timestamp = datetime.now(timezone.utc)
+            timestamp = datetime.now(UTC)
 
         diff = actual_setpoint - expected_setpoint
         direction = "warmer" if diff > 0 else "cooler"
@@ -81,7 +81,10 @@ class OverrideTracker:
 
         _LOGGER.debug(
             "Override recorded: %s at hour %d (%+.1f°F %s)",
-            timestamp.strftime("%a"), record.hour_of_day, diff, direction,
+            timestamp.strftime("%a"),
+            record.hour_of_day,
+            diff,
+            direction,
         )
 
     def detect_patterns(self, window_days: int = PATTERN_WINDOW_DAYS) -> list[OverridePattern]:
@@ -89,7 +92,7 @@ class OverrideTracker:
 
         Returns patterns sorted by frequency (most common first).
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+        cutoff = datetime.now(UTC) - timedelta(days=window_days)
         recent = [r for r in self._records if r.timestamp > cutoff]
 
         if not recent:
@@ -110,9 +113,7 @@ class OverrideTracker:
             cooler = len(records) - warmer
             direction = "warmer" if warmer > cooler else "cooler"
 
-            avg_change = sum(
-                r.actual_setpoint - r.expected_setpoint for r in records
-            ) / len(records)
+            avg_change = sum(r.actual_setpoint - r.expected_setpoint for r in records) / len(records)
 
             # Generate suggestion
             if direction == "warmer":
@@ -148,18 +149,13 @@ class OverrideTracker:
         The adjustment is half the average override magnitude (conservative),
         capped at ±PREEMPTIVE_MAX_ADJUSTMENT_F.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=PATTERN_WINDOW_DAYS)
-        recent = [
-            r for r in self._records
-            if r.timestamp > cutoff and r.hour_of_day == hour
-        ]
+        cutoff = datetime.now(UTC) - timedelta(days=PATTERN_WINDOW_DAYS)
+        recent = [r for r in self._records if r.timestamp > cutoff and r.hour_of_day == hour]
 
         if len(recent) < PREEMPTIVE_MIN_OCCURRENCES:
             return 0.0
 
-        avg_change = sum(
-            r.actual_setpoint - r.expected_setpoint for r in recent
-        ) / len(recent)
+        avg_change = sum(r.actual_setpoint - r.expected_setpoint for r in recent) / len(recent)
 
         # Conservative: apply half the average, capped
         adjustment = avg_change * 0.5
@@ -167,7 +163,7 @@ class OverrideTracker:
 
     def get_stats(self) -> dict:
         """Summary statistics for sensor attributes."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         last_30 = [r for r in self._records if r.timestamp > now - timedelta(days=30)]
         last_7 = [r for r in self._records if r.timestamp > now - timedelta(days=7)]
 

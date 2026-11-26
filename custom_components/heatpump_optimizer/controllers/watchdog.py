@@ -8,10 +8,10 @@ state_changed callbacks (not periodic polling).
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Callable
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class WatchdogController:
         if diff <= tolerance:
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Already in override pause?
         if self._state == WatchdogState.OVERRIDE_PAUSED:
@@ -97,7 +97,9 @@ class WatchdogController:
         # New override
         _LOGGER.info(
             "Manual override detected: expected %.1f°F, got %.1f°F (diff %.1f°F)",
-            last_written_setpoint, current_setpoint, diff,
+            last_written_setpoint,
+            current_setpoint,
+            diff,
         )
         self._state = WatchdogState.OVERRIDE_PAUSED
         self._override_detected_at = now
@@ -130,7 +132,7 @@ class WatchdogController:
         if self._override_detected_at is None:
             return False
 
-        elapsed = (datetime.now(timezone.utc) - self._override_detected_at).total_seconds()
+        elapsed = (datetime.now(UTC) - self._override_detected_at).total_seconds()
         if elapsed >= self.grace_period_hours * 3600:
             _LOGGER.info(
                 "Override grace period expired after %.1f hours — resuming",
@@ -166,14 +168,15 @@ class WatchdogController:
             self._mode_change_at = None
             return False
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         if self._mode_change_at is None:
             # First detection of change — start hysteresis timer
             self._mode_change_at = now
             _LOGGER.debug(
                 "Mode change detected: %s → %s (waiting for hysteresis)",
-                self._last_mode, current_mode,
+                self._last_mode,
+                current_mode,
             )
             return False
 
@@ -182,7 +185,9 @@ class WatchdogController:
         if elapsed_min >= self.mode_change_hysteresis_minutes:
             _LOGGER.info(
                 "Confirmed mode change: %s → %s (held for %.0f min)",
-                self._last_mode, current_mode, elapsed_min,
+                self._last_mode,
+                current_mode,
+                elapsed_min,
             )
             self._last_mode = current_mode
             self._mode_change_at = None
@@ -205,7 +210,7 @@ class WatchdogController:
         """Time remaining in the override grace period."""
         if not self._override_detected_at:
             return None
-        elapsed = datetime.now(timezone.utc) - self._override_detected_at
+        elapsed = datetime.now(UTC) - self._override_detected_at
         remaining = timedelta(hours=self.grace_period_hours) - elapsed
         return max(remaining, timedelta(0))
 
@@ -219,7 +224,7 @@ class WatchdogController:
         Returns: {hour_of_day: count} — useful for detecting patterns
         like "someone always overrides at 7pm".
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         recent = [e for e in self._override_events if e.timestamp > cutoff]
         frequency: dict[int, int] = {}
         for event in recent:

@@ -11,23 +11,23 @@ itself.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from .adapters.occupancy import OccupancyMode
 from .const import DEFAULT_HISTORY_BOOTSTRAP_DAYS
 from .engine.counterfactual_simulator import CounterfactualSimulator
+from .learning.ab_trial import ABTrial
 from .learning.aux_heat_learner import AuxHeatLearner
 from .learning.baseline_capture import BaselineCapture
 from .learning.coefficient_calibrator import CoefficientCalibrator
 from .learning.coefficient_store import CoefficientStore
+from .learning.energy_baseline import EnergyBaseline
 from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
 from .savings_tracker import SavingsTracker
-from .learning.energy_baseline import EnergyBaseline
-from .learning.ab_trial import ABTrial
 
 if TYPE_CHECKING:
     pass
@@ -58,9 +58,7 @@ class PersistenceMixin:
         data = {
             "_schema_version": self._STATE_SCHEMA_VERSION,
             "last_optimization_time": (
-                self.strategic.last_optimization_time.isoformat()
-                if self.strategic.last_optimization_time
-                else None
+                self.strategic.last_optimization_time.isoformat() if self.strategic.last_optimization_time else None
             ),
             "phase": self._phase,
             "active": self._active,
@@ -68,10 +66,7 @@ class PersistenceMixin:
             # restart. It was saved under neither name and so never did.
             "paused": bool(
                 self._paused
-                and not any(
-                    c.get("type") == "pause_until"
-                    for c in getattr(self, "_active_constraints", [])
-                )
+                and not any(c.get("type") == "pause_until" for c in getattr(self, "_active_constraints", []))
             ),
             "morning_recovery_starts": self.strategic.recovery_state(),
             # Rolling diagnostics that used to restart from empty on every
@@ -79,13 +74,12 @@ class PersistenceMixin:
             # behind the accuracy sensors.
             "temp_history": list(getattr(self, "_temp_history", []))[-288:],
             "tactical_error_history": [
-                [t.isoformat(), e]
-                for t, e in getattr(self.tactical, "error_history", [])[-288:]
-            ] if getattr(self, "tactical", None) is not None else [],
+                [t.isoformat(), e] for t, e in getattr(self.tactical, "error_history", [])[-288:]
+            ]
+            if getattr(self, "tactical", None) is not None
+            else [],
             "forced_occupancy_mode": (
-                self.occupancy._forced_mode.value
-                if self.occupancy._forced_mode is not None
-                else None
+                self.occupancy._forced_mode.value if self.occupancy._forced_mode is not None else None
             ),
             "model_tracker": self.model_tracker.to_dict(),
             "solar_adjuster": self.solar_adjuster.to_dict(),
@@ -119,58 +113,49 @@ class PersistenceMixin:
                 "Stored state has schema version %d but we only support up to %d "
                 "— ignoring persisted state to avoid corruption. "
                 "The model will re-learn from scratch.",
-                schema, self._STATE_SCHEMA_VERSION,
+                schema,
+                self._STATE_SCHEMA_VERSION,
             )
             return
         if schema < self._STATE_SCHEMA_VERSION:
             _LOGGER.info(
                 "Migrating stored state from schema version %d to %d",
-                schema, self._STATE_SCHEMA_VERSION,
+                schema,
+                self._STATE_SCHEMA_VERSION,
             )
             # Add migration logic here when _STATE_SCHEMA_VERSION is bumped
         if stored.get("forced_occupancy_mode") is not None:
             try:
-                self.occupancy.force_mode(
-                    OccupancyMode(stored["forced_occupancy_mode"])
-                )
-                _LOGGER.debug("Restored forced occupancy mode: %s",
-                              stored["forced_occupancy_mode"])
+                self.occupancy.force_mode(OccupancyMode(stored["forced_occupancy_mode"]))
+                _LOGGER.debug("Restored forced occupancy mode: %s", stored["forced_occupancy_mode"])
             except (ValueError, KeyError, TypeError):
-                _LOGGER.warning("Invalid stored occupancy mode: %s",
-                                stored["forced_occupancy_mode"])
+                _LOGGER.warning("Invalid stored occupancy mode: %s", stored["forced_occupancy_mode"])
 
         if "model_tracker" in stored:
             try:
                 self.model_tracker = ModelTracker.from_dict(stored["model_tracker"])
                 _LOGGER.debug("Restored model tracker state")
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore model tracker — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore model tracker — using fresh state", exc_info=True)
         if "solar_adjuster" in stored:
             try:
                 self.solar_adjuster = SolarAdjuster.from_dict(stored["solar_adjuster"])
-                _LOGGER.debug("Restored solar adjuster (coefficient=%.3f)",
-                              self.solar_adjuster.solar_coefficient)
+                _LOGGER.debug("Restored solar adjuster (coefficient=%.3f)", self.solar_adjuster.solar_coefficient)
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore solar adjuster — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore solar adjuster — using fresh state", exc_info=True)
         if "override_tracker" in stored:
             try:
                 self.override_tracker = OverrideTracker.from_dict(stored["override_tracker"])
-                _LOGGER.debug("Restored %d override records",
-                              self.override_tracker.record_count)
+                _LOGGER.debug("Restored %d override records", self.override_tracker.record_count)
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore override tracker — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore override tracker — using fresh state", exc_info=True)
         if "savings_tracker" in stored:
             try:
                 self.savings_tracker = SavingsTracker.from_dict(stored["savings_tracker"])
                 totals = self.savings_tracker.cumulative_totals()
-                _LOGGER.debug("Restored savings tracker (%.1f kWh saved cumulative)",
-                              totals["kwh_saved"])
+                _LOGGER.debug("Restored savings tracker (%.1f kWh saved cumulative)", totals["kwh_saved"])
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore savings tracker — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore savings tracker — using fresh state", exc_info=True)
         if "energy_baseline" in stored:
             try:
                 self.energy_baseline = EnergyBaseline.from_dict(stored["energy_baseline"])
@@ -180,15 +165,13 @@ class PersistenceMixin:
                     self.energy_baseline.fit().source,
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore energy baseline — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore energy baseline — using fresh state", exc_info=True)
         if "ab_trial" in stored:
             try:
                 self.ab_trial = ABTrial.from_dict(stored["ab_trial"])
                 _LOGGER.debug("Restored A/B trial (active=%s)", self.ab_trial.is_active)
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore A/B trial — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore A/B trial — using fresh state", exc_info=True)
         self._ab_trial_paused = bool(stored.get("ab_trial_paused", False))
         self._paused = bool(stored.get("paused", False)) or self._ab_trial_paused
         try:
@@ -215,17 +198,16 @@ class PersistenceMixin:
                     self.coeff_store.calibration_count,
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore coefficient store — using defaults",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore coefficient store — using defaults", exc_info=True)
         if "coefficient_calibrator" in stored:
             try:
                 self.coeff_calibrator = CoefficientCalibrator.from_dict(
-                    stored["coefficient_calibrator"], self.coeff_store,
+                    stored["coefficient_calibrator"],
+                    self.coeff_store,
                 )
                 _LOGGER.debug("Restored coefficient calibrator")
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore coefficient calibrator — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore coefficient calibrator — using fresh state", exc_info=True)
         if "baseline_capture" in stored:
             try:
                 self.baseline_capture = BaselineCapture.from_dict(stored["baseline_capture"])
@@ -235,8 +217,7 @@ class PersistenceMixin:
                     self.baseline_capture.confidence * 100,
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore baseline capture — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore baseline capture — using fresh state", exc_info=True)
         if "counterfactual" in stored:
             try:
                 self.counterfactual = CounterfactualSimulator.from_dict(stored["counterfactual"])
@@ -249,8 +230,7 @@ class PersistenceMixin:
                     self.counterfactual.virtual_indoor_temp,
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore counterfactual simulator — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore counterfactual simulator — using fresh state", exc_info=True)
         if "performance_profiler" in stored:
             try:
                 self.profiler = PerformanceProfiler.from_dict(stored["performance_profiler"])
@@ -260,8 +240,7 @@ class PersistenceMixin:
                     self.profiler.confidence() * 100,
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore performance profiler — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore performance profiler — using fresh state", exc_info=True)
         if "aux_heat_learner" in stored:
             try:
                 self.aux_heat_learner = AuxHeatLearner.from_dict(
@@ -275,8 +254,7 @@ class PersistenceMixin:
                     self.aux_heat_learner.learned_hp_watts,
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
-                _LOGGER.warning("Failed to restore aux heat learner — using fresh state",
-                                exc_info=True)
+                _LOGGER.warning("Failed to restore aux heat learner — using fresh state", exc_info=True)
 
     def _reapply_counterfactual_config(self) -> None:
         """Push configured capacity and deadband onto the digital twin."""
@@ -295,7 +273,7 @@ class PersistenceMixin:
         tactical = getattr(self, "tactical", None)
         if tactical is None or not raw:
             return
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        cutoff = datetime.now(UTC) - timedelta(hours=24)
         restored = []
         for item in raw:
             try:
@@ -323,12 +301,11 @@ class PersistenceMixin:
 
     def _schedule_bootstrap_retry(self) -> None:
         """Schedule a delayed bootstrap retry if retries remain."""
-        from .const import MAX_BOOTSTRAP_RETRIES, BOOTSTRAP_RETRY_DELAY_SECONDS
+        from .const import BOOTSTRAP_RETRY_DELAY_SECONDS, MAX_BOOTSTRAP_RETRIES
 
         if self._bootstrap_retry_count >= MAX_BOOTSTRAP_RETRIES:
             _LOGGER.warning(
-                "History bootstrap: exhausted %d retries, giving up. "
-                "Baseline will complete via live observation.",
+                "History bootstrap: exhausted %d retries, giving up. Baseline will complete via live observation.",
                 MAX_BOOTSTRAP_RETRIES,
             )
             self._history_bootstrap_completed = True
@@ -340,12 +317,11 @@ class PersistenceMixin:
 
         from homeassistant.helpers.event import async_call_later
 
-        self._bootstrap_retry_unsub = async_call_later(
-            self.hass, BOOTSTRAP_RETRY_DELAY_SECONDS, _retry_callback
-        )
+        self._bootstrap_retry_unsub = async_call_later(self.hass, BOOTSTRAP_RETRY_DELAY_SECONDS, _retry_callback)
         _LOGGER.info(
             "History bootstrap: baseline not ready, retry %d/%d scheduled in 24h",
-            self._bootstrap_retry_count + 1, MAX_BOOTSTRAP_RETRIES,
+            self._bootstrap_retry_count + 1,
+            MAX_BOOTSTRAP_RETRIES,
         )
 
     async def _try_history_bootstrap(self) -> None:
@@ -379,8 +355,7 @@ class PersistenceMixin:
             self.profiler._previous_timestamp = None
 
             _LOGGER.info(
-                "History bootstrap complete: profiler confidence %.0f%%, "
-                "baseline %s (%d obs), profiler %d obs",
+                "History bootstrap complete: profiler confidence %.0f%%, baseline %s (%d obs), profiler %d obs",
                 result.final_confidence * 100,
                 "ready" if self.baseline_capture.is_ready else "not ready",
                 result.baseline_observations,

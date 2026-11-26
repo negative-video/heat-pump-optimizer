@@ -10,7 +10,7 @@ Supports two mechanisms:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from homeassistant.core import HomeAssistant
 
@@ -51,9 +51,7 @@ class ProfileAdapter:
             "sleep": "sleep",
         }
         # Reverse map for reading current state back to canonical name
-        self._reverse_map = {
-            v.lower(): k for k, v in self._profile_map.items()
-        }
+        self._reverse_map = {v.lower(): k for k, v in self._profile_map.items()}
         self._last_set_profile: str | None = None
         self._last_set_time: datetime | None = None
 
@@ -107,9 +105,7 @@ class ProfileAdapter:
         """
         mapped = self._profile_map.get(profile)
         if mapped is None:
-            _LOGGER.warning(
-                "Unknown profile '%s' -- no mapping configured", profile
-            )
+            _LOGGER.warning("Unknown profile '%s' -- no mapping configured", profile)
             return False
 
         if not self.available:
@@ -143,7 +139,7 @@ class ProfileAdapter:
                 )
 
             self._last_set_profile = profile
-            self._last_set_time = datetime.now(timezone.utc)
+            self._last_set_time = datetime.now(UTC)
             _LOGGER.info(
                 "Set thermostat profile to '%s' (mapped: '%s') via %s",
                 profile,

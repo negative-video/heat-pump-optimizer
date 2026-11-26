@@ -3,23 +3,18 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
-    SensorEntity,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from datetime import datetime, timezone
 
-from homeassistant.util import dt as dt_util
-
-from .const import DEFAULT_MODEL_CONFIDENCE_THRESHOLD, DOMAIN, VERSION
+from .const import DOMAIN
 from .coordinator import HeatPumpOptimizerCoordinator
 from .sensor_base import (
     OptimizerBaseSensor,
@@ -156,9 +151,7 @@ def _remove_obsolete_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
         registry = er.async_get(hass)
         for key in OBSOLETE_SENSOR_KEYS:
-            entity_id = registry.async_get_entity_id(
-                "sensor", DOMAIN, f"{entry.entry_id}_{key}"
-            )
+            entity_id = registry.async_get_entity_id("sensor", DOMAIN, f"{entry.entry_id}_{key}")
             if entity_id:
                 registry.async_remove(entity_id)
     except Exception:  # noqa: BLE001 - cleanup must never block setup
@@ -309,9 +302,7 @@ class SavingsPercentSensor(_LearningNullMixin, OptimizerBaseSensor):
     """
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "estimated_savings", "Projected Schedule Savings"
-        )
+        super().__init__(coordinator, entry, "estimated_savings", "Projected Schedule Savings")
         self._attr_native_unit_of_measurement = "%"
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
@@ -321,9 +312,7 @@ class SavingsPercentSensor(_LearningNullMixin, OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("savings_pct")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("savings_pct"))
 
 
 # ── Measured thermal characterisation sensors ───────────────────────
@@ -389,9 +378,7 @@ class ThermalTimeConstantSensor(OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "thermal_time_constant", "Thermal Time Constant"
-        )
+        super().__init__(coordinator, entry, "thermal_time_constant", "Thermal Time Constant")
         self._attr_native_unit_of_measurement = "h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
@@ -443,8 +430,10 @@ class EffectiveCoolingCapacitySensor(OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(
-            coordinator, entry,
-            "effective_cooling_rate", "Effective Cooling Rate",
+            coordinator,
+            entry,
+            "effective_cooling_rate",
+            "Effective Cooling Rate",
         )
         self._attr_native_unit_of_measurement = "°F/h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -465,8 +454,10 @@ class EffectiveHeatingCapacitySensor(OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(
-            coordinator, entry,
-            "effective_heating_rate", "Effective Heating Rate",
+            coordinator,
+            entry,
+            "effective_heating_rate",
+            "Effective Heating Rate",
         )
         self._attr_native_unit_of_measurement = "°F/h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -658,9 +649,7 @@ class MeasuredSavingsTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     """
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "measured_savings_today", "Measured Savings Today"
-        )
+        super().__init__(coordinator, entry, "measured_savings_today", "Measured Savings Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.TOTAL
@@ -695,9 +684,7 @@ class MeasuredSavings30dSensor(OptimizerBaseSensor):
     """Metered vs weather-normalized baseline over recent whole days (kWh)."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "measured_savings_30d", "Measured Savings 30 Days"
-        )
+        super().__init__(coordinator, entry, "measured_savings_30d", "Measured Savings 30 Days")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.TOTAL
@@ -734,9 +721,7 @@ class EnergyBaselineStatusSensor(OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "energy_baseline_status", "Energy Baseline Status"
-        )
+        super().__init__(coordinator, entry, "energy_baseline_status", "Energy Baseline Status")
         self._attr_icon = "mdi:chart-scatter-plot"
 
     @property
@@ -791,12 +776,8 @@ class ABTrialSensor(OptimizerBaseSensor):
         return {
             "verdict": trial.get("verdict"),
             "conclusive": trial.get("conclusive"),
-            "optimizer_on_kwh_per_degree_day": trial.get(
-                "optimizer_on_kwh_per_degree_day"
-            ),
-            "optimizer_off_kwh_per_degree_day": trial.get(
-                "optimizer_off_kwh_per_degree_day"
-            ),
+            "optimizer_on_kwh_per_degree_day": trial.get("optimizer_on_kwh_per_degree_day"),
+            "optimizer_off_kwh_per_degree_day": trial.get("optimizer_off_kwh_per_degree_day"),
             "difference_pct": trial.get("difference_pct"),
             "optimizer_on_days": trial.get("optimizer_on_days"),
             "optimizer_off_days": trial.get("optimizer_off_days"),
@@ -825,9 +806,7 @@ class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("savings_kwh_today")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("savings_kwh_today"))
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -841,9 +820,7 @@ class SavingsKwhTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
             "is_projected": self._is_projected,
             "confidence": attribution.get("confidence", "modeled, not measured"),
             "uncertainty": attribution.get("uncertainty"),
-            "measured_alternative": (
-                "sensor.heat_pump_optimizer_measured_savings_30_days"
-            ),
+            "measured_alternative": ("sensor.heat_pump_optimizer_measured_savings_30_days"),
         }
 
 
@@ -874,9 +851,7 @@ class SavingsKwhCumulativeSensor(_LearningNullMixin, OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("savings_kwh_cumulative")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("savings_kwh_cumulative"))
 
 
 class SavingsCostTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
@@ -894,9 +869,7 @@ class SavingsCostTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBase
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("savings_cost_today")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("savings_cost_today"))
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -933,9 +906,7 @@ class SavingsCostCumulativeSensor(_LearningNullMixin, OptimizerBaseSensor):
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("savings_cost_cumulative")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("savings_cost_cumulative"))
 
 
 class SavingsCO2TodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
@@ -952,9 +923,7 @@ class SavingsCO2TodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("savings_co2_today_grams")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("savings_co2_today_grams"))
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -1125,9 +1094,7 @@ class PreconditioningStatusSensor(OptimizerBaseSensor):
     """Pre-conditioning plan status and details."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "preconditioning_status", "Pre-conditioning Status"
-        )
+        super().__init__(coordinator, entry, "preconditioning_status", "Pre-conditioning Status")
         self._attr_icon = "mdi:home-clock"
 
     @property
@@ -1142,9 +1109,7 @@ class PreconditioningStatusSensor(OptimizerBaseSensor):
             return {}
         plan = self.coordinator.data.get("precondition_plan")
         if plan is None:
-            return {"configured": self.coordinator.data.get(
-                "occupancy_forecast_source", "reactive"
-            ) == "calendar"}
+            return {"configured": self.coordinator.data.get("occupancy_forecast_source", "reactive") == "calendar"}
         return {
             "scheduled_start": plan.get("scheduled_start"),
             "arrival_time": plan.get("arrival_time"),
@@ -1164,9 +1129,7 @@ class ApparentTemperatureSensor(OptimizerBaseSensor):
     """
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "apparent_temperature", "Apparent Temperature"
-        )
+        super().__init__(coordinator, entry, "apparent_temperature", "Apparent Temperature")
         self._attr_device_class = SensorDeviceClass.TEMPERATURE
         self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1193,9 +1156,7 @@ class OccupiedRoomsSensor(OptimizerBaseSensor):
     """Count of currently occupied rooms when room-aware sensing is active."""
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "occupied_rooms", "Occupied Rooms"
-        )
+        super().__init__(coordinator, entry, "occupied_rooms", "Occupied Rooms")
         self._attr_icon = "mdi:home-account"
 
     @property
@@ -1236,9 +1197,7 @@ class WeightedIndoorTempSensor(OptimizerBaseSensor):
     """
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "weighted_indoor_temp", "Weighted Indoor Temperature"
-        )
+        super().__init__(coordinator, entry, "weighted_indoor_temp", "Weighted Indoor Temperature")
         self._attr_device_class = SensorDeviceClass.TEMPERATURE
         self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1298,9 +1257,7 @@ class RuntimeSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerB
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("runtime_savings_kwh_today")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("runtime_savings_kwh_today"))
 
 
 class CopSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
@@ -1326,9 +1283,7 @@ class CopSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseS
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("cop_savings_kwh_today")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("cop_savings_kwh_today"))
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -1360,9 +1315,7 @@ class RateSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBase
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("rate_arbitrage_savings_today")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("rate_arbitrage_savings_today"))
 
 
 class CarbonShiftSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, OptimizerBaseSensor):
@@ -1381,9 +1334,7 @@ class CarbonShiftSavingsTodaySensor(_LearningNullMixin, _DailyResetMixin, Optimi
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("carbon_shift_savings_today")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("carbon_shift_savings_today"))
 
 
 class BaselineAvgCopSensor(OptimizerBaseSensor):
@@ -1453,9 +1404,7 @@ class ComfortHoursGainedSensor(_LearningNullMixin, _DailyResetMixin, OptimizerBa
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
-        return self._suppress_during_learning(
-            self.coordinator.data.get("comfort_hours_gained")
-        )
+        return self._suppress_during_learning(self.coordinator.data.get("comfort_hours_gained"))
 
 
 class BaselineComfortViolationsSensor(_DailyResetMixin, OptimizerBaseSensor):
@@ -1582,9 +1531,7 @@ class ProfilerStatusSensor(OptimizerBaseSensor):
         if chart_data:
             attrs["chart_data"] = chart_data
         # Override intelligence for panel diagnostics
-        attrs["override_count_30d"] = self.coordinator.data.get(
-            "override_count_30d", 0
-        )
+        attrs["override_count_30d"] = self.coordinator.data.get("override_count_30d", 0)
         override_pattern = self.coordinator.data.get("override_pattern")
         if override_pattern:
             attrs["override_pattern"] = override_pattern
@@ -1647,15 +1594,9 @@ class LearningProgressSensor(OptimizerBaseSensor):
             "accuracy_tier": self.coordinator.data.get("savings_accuracy_tier"),
             "activation_tier": self.coordinator.data.get("activation_tier"),
             "initialization_mode": self.coordinator.data.get("initialization_mode"),
-            "history_bootstrap_completed": self.coordinator.data.get(
-                "history_bootstrap_completed"
-            ),
-            "history_bootstrap_result": self.coordinator.data.get(
-                "history_bootstrap_result"
-            ),
-            "bootstrap_retry_count": self.coordinator.data.get(
-                "bootstrap_retry_count"
-            ),
+            "history_bootstrap_completed": self.coordinator.data.get("history_bootstrap_completed"),
+            "history_bootstrap_result": self.coordinator.data.get("history_bootstrap_result"),
+            "bootstrap_retry_count": self.coordinator.data.get("bootstrap_retry_count"),
         }
         if baseline_only:
             attrs["comfort_band_note"] = (
@@ -1678,9 +1619,7 @@ class ApplianceThermalLoadSensor(OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "appliance_thermal_load", "Appliance Thermal Load"
-        )
+        super().__init__(coordinator, entry, "appliance_thermal_load", "Appliance Thermal Load")
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_native_unit_of_measurement = "BTU/hr"
         self._attr_icon = "mdi:heat-wave"
@@ -1698,9 +1637,7 @@ class ActiveAppliancesSensor(OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "active_appliances", "Active Appliances"
-        )
+        super().__init__(coordinator, entry, "active_appliances", "Active Appliances")
         self._attr_icon = "mdi:washing-machine"
 
     @property
@@ -1737,9 +1674,7 @@ class AuxHeatThresholdSensor(OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "aux_heat_threshold", "Aux Heat Threshold"
-        )
+        super().__init__(coordinator, entry, "aux_heat_threshold", "Aux Heat Threshold")
         self._attr_device_class = SensorDeviceClass.TEMPERATURE
         self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -1769,9 +1704,7 @@ class AuxHeatKwhTodaySensor(_DailyResetMixin, OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "aux_heat_kwh_today", "Aux Heat kWh Today"
-        )
+        super().__init__(coordinator, entry, "aux_heat_kwh_today", "Aux Heat kWh Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.TOTAL
@@ -1791,9 +1724,7 @@ class AvoidedAuxHeatKwhSensor(_DailyResetMixin, OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "avoided_aux_heat_kwh_today", "Avoided Aux Heat kWh Today"
-        )
+        super().__init__(coordinator, entry, "avoided_aux_heat_kwh_today", "Avoided Aux Heat kWh Today")
         self._attr_device_class = SensorDeviceClass.ENERGY
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.TOTAL
@@ -1862,9 +1793,7 @@ class HouseThermalLoadSensor(_ThermalLoadMixin, OptimizerBaseSensor):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "house_thermal_load", "House Thermal Load"
-        )
+        super().__init__(coordinator, entry, "house_thermal_load", "House Thermal Load")
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_native_unit_of_measurement = "BTU/hr"
         self._attr_suggested_display_precision = 0

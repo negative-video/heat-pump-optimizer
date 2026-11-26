@@ -111,9 +111,7 @@ class DayEnergyRecord:
             return False
         if self.covered_minutes <= 0:
             return False
-        return (
-            self.temp_covered_minutes / self.covered_minutes
-        ) >= MIN_TEMP_COVERAGE_FRACTION
+        return (self.temp_covered_minutes / self.covered_minutes) >= MIN_TEMP_COVERAGE_FRACTION
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -159,17 +157,13 @@ class BaselineFit:
 
     @property
     def is_usable(self) -> bool:
-        return self.source != SOURCE_NONE and (
-            self.kwh_per_cdd > 0.0 or self.kwh_per_hdd > 0.0
-        )
+        return self.source != SOURCE_NONE and (self.kwh_per_cdd > 0.0 or self.kwh_per_hdd > 0.0)
 
     def expected_kwh(self, cdd: float, hdd: float) -> float:
         """Baseline energy for a day with the given degree-days."""
         return max(
             0.0,
-            self.kwh_per_cdd * max(0.0, cdd)
-            + self.kwh_per_hdd * max(0.0, hdd)
-            + self.base_kwh,
+            self.kwh_per_cdd * max(0.0, cdd) + self.kwh_per_hdd * max(0.0, hdd) + self.base_kwh,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,11 +186,7 @@ class BaselineFit:
             source=str(data.get("source", SOURCE_NONE)),
             cooling_days=int(data.get("cooling_days", 0)),
             heating_days=int(data.get("heating_days", 0)),
-            residual_kwh=(
-                float(data["residual_kwh"])
-                if data.get("residual_kwh") is not None
-                else None
-            ),
+            residual_kwh=(float(data["residual_kwh"]) if data.get("residual_kwh") is not None else None),
         )
 
 
@@ -403,9 +393,7 @@ class EnergyBaseline:
             return
 
         mean_temp = (
-            self._day_temp_weighted_sum / self._day_temp_minutes
-            if self._day_temp_minutes > 0
-            else DEGREE_DAY_BASE_F
+            self._day_temp_weighted_sum / self._day_temp_minutes if self._day_temp_minutes > 0 else DEGREE_DAY_BASE_F
         )
         record = DayEnergyRecord(
             date=self._current_date,
@@ -416,9 +404,7 @@ class EnergyBaseline:
             covered_minutes=self._day_minutes,
             temp_covered_minutes=self._day_temp_minutes,
             optimizer_fraction=self._day_optimizer_minutes / self._day_minutes,
-            measured_fraction=(
-                self._day_measured_kwh / self._day_kwh if self._day_kwh > 0 else 0.0
-            ),
+            measured_fraction=(self._day_measured_kwh / self._day_kwh if self._day_kwh > 0 else 0.0),
         )
 
         self._days.append(record)
@@ -429,8 +415,7 @@ class EnergyBaseline:
         self._cached_fit = None
 
         _LOGGER.debug(
-            "Energy baseline day closed: %s %s kwh=%.2f CDD=%.1f HDD=%.1f "
-            "coverage=%.0f min",
+            "Energy baseline day closed: %s %s kwh=%.2f CDD=%.1f HDD=%.1f coverage=%.0f min",
             record.date,
             record.label,
             record.kwh,
@@ -466,16 +451,8 @@ class EnergyBaseline:
             return self._cached_fit
 
         baseline_days = self.population(LABEL_BASELINE)
-        cooling = [
-            (d.cdd, d.kwh)
-            for d in baseline_days
-            if d.cdd >= MIN_DEGREE_DAYS_FOR_FIT
-        ]
-        heating = [
-            (d.hdd, d.kwh)
-            for d in baseline_days
-            if d.hdd >= MIN_DEGREE_DAYS_FOR_FIT
-        ]
+        cooling = [(d.cdd, d.kwh) for d in baseline_days if d.cdd >= MIN_DEGREE_DAYS_FOR_FIT]
+        heating = [(d.hdd, d.kwh) for d in baseline_days if d.hdd >= MIN_DEGREE_DAYS_FOR_FIT]
 
         seed = self._seed or BaselineFit()
         kwh_per_cdd = seed.kwh_per_cdd
@@ -485,9 +462,7 @@ class EnergyBaseline:
         measured = False
 
         if len(cooling) >= MIN_BASELINE_DAYS:
-            slope, intercept, residual = _fit_slope(
-                cooling, allow_intercept=len(cooling) >= MIN_DAYS_FOR_INTERCEPT
-            )
+            slope, intercept, residual = _fit_slope(cooling, allow_intercept=len(cooling) >= MIN_DAYS_FOR_INTERCEPT)
             kwh_per_cdd = slope
             base_kwh = max(base_kwh, intercept)
             if residual is not None:
@@ -495,9 +470,7 @@ class EnergyBaseline:
             measured = True
 
         if len(heating) >= MIN_BASELINE_DAYS:
-            slope, intercept, residual = _fit_slope(
-                heating, allow_intercept=len(heating) >= MIN_DAYS_FOR_INTERCEPT
-            )
+            slope, intercept, residual = _fit_slope(heating, allow_intercept=len(heating) >= MIN_DAYS_FOR_INTERCEPT)
             kwh_per_hdd = slope
             base_kwh = max(base_kwh, intercept)
             if residual is not None:
@@ -532,15 +505,9 @@ class EnergyBaseline:
         comparison against the baseline slope stays dimensionally honest at
         any hour: at 06:00 both sides describe a quarter of a day.
         """
-        elapsed = (
-            min(1.0, self._day_minutes / MINUTES_PER_DAY)
-            if self._day_minutes > 0
-            else 0.0
-        )
+        elapsed = min(1.0, self._day_minutes / MINUTES_PER_DAY) if self._day_minutes > 0 else 0.0
         mean_temp = (
-            self._day_temp_weighted_sum / self._day_temp_minutes
-            if self._day_temp_minutes > 0
-            else DEGREE_DAY_BASE_F
+            self._day_temp_weighted_sum / self._day_temp_minutes if self._day_temp_minutes > 0 else DEGREE_DAY_BASE_F
         )
         return {
             "elapsed_fraction": elapsed,
@@ -548,14 +515,8 @@ class EnergyBaseline:
             "cdd": max(0.0, mean_temp - DEGREE_DAY_BASE_F) * elapsed,
             "hdd": max(0.0, DEGREE_DAY_BASE_F - mean_temp) * elapsed,
             "kwh": self._day_kwh,
-            "measured_fraction": (
-                self._day_measured_kwh / self._day_kwh if self._day_kwh > 0 else 0.0
-            ),
-            "optimizer_fraction": (
-                self._day_optimizer_minutes / self._day_minutes
-                if self._day_minutes > 0
-                else 0.0
-            ),
+            "measured_fraction": (self._day_measured_kwh / self._day_kwh if self._day_kwh > 0 else 0.0),
+            "optimizer_fraction": (self._day_optimizer_minutes / self._day_minutes if self._day_minutes > 0 else 0.0),
         }
 
     def today_estimate(self) -> dict[str, Any] | None:
@@ -598,20 +559,14 @@ class EnergyBaseline:
         fit = self.fit()
         if not fit.is_usable:
             return None
-        optimized = [
-            d
-            for d in self.population(LABEL_OPTIMIZED)
-            if d.degree_days >= MIN_DEGREE_DAYS_FOR_FIT
-        ][-days:]
+        optimized = [d for d in self.population(LABEL_OPTIMIZED) if d.degree_days >= MIN_DEGREE_DAYS_FOR_FIT][-days:]
         if not optimized:
             return None
 
         actual = sum(d.kwh for d in optimized)
         baseline = sum(fit.expected_kwh(d.cdd, d.hdd) for d in optimized)
         measured_kwh = sum(d.kwh * d.measured_fraction for d in optimized)
-        uncertainty = (
-            fit.residual_kwh * len(optimized) if fit.residual_kwh is not None else None
-        )
+        uncertainty = fit.residual_kwh * len(optimized) if fit.residual_kwh is not None else None
         return {
             "days": len(optimized),
             "actual_kwh": actual,
@@ -635,9 +590,7 @@ class EnergyBaseline:
             "mixed_days": sum(1 for d in self._days if d.label == LABEL_MIXED),
             "unusable_days": sum(1 for d in self._days if not d.usable),
             "degree_day_base_f": DEGREE_DAY_BASE_F,
-            "days_until_measured_fit": max(
-                0, MIN_BASELINE_DAYS - max(fit.cooling_days, fit.heating_days)
-            ),
+            "days_until_measured_fit": max(0, MIN_BASELINE_DAYS - max(fit.cooling_days, fit.heating_days)),
         }
 
     # ── Persistence ──────────────────────────────────────────────────

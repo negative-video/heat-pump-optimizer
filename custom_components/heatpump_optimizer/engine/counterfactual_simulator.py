@@ -25,16 +25,15 @@ produces as modeled.
 from __future__ import annotations
 
 import logging
-import math
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from ..engine.data_types import BaselineHourResult
 
 # COP model constants (textbook, independent of thermal model)
-ALPHA_COOL = 0.012   # COP degradation per degree above 75F
-ALPHA_HEAT = 0.015   # COP degradation per degree below 75F
+ALPHA_COOL = 0.012  # COP degradation per degree above 75F
+ALPHA_HEAT = 0.015  # COP degradation per degree below 75F
 T_REF_F = 75.0
 
 _LOGGER = logging.getLogger(__name__)
@@ -62,9 +61,7 @@ class CounterfactualSimulator:
     idles in between.  This matches how most modern thermostats operate.
     """
 
-    def __init__(
-        self, initial_temp: float = 72.0, deadband: float = THERMOSTAT_DEADBAND_F
-    ) -> None:
+    def __init__(self, initial_temp: float = 72.0, deadband: float = THERMOSTAT_DEADBAND_F) -> None:
         # Virtual house state (single-node -- no mass tracking needed
         # with profiler model, which captures mass effects in aggregate)
         self._T_air: float = initial_temp
@@ -82,9 +79,7 @@ class CounterfactualSimulator:
         self._hour_avoided_aux_kwh: float = 0.0
 
         # Completed hour results (rolling window)
-        self._hour_results: deque[tuple[int, BaselineHourResult]] = deque(
-            maxlen=MAX_HOUR_RECORDS
-        )
+        self._hour_results: deque[tuple[int, BaselineHourResult]] = deque(maxlen=MAX_HOUR_RECORDS)
 
         # Drift reset tracking
         self._hours_since_reset: int = 0
@@ -143,10 +138,7 @@ class CounterfactualSimulator:
             self._finalize_hour()
             self._hours_since_reset += 1
 
-            if (
-                self._hours_since_reset >= DRIFT_RESET_INTERVAL_HOURS
-                and real_indoor_temp is not None
-            ):
+            if self._hours_since_reset >= DRIFT_RESET_INTERVAL_HOURS and real_indoor_temp is not None:
                 self._drift_reset(real_indoor_temp)
                 self._hours_since_reset = 0
 
@@ -164,7 +156,9 @@ class CounterfactualSimulator:
 
         # Dual-setpoint thermostat decision
         hvac_mode, hvac_running = self._dual_setpoint_decision(
-            self._T_air, setpoint_low, setpoint_high,
+            self._T_air,
+            setpoint_low,
+            setpoint_high,
         )
 
         # Determine solar condition for profiler model
@@ -178,7 +172,9 @@ class CounterfactualSimulator:
             rate = model.heating_delta(outdoor_temp, self._T_air)
         else:
             rate = model.passive_drift(
-                outdoor_temp, self._T_air, solar_condition=solar_cond,
+                outdoor_temp,
+                self._T_air,
+                solar_condition=solar_cond,
             )
 
         self._T_air += rate * dt_hours
@@ -308,19 +304,11 @@ class CounterfactualSimulator:
         runtime_min = self._hour_runtime_min
 
         avg_power = (
-            sum(self._hour_power_readings) / len(self._hour_power_readings)
-            if self._hour_power_readings
-            else 0.0
+            sum(self._hour_power_readings) / len(self._hour_power_readings) if self._hour_power_readings else 0.0
         )
-        avg_cop = (
-            sum(self._hour_cop_readings) / len(self._hour_cop_readings)
-            if self._hour_cop_readings
-            else None
-        )
+        avg_cop = sum(self._hour_cop_readings) / len(self._hour_cop_readings) if self._hour_cop_readings else None
         avg_indoor_temp = (
-            sum(self._hour_temp_readings) / len(self._hour_temp_readings)
-            if self._hour_temp_readings
-            else self._T_air
+            sum(self._hour_temp_readings) / len(self._hour_temp_readings) if self._hour_temp_readings else self._T_air
         )
 
         kwh = (runtime_min / 60.0) * (avg_power / 1000.0)
@@ -351,13 +339,12 @@ class CounterfactualSimulator:
     def _drift_reset(self, real_indoor_temp: float) -> None:
         """Blend virtual T_air toward real state to prevent unbounded drift."""
         old = self._T_air
-        self._T_air = (
-            self._T_air * (1 - DRIFT_RESET_BLEND_FACTOR)
-            + real_indoor_temp * DRIFT_RESET_BLEND_FACTOR
-        )
+        self._T_air = self._T_air * (1 - DRIFT_RESET_BLEND_FACTOR) + real_indoor_temp * DRIFT_RESET_BLEND_FACTOR
         _LOGGER.debug(
             "Counterfactual drift reset: %.1fF -> %.1fF (real=%.1fF)",
-            old, self._T_air, real_indoor_temp,
+            old,
+            self._T_air,
+            real_indoor_temp,
         )
 
     # ── Savings Decomposition ────────────────────────────────────────

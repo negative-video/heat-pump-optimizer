@@ -96,9 +96,7 @@ def compute_sensitivities(record: dict) -> dict[str, float]:
     # infiltration includes wind_coeff * wind_speed
     # ∂Q_env/∂wind_coeff = UA * wind_speed * (T_out_eff - T_air)
     if wind_speed is not None and wind_speed > 0:
-        sensitivities["wind_infiltration"] = (
-            ua_value * wind_speed * (effective_outdoor - indoor_temp) * dt
-        )
+        sensitivities["wind_infiltration"] = ua_value * wind_speed * (effective_outdoor - indoor_temp) * dt
     else:
         sensitivities["wind_infiltration"] = 0.0
 
@@ -106,9 +104,7 @@ def compute_sensitivities(record: dict) -> dict[str, float]:
     # infiltration includes stack_coeff * sqrt(|ΔT|)
     # ∂Q_env/∂stack_coeff = UA * sqrt(|ΔT|) * (T_out_eff - T_air)
     delta_t = abs(effective_outdoor - indoor_temp)
-    sensitivities["stack_effect"] = (
-        ua_value * math.sqrt(max(0.0, delta_t)) * (effective_outdoor - indoor_temp) * dt
-    )
+    sensitivities["stack_effect"] = ua_value * math.sqrt(max(0.0, delta_t)) * (effective_outdoor - indoor_temp) * dt
 
     # ── k_attic ───────────────────────────────────────────────────
     # Q_attic = k_attic * area_scale * (T_attic - T_air)
@@ -178,9 +174,7 @@ def compute_sensitivities(record: dict) -> dict[str, float]:
     # ── precipitation_offset ──────────────────────────────────────
     # ∂Q_env/∂precip_offset = -UA * infiltration (only when raining)
     if precipitation:
-        sensitivities["precipitation_offset"] = (
-            -ua_value * infiltration * dt
-        )
+        sensitivities["precipitation_offset"] = -ua_value * infiltration * dt
     else:
         sensitivities["precipitation_offset"] = 0.0
 

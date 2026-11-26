@@ -77,17 +77,14 @@ class ThermalProfile:
         """Diagnostic payload. Keys are stable; values may be None."""
         return {
             "drift_slope_per_hour": (
-                round(self.drift_slope_per_hour, 4)
-                if self.drift_slope_per_hour is not None else None
+                round(self.drift_slope_per_hour, 4) if self.drift_slope_per_hour is not None else None
             ),
             "time_constant_hours": (
-                round(self.time_constant_hours, 1)
-                if self.time_constant_hours is not None else None
+                round(self.time_constant_hours, 1) if self.time_constant_hours is not None else None
             ),
             "thermal_mass_btu_per_f": round(self.thermal_mass_btu_per_f, 0),
             "envelope_loss_btu_per_hour_f": (
-                round(self.envelope_loss_btu_per_hour_f, 1)
-                if self.envelope_loss_btu_per_hour_f is not None else None
+                round(self.envelope_loss_btu_per_hour_f, 1) if self.envelope_loss_btu_per_hour_f is not None else None
             ),
             "observations": self.observations,
             "source": self.source,
