@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 Found by replaying the real setup path and five-minute cycle against ten days of recorder data from a live house, plus a winter simulation of schedule alternatives.
 
