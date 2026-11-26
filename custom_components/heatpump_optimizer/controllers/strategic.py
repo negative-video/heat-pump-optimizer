@@ -887,7 +887,6 @@ class StrategicPlanner:
             return now_hour
 
         simulator = self.optimizer.simulator
-        tolerance = max(RECOVERY_TOLERANCE_F, simulator.violation_tolerance())
         earliest = candidates[-1]
 
         for start in candidates:  # latest first
@@ -895,13 +894,18 @@ class StrategicPlanner:
             self._apply_recovery(trial, window, config, start)
             entries = self._recovery_entries(trial, forecast, mode, dual)
             simulation = simulator.simulate(indoor_temp, forecast, entries)
-            arrived = self._simulated_temp_at(simulation, window.deadline)
-            if arrived is None:
+            if self._simulated_temp_at(simulation, window.deadline) is None:
                 # Target beyond the simulated horizon: nothing to size
                 # against yet, so use a plain lead and refine on a later run.
                 fallback = window.deadline - timedelta(hours=DEFAULT_RECOVERY_LEAD_HOURS)
                 return min(candidates, key=lambda h: abs((h - fallback).total_seconds()))
-            if arrived >= window.day_floor - tolerance:
+            # Arrival is the warmest the house gets between the start and the
+            # target. Reading the temperature at the target instant instead
+            # would need the thermostat differential as slack (a warm house
+            # sags that far between cycles), and that slack let a recovery
+            # that was still a degree short count as on time.
+            arrived = self._simulated_peak_between(simulation, start, window.deadline)
+            if arrived is not None and arrived >= window.day_floor - RECOVERY_TOLERANCE_F:
                 return start
 
         # Nothing arrives on time: start as early as allowed and say so.
@@ -925,6 +929,12 @@ class StrategicPlanner:
             else:
                 break
         return best.indoor_temp if best is not None else simulation[0].indoor_temp
+
+    @staticmethod
+    def _simulated_peak_between(simulation, start: datetime, end: datetime) -> float | None:
+        """Warmest simulated indoor temperature in ``[start, end]``."""
+        temps = [point.indoor_temp for point in simulation if start <= point.time <= end]
+        return max(temps) if temps else None
 
     def recovery_state(self) -> dict[str, str]:
         """Recoveries already decided, for persistence across restarts."""

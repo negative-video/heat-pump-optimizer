@@ -383,3 +383,17 @@ def test_shoulder_day_recovery_moves_the_heat_floor_of_the_pair(mode):
     assert lows[12] == 63.0         # after the target time
     assert min(lows.values()) >= 58.0 and max(highs) <= 81.0
     assert planner.recovery_plan
+
+
+@pytest.mark.parametrize("outdoor", [30.0, 33.0, 36.0, 40.0, 44.0])
+def test_warm_by_reaches_the_floor_not_a_degree_short(outdoor):
+    """Arrival means within half a degree of the daytime floor by the target.
+
+    The thermostat differential (1 F here) is how far the simulated house
+    sags between cycles once it is warm. It is not slack on the arrival.
+    """
+    planner = _planner(MorningRecoveryConfig(mode=RECOVERY_WARM_BY))
+    schedule = _optimize(planner, _forecast(outdoor))
+    start = datetime.fromisoformat(planner.recovery_plan[0]["recovery_start"])
+    climb = [p.indoor_temp for p in schedule.simulation if start <= p.time <= _hour(9)]
+    assert max(climb) >= 63.0 - 0.5

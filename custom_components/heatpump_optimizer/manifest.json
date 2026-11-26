@@ -4,7 +4,7 @@
   "codeowners": ["@negative-video"],
   "config_flow": true,
   "after_dependencies": ["climate", "weather", "person", "calendar", "recorder"],
-  "dependencies": ["http", "frontend", "panel_custom"],
+  "dependencies": ["http", "frontend", "panel_custom", "websocket_api"],
   "documentation": "https://github.com/negative-video/heat-pump-optimizer",
   "homeassistant": "2025.1.0",
   "integration_type": "service",

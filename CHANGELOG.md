@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Dashboard tabs.** The sidebar panel gains Now, Model and Energy tabs beside the existing cards (now under Overview).
+  - Now: the last 24 hours and the next 24 on one time axis, with indoor, setpoints, the promised band, outdoor and compressor duty; the plan as a table; input health.
+  - Model: rate against outdoor temperature for drift, heating and cooling, with observation counts per bin; forecast error by lead time against assuming no change; bias by hour and by outdoor temperature.
+  - Energy: daily runtime against outdoor temperature with a degree-day fit; runtime by month; minutes by hour of day; a log of morning recoveries.
+- A dashboard archive behind those tabs: each plan's forecast is scored at 1, 3, 6, 12 and 24 hours; an hourly log is kept for two months and a daily roll-up for two years; each morning recovery is timed. The hourly log and recoveries are backfilled once from recorder history. Served to the panel over a websocket command.
+
+### Fixed
+
+- "Warm by" recoveries were sized a full degree short. Arrival was checked against the thermostat differential (1°F by default) instead of the half degree intended, so a plan that would still be at 62°F at the target time counted as on time. Arrival is now the warmest simulated temperature between the start and the target, within 0.5°F of the daytime minimum.
+- The panel's compressor activity came out wrong on a heat/cool thermostat: action changes are attribute changes there, and the history was read by the wrong timestamp.
+
 ## 0.3.1
 
 ### Fixed

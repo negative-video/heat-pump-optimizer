@@ -167,9 +167,11 @@ from .const import (
 from .controllers.strategic import StrategicPlanner
 from .controllers.tactical import TacticalController, TacticalState
 from .controllers.watchdog import WatchdogController
+from .coordinator_dashboard import DashboardMixin
 from .coordinator_data_builder import DataBuilderMixin
 from .coordinator_helpers import HelpersMixin
 from .coordinator_persistence import PersistenceMixin
+from .dashboard_archive import DashboardArchive
 from .engine.comfort import (
     calculate_apparent_temperature,
     derive_effective_comfort_band,
@@ -239,6 +241,7 @@ class HeatPumpOptimizerCoordinator(
     DataBuilderMixin,
     HelpersMixin,
     PersistenceMixin,
+    DashboardMixin,
     DataUpdateCoordinator,
 ):
     """Coordinator that manages the full optimization lifecycle."""
@@ -600,6 +603,9 @@ class HeatPumpOptimizerCoordinator(
         self.energy_baseline = EnergyBaseline()
         self.ab_trial = ABTrial()
         self._link_energy_baseline()
+
+        # Forecast scoring, hourly log and morning recoveries for the panel
+        self.dashboard_archive = DashboardArchive()
 
         # Set rated HVAC capacity from user's tonnage config
         if self._hvac_tonnage:
@@ -1067,6 +1073,13 @@ class HeatPumpOptimizerCoordinator(
         grid_import_reading = self.sensor_hub.read_grid_import()
         outdoor_reading = self.sensor_hub.read_outdoor_temp(self.strategic.forecast_snapshot)
         outdoor_temp = outdoor_reading.value if outdoor_reading else None
+
+        # ── Dashboard archive (forecast scoring, hourly log, mornings) ──
+
+        try:
+            self._record_dashboard_cycle(now, thermo_state, outdoor_temp, aux_heat_active)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            _LOGGER.warning("Dashboard archive update failed", exc_info=True)
 
         # Effective outdoor temp for aux learner (wind-chill-adjusted if available)
         _eff_outdoor = outdoor_temp
@@ -1776,6 +1789,15 @@ class HeatPumpOptimizerCoordinator(
 
         if schedule:
             self._active = True
+            try:
+                self.dashboard_archive.record_plan(
+                    datetime.now(UTC),
+                    schedule.simulation,
+                    thermo_state.indoor_temp,
+                    self.optimizer_is_controlling,
+                )
+            except (ValueError, TypeError, AttributeError):
+                _LOGGER.debug("Dashboard archive could not record the plan", exc_info=True)
             _LOGGER.info(
                 "Optimization [%s]: baseline=%.1f min, optimized=%.1f min, savings=%.1f%%",
                 self.strategic.mode,

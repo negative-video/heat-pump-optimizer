@@ -42,6 +42,9 @@ const ENTITY_ALIASES = {
   rate_savings_today: "rate_arbitrage_savings_today",
   preconditioning_status: "pre_conditioning_status",
   profiler_status: "profiler",
+  weighted_indoor_temp: "weighted_indoor_temperature",
+  measured_savings_30d: "measured_savings_30_days",
+  ab_trial: "a_b_validation_trial",
 };
 
 // Entity IDs keyed by the integration's own entity key, from the frontend's
@@ -1788,6 +1791,1000 @@ function renderWelcomeCard(states) {
 
 // ── Main Component ───────────────────────────────────────────────────
 
+// ── Dashboard tabs: Now / Model / Energy ─────────────────────────────
+//
+// Charts are drawn as SVG strings at the panel's measured pixel width, so
+// marks and text keep their real size at any width. Series colours are CSS
+// variables (see PANEL_CSS) and follow the entity, not its position.
+
+const DV_HOUR = 3600e3;
+const DV_DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DV_MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DV_TABS = [
+  ["overview", "Overview"],
+  ["now", "Now"],
+  ["model", "Model"],
+  ["energy", "Energy"],
+];
+
+function dvNum(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function dvFmt(v, digits = 1) {
+  const n = dvNum(v);
+  return n == null ? "–" : n.toFixed(digits);
+}
+function dvSigned(v, digits = 2) {
+  const n = dvNum(v);
+  if (n == null) return "–";
+  return (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(digits);
+}
+function dvPad(n) {
+  return String(n).padStart(2, "0");
+}
+function dvHM(ms) {
+  const d = new Date(ms);
+  return dvPad(d.getHours()) + ":" + dvPad(d.getMinutes());
+}
+function dvScale(d0, d1, r0, r1) {
+  const k = (r1 - r0) / (d1 - d0 || 1);
+  return (v) => r0 + (v - d0) * k;
+}
+function dvPath(pts) {
+  return pts.length ? "M" + pts.map((p) => p[0].toFixed(1) + " " + p[1].toFixed(1)).join("L") : "";
+}
+/** Step path: hold each value until the next point's x. */
+function dvStepPath(pts) {
+  if (!pts.length) return "";
+  let d = "M" + pts[0][0].toFixed(1) + " " + pts[0][1].toFixed(1);
+  for (let i = 1; i < pts.length; i++) d += "H" + pts[i][0].toFixed(1) + "V" + pts[i][1].toFixed(1);
+  return d;
+}
+function dvTicks(lo, hi, target = 5) {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+  const raw = span / target;
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map((m) => m * pow).find((m) => m >= raw) || raw;
+  const out = [];
+  for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+function dvSeries(arr) {
+  const out = [];
+  for (const p of arr || []) {
+    const v = Number(p.state);
+    const t = Date.parse(p.last_changed || p.last_updated || "");
+    if (Number.isFinite(v) && Number.isFinite(t)) out.push([t, v]);
+  }
+  return out;
+}
+/** Last value at or before t in a time-sorted [[t, v]] series. */
+function dvAt(series, t) {
+  let lo = 0;
+  let hi = series.length - 1;
+  let ans = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (series[mid][0] <= t) {
+      ans = series[mid][1];
+      lo = mid + 1;
+    } else hi = mid - 1;
+  }
+  return ans;
+}
+function dvEmpty(text) {
+  return `<div class="dv-empty">${esc(text)}</div>`;
+}
+function dvLegend(items) {
+  return `<div class="dv-legend">${items
+    .map(([cls, label]) => `<span><i class="dv-key ${cls}"></i>${esc(label)}</span>`)
+    .join("")}</div>`;
+}
+function dvCard(title, meta, body, cls = "") {
+  return `<section class="card dv-card ${cls}"><div class="dv-head"><h2>${esc(title)}</h2>${
+    meta ? `<span class="dv-meta">${meta}</span>` : ""
+  }</div>${body}</section>`;
+}
+
+// ── Now ──────────────────────────────────────────────────────────────
+
+function dvStatStrip(states, hass) {
+  const unit = tempUnit(hass);
+  const sched = findEntity(states, "schedule");
+  const a = (sched && sched.attributes) || {};
+  const fc = Array.isArray(a.forecast) ? a.forecast : [];
+  const entries = Array.isArray(a.entries) ? a.entries : [];
+  const now = Date.now();
+
+  const indoor = findEntity(states, "weighted_indoor_temp") || findEntity(states, "apparent_temperature");
+  const outdoor = findEntity(states, "outdoor_temp_source");
+  const phase = findEntity(states, "current_phase");
+  const mae = findEntity(states, "model_accuracy");
+  const profiler = findEntity(states, "profiler_status");
+
+  const live = fc.find((p) => Date.parse(p.time) + DV_HOUR > now) || fc[0];
+  const floor = live ? dvNum(a.mode === "cool" ? live.comfort_max : live.comfort_min) : null;
+  const floorText = floor == null ? "" : `${a.mode === "cool" ? "ceiling" : "floor"} ${dvFmt(floor, 0)}°`;
+
+  let low = null;
+  for (const p of fc) {
+    const t = Date.parse(p.time);
+    const v = dvNum(p.outdoor);
+    if (v == null || t < now || t > now + 24 * DV_HOUR) continue;
+    if (!low || v < low.v) low = { v, t };
+  }
+
+  const current = entries.find((e) => Date.parse(e.start) <= now && Date.parse(e.end) > now) || entries[0];
+  const next = current
+    ? entries.find((e) => Date.parse(e.start) > now && dvNum(e.target_temp) !== dvNum(current.target_temp))
+    : null;
+  const recovery = (Array.isArray(a.morning_recovery) ? a.morning_recovery : []).find(
+    (r) => next && Math.abs(Date.parse(r.recovery_start) - Date.parse(next.start)) < 60e3
+  );
+
+  const phaseInfo = PHASE_MAP[(phase && phase.state) || ""] || { label: (phase && phase.state) || "–" };
+  const tactical = phase && phase.attributes ? phase.attributes : {};
+  const detail = (profiler && profiler.attributes && profiler.attributes.mode_detail) || {};
+  const bars = [
+    ["drift", "resist"],
+    ["cool", "cool_1"],
+    ["heat", "heat_1"],
+    ["aux", "auxiliary_heat_1"],
+  ]
+    .map(([label, key]) => {
+      const c = dvNum(detail[key] && detail[key].confidence) || 0;
+      return `<span>${label}</span><span class="dv-bar"><i style="width:${Math.max(0, Math.min(100, c))}%"></i></span><span class="dv-n">${c.toFixed(0)}</span>`;
+    })
+    .join("");
+
+  const cell = (label, value, sub) =>
+    `<div class="dv-stat"><div class="dv-stat-label">${label}</div><div class="dv-stat-value">${value}</div><div class="dv-stat-sub">${sub || "&nbsp;"}</div></div>`;
+
+  return `<section class="card dv-stats">
+    ${cell("Indoor", `${fmt(indoor)}<small>${esc(unit)}</small>`, floorText)}
+    ${cell("Outdoor", `${fmt(outdoor)}<small>${esc(unit)}</small>`, low ? `low ${dvFmt(low.v, 0)}° at ${dvHM(low.t)}` : "")}
+    ${cell("Phase", esc(phaseInfo.label), tactical.tactical_state ? `${esc(tactical.tactical_state)}, ${dvSigned(tactical.tactical_correction, 1)}°` : "")}
+    ${cell(
+      "Next change",
+      next ? `${dvHM(Date.parse(next.start))}<small> → ${dvFmt(next.target_temp, 0)}°</small>` : "–",
+      recovery ? `warm by ${dvHM(Date.parse(recovery.target_time))}` : ""
+    )}
+    ${cell(
+      "Forecast error",
+      `${fmt(mae, 2)}<small>° MAE</small>`,
+      mae && mae.attributes && mae.attributes.model_bias != null ? `bias ${dvSigned(mae.attributes.model_bias)}°` : ""
+    )}
+    <div class="dv-stat"><div class="dv-stat-label">Coverage %</div><div class="dv-cov">${bars}</div></div>
+  </section>`;
+}
+
+/** Interpolated 90th-percentile forecast error at a lead time, or null. */
+function dvP90(dash) {
+  const leads = ((dash && dash.verification && dash.verification.leads) || []).filter((l) => l.n >= 12);
+  if (leads.length < 2) return null;
+  const pts = [[0, 0]].concat(leads.map((l) => [l.lead, l.p90]));
+  return (h) => {
+    for (let i = 1; i < pts.length; i++) {
+      if (h <= pts[i][0]) {
+        const f = (h - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0]);
+        return pts[i - 1][1] + f * (pts[i][1] - pts[i - 1][1]);
+      }
+    }
+    return pts[pts.length - 1][1];
+  };
+}
+
+function dvTimeline(states, retro, dash, W) {
+  const sched = findEntity(states, "schedule");
+  const a = (sched && sched.attributes) || {};
+  const cooling = a.mode === "cool";
+  const now = Date.now();
+  const t0 = now - 24 * DV_HOUR;
+  const fc = (Array.isArray(a.forecast) ? a.forecast : [])
+    .map((p) => ({
+      t: Date.parse(p.time),
+      in: dvNum(p.indoor),
+      out: dvNum(p.outdoor),
+      hvac: !!p.hvac,
+      lo: dvNum(p.comfort_min),
+      hi: dvNum(p.comfort_max),
+    }))
+    .filter((p) => Number.isFinite(p.t) && p.t > now - DV_HOUR && p.t <= now + 24 * DV_HOUR);
+  const t1 = fc.length ? now + 24 * DV_HOUR : now + DV_HOUR;
+
+  const r = retro || {};
+  const indoor = dvSeries(r.indoorW && r.indoorW.length ? r.indoorW : r.indoor).filter((p) => p[0] >= t0);
+  const outdoor = dvSeries(r.outdoor).filter((p) => p[0] >= t0);
+  const spRaw = (r.setpoints || []).map((p) => [p.t, cooling ? p.high : p.low]).filter((p) => p[1] != null);
+  const plan = (Array.isArray(a.entries) ? a.entries : [])
+    .map((e) => ({ s: Date.parse(e.start), e: Date.parse(e.end), v: dvNum(e.target_temp) }))
+    .filter((e) => e.v != null && e.e > now && e.s < t1);
+
+  if (indoor.length < 2 && !fc.length) return { html: dvEmpty("Waiting for history and a plan."), model: null };
+
+  // Geometry
+  const ML = 38;
+  const MR = 10;
+  const x = dvScale(t0, t1, ML, W - MR);
+  const P1 = { top: 32, h: 224 };
+  const P2 = { top: 268, h: 90 };
+  const P3 = { top: 370, h: 44 };
+  const H = 434;
+
+  // Indoor domain
+  const vals = [];
+  indoor.forEach((p) => vals.push(p[1]));
+  fc.forEach((p) => {
+    if (p.in != null) vals.push(p.in);
+    if (p.lo != null) vals.push(p.lo);
+    if (p.hi != null) vals.push(p.hi);
+  });
+  spRaw.forEach((p) => p[0] >= t0 - 12 * DV_HOUR && vals.push(p[1]));
+  plan.forEach((e) => vals.push(e.v));
+  const yLo = Math.floor(Math.min(...vals) - 1);
+  const yHi = Math.ceil(Math.max(...vals) + 1);
+  const y1 = dvScale(yLo, yHi, P1.top + P1.h, P1.top);
+  const clampY = (v) => Math.max(P1.top, Math.min(P1.top + P1.h, y1(v)));
+
+  // Outdoor domain
+  const outs = outdoor.map((p) => p[1]).concat(fc.filter((p) => p.out != null).map((p) => p.out));
+  const oLo = outs.length ? Math.floor((Math.min(...outs) - 2) / 5) * 5 : 0;
+  const oHi = outs.length ? Math.ceil((Math.max(...outs) + 2) / 5) * 5 : 10;
+  const y2 = dvScale(oLo, oHi, P2.top + P2.h, P2.top);
+
+  const parts = [];
+  const xNow = x(now);
+  const right = W - MR;
+
+  // Future shading, grids, ticks
+  for (const P of [P1, P2, P3]) {
+    parts.push(`<rect x="${xNow.toFixed(1)}" y="${P.top}" width="${Math.max(0, right - xNow).toFixed(1)}" height="${P.h}" class="dv-future"/>`);
+  }
+  const first6 = new Date(t0);
+  first6.setMinutes(0, 0, 0);
+  first6.setHours(Math.ceil((first6.getHours() + 0.01) / 6) * 6);
+  for (let t = first6.getTime(); t <= t1; t += 6 * DV_HOUR) {
+    const px = x(t);
+    if (px < ML || px > right) continue;
+    parts.push(`<line x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${P1.top}" y2="${P3.top + P3.h}" class="dv-grid"/>`);
+    const d = new Date(t);
+    const label = d.getHours() === 0 ? `${DV_DOW[d.getDay()]} 00:00` : dvHM(t);
+    parts.push(`<text x="${px.toFixed(1)}" y="${H - 6}" text-anchor="middle"${d.getHours() === 0 ? ' class="dv-strong"' : ""}>${label}</text>`);
+  }
+  for (const v of dvTicks(yLo, yHi, 5)) {
+    parts.push(`<line x1="${ML}" x2="${right}" y1="${y1(v).toFixed(1)}" y2="${y1(v).toFixed(1)}" class="dv-grid"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y1(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  for (const v of dvTicks(oLo, oHi, 3)) {
+    parts.push(`<line x1="${ML}" x2="${right}" y1="${y2(v).toFixed(1)}" y2="${y2(v).toFixed(1)}" class="dv-grid"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y2(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  parts.push(`<text x="0" y="${P1.top + 10}">in</text><text x="0" y="${P2.top + 10}">out</text><text x="0" y="${P3.top + 10}">duty</text>`);
+  parts.push(`<line x1="${ML}" x2="${right}" y1="${P3.top + P3.h}" y2="${P3.top + P3.h}" class="dv-axis"/>`);
+
+  // Promised band and error fan (future)
+  if (fc.length) {
+    const band = fc.filter((p) => p.lo != null && p.hi != null && p.t + DV_HOUR > now);
+    if (band.length) {
+      const edge = (p) => Math.max(xNow, x(p.t));
+      const last = Math.min(right, x(band[band.length - 1].t + DV_HOUR));
+      let d = `M${edge(band[0]).toFixed(1)} ${clampY(band[0].hi).toFixed(1)}`;
+      for (let i = 1; i < band.length; i++) d += `H${edge(band[i]).toFixed(1)}V${clampY(band[i].hi).toFixed(1)}`;
+      d += `H${last.toFixed(1)}V${clampY(band[band.length - 1].lo).toFixed(1)}`;
+      for (let i = band.length - 1; i >= 1; i--) d += `H${edge(band[i]).toFixed(1)}V${clampY(band[i - 1].lo).toFixed(1)}`;
+      d += `H${edge(band[0]).toFixed(1)}Z`;
+      parts.push(`<path d="${d}" class="dv-band"/>`);
+    }
+    const p90 = dvP90(dash);
+    const pts = fc.filter((p) => p.in != null && p.t >= now - DV_HOUR);
+    if (p90 && pts.length > 1) {
+      const up = pts.map((p) => [x(p.t), clampY(p.in + p90(Math.max(0, (p.t - now) / DV_HOUR)))]);
+      const dn = pts.map((p) => [x(p.t), clampY(p.in - p90(Math.max(0, (p.t - now) / DV_HOUR)))]).reverse();
+      parts.push(`<path d="${dvPath(up.concat(dn))}Z" class="dv-fan"/>`);
+    }
+  }
+
+  // Markers: recovery start and deadline, setpoint changes
+  const marks = [{ t: now, label: `now ${dvHM(now)}`, strong: true }];
+  for (const rec of Array.isArray(a.morning_recovery) ? a.morning_recovery : []) {
+    const s = Date.parse(rec.recovery_start);
+    const e = Date.parse(rec.target_time);
+    if (s > now && s < t1) marks.push({ t: s, label: `${dvHM(s)} recovery`, strong: true });
+    if (e > now && e < t1) marks.push({ t: e, label: `${dvHM(e)} deadline`, strong: true });
+  }
+  for (let i = 1; i < spRaw.length; i++) {
+    const [t, v] = spRaw[i];
+    if (t > t0 && t < now && Math.abs(v - spRaw[i - 1][1]) >= 1) marks.push({ t, label: `${dvHM(t)} → ${dvFmt(v, 0)}°` });
+  }
+  for (let i = 1; i < plan.length; i++) {
+    if (plan[i].v !== plan[i - 1].v && plan[i].s > now && !marks.some((m) => Math.abs(m.t - plan[i].s) < 60e3)) {
+      marks.push({ t: plan[i].s, label: `${dvHM(plan[i].s)} → ${dvFmt(plan[i].v, 0)}°` });
+    }
+  }
+  const lanes = [[], []];
+  marks
+    .sort((p, q) => (q.strong ? 1 : 0) - (p.strong ? 1 : 0) || p.t - q.t)
+    .forEach((m) => {
+      const px = x(m.t);
+      const w = m.label.length * 6.1 + 8;
+      const flip = px + w > right;
+      const lo = flip ? px - w : px;
+      const hi = flip ? px : px + w;
+      if (m.t !== now) {
+        parts.push(`<line x1="${px.toFixed(1)}" x2="${px.toFixed(1)}" y1="${P1.top}" y2="${P1.top + P1.h}" class="dv-mark"/>`);
+      }
+      const lane = lanes.findIndex((row) => !row.some(([p, q]) => lo < q && hi > p));
+      if (lane < 0) return;
+      lanes[lane].push([lo, hi]);
+      parts.push(
+        `<text x="${(flip ? px - 4 : px + 4).toFixed(1)}" y="${lane === 0 ? 11 : 24}" text-anchor="${flip ? "end" : "start"}"${m.strong ? ' class="dv-strong"' : ""}>${esc(m.label)}</text>`
+      );
+    });
+
+  // Setpoints
+  if (spRaw.length) {
+    const pts = [];
+    for (const [t, v] of spRaw) {
+      if (t > now) break;
+      if (t <= t0) pts[0] = [x(t0), clampY(v)];
+      else pts.push([x(t), clampY(v)]);
+    }
+    if (pts.length) {
+      pts.push([xNow, pts[pts.length - 1][1]]);
+      parts.push(`<path d="${dvStepPath(pts)}" class="dv-line dv-sp"/>`);
+    }
+  }
+  if (plan.length) {
+    const pts = plan.map((e) => [Math.max(xNow, x(e.s)), clampY(e.v)]);
+    pts.push([Math.min(right, x(plan[plan.length - 1].e)), pts[pts.length - 1][1]]);
+    parts.push(`<path d="${dvStepPath(pts)}" class="dv-line dv-sp dv-dash"/>`);
+  }
+
+  // Indoor
+  const fcIn = fc.filter((p) => p.in != null).map((p) => [x(p.t), y1(p.in)]);
+  if (fcIn.length > 1) parts.push(`<path d="${dvPath(fcIn)}" class="dv-line dv-indoor dv-dash"/>`);
+  if (indoor.length > 1) {
+    parts.push(`<path d="${dvPath(indoor.map((p) => [x(p[0]), y1(p[1])]))}" class="dv-line dv-indoor"/>`);
+    const end = indoor[indoor.length - 1];
+    parts.push(`<circle cx="${x(end[0]).toFixed(1)}" cy="${y1(end[1]).toFixed(1)}" r="4" class="dv-dot dv-indoor-fill"/>`);
+  }
+
+  // Outdoor
+  const aux = findEntity(states, "aux_heat_threshold");
+  const auxF = aux && aux.attributes && aux.attributes.is_learned ? dvNum(aux.state) : null;
+  if (!cooling && auxF != null && auxF > oLo && auxF < oHi) {
+    parts.push(`<line x1="${ML}" x2="${right}" y1="${y2(auxF).toFixed(1)}" y2="${y2(auxF).toFixed(1)}" class="dv-mark"/>`);
+    parts.push(`<text x="${right - 4}" y="${(y2(auxF) - 4).toFixed(1)}" text-anchor="end">aux ${auxF.toFixed(0)}°</text>`);
+  }
+  const fcOut = fc.filter((p) => p.out != null).map((p) => [x(p.t), y2(p.out)]);
+  if (fcOut.length > 1) parts.push(`<path d="${dvPath(fcOut)}" class="dv-line dv-out dv-dash"/>`);
+  if (outdoor.length > 1) parts.push(`<path d="${dvPath(outdoor.map((p) => [x(p[0]), y2(p[1])]))}" class="dv-line dv-out"/>`);
+
+  // Duty: half-hour buckets from hvac_action, then planned hours
+  const actions = (r.hvacAction || [])
+    .map((p) => [Date.parse(p.last_changed), p.state === "heating" || p.state === "cooling" ? 1 : 0])
+    .filter((p) => Number.isFinite(p[0]));
+  const duty = [];
+  if (actions.length) {
+    const B = DV_HOUR / 2;
+    for (let b = Math.floor(t0 / B) * B; b < now; b += B) {
+      const s = Math.max(b, t0);
+      const e = Math.min(b + B, now);
+      let on = 0;
+      let cur = dvAt(actions, s) || 0;
+      let at = s;
+      for (const [t, v] of actions) {
+        if (t <= s) continue;
+        if (t >= e) break;
+        if (cur) on += t - at;
+        at = t;
+        cur = v;
+      }
+      if (cur) on += e - at;
+      const f = e > s ? on / (e - s) : 0;
+      duty.push([b, f]);
+      if (f > 0.01) {
+        const h = f * P3.h;
+        parts.push(
+          `<rect x="${(x(s) + 0.5).toFixed(1)}" y="${(P3.top + P3.h - h).toFixed(1)}" width="${Math.max(1, x(e) - x(s) - 1).toFixed(1)}" height="${h.toFixed(1)}" class="dv-run"><title>${dvHM(b)}: ${(f * 100).toFixed(0)}%</title></rect>`
+        );
+      }
+    }
+  }
+  for (const p of fc) {
+    if (!p.hvac || p.t + DV_HOUR <= now) continue;
+    const s = Math.max(xNow, x(p.t));
+    const e = Math.min(right, x(p.t + DV_HOUR));
+    if (e - s > 1) parts.push(`<rect x="${(s + 0.5).toFixed(1)}" y="${P3.top}" width="${(e - s - 1).toFixed(1)}" height="${P3.h}" class="dv-run dv-planned"/>`);
+  }
+
+  // Now line and crosshair
+  parts.push(`<line x1="${xNow.toFixed(1)}" x2="${xNow.toFixed(1)}" y1="${P1.top}" y2="${P3.top + P3.h}" class="dv-now"/>`);
+  parts.push(`<line x1="0" x2="0" y1="${P1.top}" y2="${P3.top + P3.h}" class="dv-cross" style="display:none"/>`);
+
+  const html = `<svg class="dv-svg dv-tl" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Indoor and outdoor temperature, setpoints and compressor duty, last 24 hours and plan">${parts.join("")}</svg>`;
+  const planSp = plan.map((e) => [e.s, e.v]);
+  return {
+    html,
+    model: {
+      left: ML, right, t0, t1, now,
+      indoor, outdoor, duty,
+      fcIn: fc.filter((p) => p.in != null).map((p) => [p.t, p.in]),
+      fcOut: fc.filter((p) => p.out != null).map((p) => [p.t, p.out]),
+      sp: spRaw, planSp,
+    },
+  };
+}
+
+/** One-line readout for a time on the timeline (used by the crosshair). */
+function dvReadout(m, t) {
+  const future = t > m.now;
+  const d = new Date(t);
+  const bits = [`${DV_DOW[d.getDay()]} ${dvHM(t)}`];
+  const inV = future ? dvAt(m.fcIn, t) : dvAt(m.indoor, t);
+  const outV = future ? dvAt(m.fcOut, t) : dvAt(m.outdoor, t);
+  const spV = future ? dvAt(m.planSp, t) : dvAt(m.sp, t);
+  if (inV != null) bits.push(`in ${inV.toFixed(1)}°${future ? " fcst" : ""}`);
+  if (outV != null) bits.push(`out ${outV.toFixed(1)}°`);
+  if (spV != null) bits.push(`set ${spV.toFixed(0)}°`);
+  if (!future) {
+    const f = dvAt(m.duty, t);
+    if (f != null) bits.push(`duty ${(f * 100).toFixed(0)}%`);
+  }
+  return bits.join("  ·  ");
+}
+
+function dvPlanTable(states) {
+  const sched = findEntity(states, "schedule");
+  const a = (sched && sched.attributes) || {};
+  const entries = Array.isArray(a.entries) ? a.entries : [];
+  const fc = Array.isArray(a.forecast) ? a.forecast : [];
+  const now = Date.now();
+  const segs = [];
+  for (const e of entries) {
+    const s = Date.parse(e.start);
+    const end = Date.parse(e.end);
+    if (!(end > now) || s > now + 24 * DV_HOUR) continue;
+    const m = /:\s*([a-z-]+)/i.exec(e.reason || "");
+    const action = m ? m[1] : e.mode || "";
+    const v = dvNum(e.target_temp);
+    const last = segs[segs.length - 1];
+    if (last && last.v === v && last.action === action) last.e = end;
+    else segs.push({ s: Math.max(s, now), e: end, v, action });
+  }
+  if (!segs.length) return dvEmpty("No plan yet.");
+  const range = (vals, digits = 0) => {
+    const xs = vals.filter((v) => v != null);
+    if (!xs.length) return "–";
+    const lo = Math.min(...xs);
+    const hi = Math.max(...xs);
+    return lo.toFixed(digits) === hi.toFixed(digits) ? `${lo.toFixed(digits)}°` : `${lo.toFixed(digits)} to ${hi.toFixed(digits)}°`;
+  };
+  const rows = segs
+    .map((g) => {
+      const pts = fc.filter((p) => {
+        const t = Date.parse(p.time);
+        return t + DV_HOUR > g.s && t < g.e;
+      });
+      const lo = pts.map((p) => dvNum(p.comfort_min)).filter((v) => v != null);
+      const hi = pts.map((p) => dvNum(p.comfort_max)).filter((v) => v != null);
+      const promised = lo.length && hi.length ? `${Math.min(...lo).toFixed(0)} to ${Math.max(...hi).toFixed(0)}°` : "–";
+      return `<tr><td class="dv-mono">${dvHM(g.s)} to ${dvHM(g.e)}</td><td>${esc(g.action)}</td><td class="dv-num">${dvFmt(g.v, 0)}°</td><td class="dv-num">${promised}</td><td class="dv-num">${range(pts.map((p) => dvNum(p.outdoor)))}</td></tr>`;
+    })
+    .join("");
+  return `<div class="dv-scroll"><table class="dv-table"><thead><tr><th>Window</th><th>Action</th><th class="dv-num">Setpoint</th><th class="dv-num">Promised</th><th class="dv-num">Outdoor</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function dvInputs(states) {
+  const src = findEntity(states, "outdoor_temp_source");
+  const a = (src && src.attributes) || {};
+  const sources = a.source_health_sources || {};
+  const rows = Object.entries(sources).map(([name, s]) => {
+    const what = (s && (s.entity_id || s.source)) || "";
+    return `<tr><td>${esc(name.replace(/_/g, " "))}</td><td class="dv-mono">${esc(String(what).replace(/^entity:/, ""))}</td><td>${esc((s && s.status) || "")}</td></tr>`;
+  });
+  const occ = findEntity(states, "occupancy_forecast");
+  if (occ) rows.push(`<tr><td>occupancy</td><td class="dv-mono">${esc((occ.attributes && occ.attributes.source) || "")}</td><td>${esc(occ.state)}</td></tr>`);
+  if (a.electricity_rate != null) rows.push(`<tr><td>rate</td><td class="dv-mono">$${dvFmt(a.electricity_rate, 4)} / kWh</td><td></td></tr>`);
+  if (!rows.length) return dvEmpty("No source data.");
+  return `<div class="dv-scroll"><table class="dv-table"><tbody>${rows.join("")}</tbody></table></div>`;
+}
+
+function renderNowTab(states, hass, retro, dash, L) {
+  const tl = dvTimeline(states, retro, dash, L.full);
+  const src = findEntity(states, "outdoor_temp_source");
+  const health = src && src.attributes && src.attributes.source_health_total ? `${src.attributes.source_health_healthy} of ${src.attributes.source_health_total} ok` : "";
+  const legend = dvLegend([
+    ["k-indoor", "Indoor"],
+    ["k-indoor k-dash", "Indoor forecast"],
+    ...(dvP90(dash) ? [["k-fan", "90% of past errors"]] : []),
+    ["k-sp", "Setpoint"],
+    ["k-sp k-dash", "Planned setpoint"],
+    ["k-band", "Promised band"],
+    ["k-out", "Outdoor"],
+    ["k-run", "Ran"],
+    ["k-run k-planned", "Planned"],
+  ]);
+  return {
+    html: `
+      ${dvStatStrip(states, hass)}
+      ${dvCard("Last 24 h and next 24 h", `<span class="dv-readout" data-default=""></span>`, legend + tl.html, "dv-tl-card")}
+      <div class="dv-row dv-row-64">
+        ${dvCard("Plan", "", dvPlanTable(states))}
+        ${dvCard("Inputs", esc(health), dvInputs(states))}
+      </div>`,
+    model: tl.model,
+  };
+}
+
+// ── Model ────────────────────────────────────────────────────────────
+
+const DV_MODES = [
+  ["resist", "Drift", "drift"],
+  ["heat_1", "Heating", "heat"],
+  ["cool_1", "Cooling", "cool"],
+];
+
+function dvBins(mode) {
+  const bins = (mode && mode.bins) || {};
+  return Object.keys(bins)
+    .map((k) => ({ t: Number(k), d: dvNum(bins[k].mean_delta), n: dvNum(bins[k].count) || 0 }))
+    .filter((b) => Number.isFinite(b.t) && b.d != null)
+    .sort((p, q) => p.t - q.t);
+}
+
+function dvCurves(chart, detail, outdoorNow, W) {
+  const series = DV_MODES.map(([key, label, cls]) => ({ key, label, cls, bins: dvBins(chart[key]), trend: chart[key] && chart[key].trendline }));
+  const shown = series.flatMap((s) => s.bins.filter((b) => b.n >= 5));
+  if (shown.length < 3) return dvEmpty("Not enough observations yet.");
+
+  const ML = 64;
+  const MR = 44;
+  const tLo = Math.floor((Math.min(...shown.map((b) => b.t)) - 3) / 5) * 5;
+  const tHi = Math.ceil((Math.max(...shown.map((b) => b.t)) + 1) / 5) * 5;
+  const dLo = Math.floor(Math.min(...shown.map((b) => b.d)) - 0.5);
+  const dHi = Math.ceil(Math.max(...shown.map((b) => b.d)) + 0.5);
+  const top = 8;
+  const h = 300;
+  const x = dvScale(tLo, tHi, ML, W - MR);
+  const y = dvScale(dLo, dHi, top + h, top);
+  const parts = [];
+
+  for (const v of dvTicks(dLo, dHi, 8)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v > 0 ? "+" : ""}${v}</text>`);
+  }
+  parts.push(`<text x="0" y="${top + 8}">°/h</text>`);
+  if (outdoorNow != null && outdoorNow > tLo && outdoorNow < tHi) {
+    parts.push(`<line x1="${x(outdoorNow).toFixed(1)}" x2="${x(outdoorNow).toFixed(1)}" y1="${top}" y2="${top + h}" class="dv-now"/>`);
+    parts.push(`<text x="${(x(outdoorNow) + 4).toFixed(1)}" y="${top + h - 4}" class="dv-strong">now ${outdoorNow.toFixed(0)}°</text>`);
+  }
+  for (const s of series) {
+    const vis = s.bins.filter((b) => b.n >= 5);
+    if (!vis.length) continue;
+    if (s.trend && dvNum(s.trend.slope) != null) {
+      const a = vis[0].t;
+      const b = vis[vis.length - 1].t;
+      const f = (t) => s.trend.slope * t + s.trend.intercept;
+      parts.push(`<line x1="${x(a).toFixed(1)}" x2="${x(b).toFixed(1)}" y1="${y(f(a)).toFixed(1)}" y2="${y(f(b)).toFixed(1)}" class="dv-line dv-thin dv-${s.cls}"/>`);
+    }
+    for (const b of vis) {
+      parts.push(
+        `<circle cx="${x(b.t).toFixed(1)}" cy="${y(b.d).toFixed(1)}" r="3.2" class="dv-dot dv-${s.cls}-fill${b.n < 20 ? " dv-faint" : ""}"><title>${s.label} at ${b.t}°: ${dvSigned(b.d)}°/h, n=${b.n}</title></circle>`
+      );
+    }
+  }
+
+  // Coverage strip on the same x axis
+  const rows = DV_MODES.concat([["auxiliary_heat_1", "Aux", "aux"]]);
+  const cTop = top + h + 26;
+  const rowH = 14;
+  const cellW = (x(tLo + 1) - x(tLo)) * 0.86;
+  rows.forEach(([key, label], r) => {
+    const yy = cTop + r * (rowH + 4);
+    parts.push(`<rect x="${ML}" y="${yy}" width="${W - MR - ML}" height="${rowH}" class="dv-q0"/>`);
+    parts.push(`<text x="0" y="${yy + 11}">${label}</text>`);
+    const conf = detail[key] ? dvNum(detail[key].confidence) : null;
+    parts.push(`<text x="${W}" y="${yy + 11}" text-anchor="end" class="dv-strong">${conf == null ? "" : conf.toFixed(0) + "%"}</text>`);
+    for (const b of dvBins(chart[key])) {
+      if (b.n < 1 || b.t < tLo || b.t > tHi) continue;
+      const q = b.n >= 200 ? 4 : b.n >= 50 ? 3 : b.n >= 10 ? 2 : 1;
+      parts.push(`<rect x="${(x(b.t) - cellW / 2).toFixed(1)}" y="${yy}" width="${cellW.toFixed(1)}" height="${rowH}" class="dv-q${q}"><title>${label} at ${b.t}°: n=${b.n}</title></rect>`);
+    }
+  });
+  const axisY = cTop + rows.length * (rowH + 4) + 12;
+  for (const v of dvTicks(tLo, tHi, 8)) {
+    parts.push(`<line x1="${x(v).toFixed(1)}" x2="${x(v).toFixed(1)}" y1="${top}" y2="${top + h}" class="dv-grid"/>`);
+    parts.push(`<text x="${x(v).toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${v}°</text>`);
+  }
+  const H = axisY;
+  return (
+    dvLegend([
+      ["k-drift k-dot", "Drift, compressor off"],
+      ["k-heat k-dot", "Heating"],
+      ["k-cool k-dot", "Cooling"],
+      ["k-faint k-dot", "5 to 19 obs"],
+    ]) +
+    `<svg class="dv-svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Indoor change per hour by outdoor temperature, with observation counts per bin">${parts.join("")}</svg>` +
+    `<div class="dv-legend dv-legend-q"><span>obs per 1° bin</span><span><i class="dv-key dv-q1"></i>1 to 9</span><span><i class="dv-key dv-q2"></i>10 to 49</span><span><i class="dv-key dv-q3"></i>50 to 199</span><span><i class="dv-key dv-q4"></i>200+</span></div>`
+  );
+}
+
+function dvParams(states, chart, detail) {
+  const tc = findEntity(states, "thermal_time_constant");
+  const heat = findEntity(states, "effective_heating_rate");
+  const cool = findEntity(states, "effective_cooling_rate");
+  const aux = findEntity(states, "aux_heat_threshold");
+  const tca = (tc && tc.attributes) || {};
+  const rows = [];
+  if (hasValue(tc)) rows.push(["Time constant", `${fmt(tc, 1)} h`]);
+  if (tca.envelope_loss_btu_per_hour_f != null) rows.push(["Envelope loss", `${dvFmt(tca.envelope_loss_btu_per_hour_f, 1)} BTU/h·°`]);
+  if (hasValue(heat)) rows.push(["Heating rate now", `${dvSigned(heat.state)} °/h`]);
+  if (hasValue(cool)) rows.push(["Cooling rate now", `${dvSigned(cool.state)} °/h`]);
+  if (hasValue(aux)) rows.push(["Aux threshold", `${fmt(aux, 1)}°${aux.attributes && aux.attributes.event_count != null ? `, ${aux.attributes.event_count} events` : ""}`]);
+  for (const [key, label] of DV_MODES) {
+    const t = chart[key] && chart[key].trendline;
+    if (t && dvNum(t.slope) != null) rows.push([`${label} fit`, `${Number(t.slope).toFixed(4)}·T ${t.intercept < 0 ? "−" : "+"} ${Math.abs(t.intercept).toFixed(2)}`]);
+  }
+  for (const [key, label] of DV_MODES.concat([["auxiliary_heat_1", "Aux"]])) {
+    if (detail[key]) rows.push([`${label} obs`, Number(detail[key].observations || 0).toLocaleString()]);
+  }
+  if (!rows.length) return dvEmpty("No parameters yet.");
+  return `<table class="dv-table dv-kv"><tbody>${rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="dv-mono dv-num">${esc(v)}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function dvLeadChart(ver, W) {
+  const leads = (ver && ver.leads) || [];
+  if (!leads.length) return dvEmpty(`Scoring starts with the next plan. ${(ver && ver.samples) || 0} samples so far.`);
+  const ML = 30;
+  const MR = 118;
+  const top = 8;
+  const h = 170;
+  const xMax = Math.max(...leads.map((l) => l.lead));
+  const yMax = Math.max(0.5, ...leads.map((l) => Math.max(l.mae, l.no_change_mae))) * 1.15;
+  const x = dvScale(0, xMax, ML, W - MR);
+  const y = dvScale(0, yMax, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yMax, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  const line = (key, cls, fill) => {
+    parts.push(`<path d="${dvPath(leads.map((l) => [x(l.lead), y(l[key])]))}" class="dv-line ${cls}"/>`);
+    for (const l of leads) {
+      parts.push(`<circle cx="${x(l.lead).toFixed(1)}" cy="${y(l[key]).toFixed(1)}" r="4" class="dv-dot ${fill}"><title>${l.lead} h: ${l[key].toFixed(2)}°, n=${l.n}</title></circle>`);
+    }
+  };
+  line("no_change_mae", "dv-drift dv-dash", "dv-drift-fill");
+  line("mae", "dv-indoor", "dv-indoor-fill");
+  const last = leads[leads.length - 1];
+  let ya = y(last.mae);
+  let yb = y(last.no_change_mae);
+  if (Math.abs(ya - yb) < 14) {
+    const mid = (ya + yb) / 2;
+    const below = ya >= yb;
+    ya = mid + (below ? 7 : -7);
+    yb = mid + (below ? -7 : 7);
+  }
+  parts.push(`<text x="${W - MR + 10}" y="${(ya + 4).toFixed(1)}" class="dv-strong">Forecast ${last.mae.toFixed(2)}</text>`);
+  parts.push(`<text x="${W - MR + 10}" y="${(yb + 4).toFixed(1)}">No change ${last.no_change_mae.toFixed(2)}</text>`);
+  for (const l of leads) parts.push(`<text x="${x(l.lead).toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${l.lead} h</text>`);
+  const rows = leads
+    .map((l) => {
+      const skill = l.no_change_mae > 0 ? Math.round((1 - l.mae / l.no_change_mae) * 100) : null;
+      return `<tr><td>${l.lead} h</td><td>${l.n}</td><td>${l.mae.toFixed(2)}</td><td>${dvSigned(l.bias)}</td><td>${l.p90.toFixed(2)}</td><td>${l.no_change_mae.toFixed(2)}</td><td>${skill == null ? "–" : skill + "%"}</td></tr>`;
+    })
+    .join("");
+  return (
+    `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Forecast error by lead time against assuming no change">${parts.join("")}</svg>` +
+    `<div class="dv-scroll"><table class="dv-table dv-mono dv-right"><thead><tr><th>Lead</th><th>n</th><th>MAE</th><th>Bias</th><th>P90</th><th>No change</th><th>Skill</th></tr></thead><tbody>${rows}</tbody></table></div>`
+  );
+}
+
+/** Diverging bars: measured minus predicted, per category. */
+function dvBiasBars(rows, labelOf, W, tickEvery) {
+  if (!rows.length) return dvEmpty("No scored forecasts yet.");
+  const ML = 30;
+  const MR = 6;
+  const top = 8;
+  const h = 150;
+  const span = Math.max(0.5, ...rows.map((r) => Math.abs(r.bias))) * 1.15;
+  const x = dvScale(0, rows.length, ML, W - MR);
+  const y = dvScale(-span, span, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(-span, span, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v > 0 ? "+" : ""}${v}</text>`);
+  }
+  const bw = Math.max(2, (x(1) - x(0)) * 0.72);
+  rows.forEach((r, i) => {
+    const cx = x(i + 0.5);
+    const y0 = y(0);
+    const yv = y(r.bias);
+    parts.push(
+      `<rect x="${(cx - bw / 2).toFixed(1)}" y="${Math.min(y0, yv).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, Math.abs(yv - y0)).toFixed(1)}" rx="2" class="${r.bias < 0 ? "dv-indoor-fill" : "dv-aux-fill"}"><title>${labelOf(r)}: bias ${dvSigned(r.bias)}°, MAE ${r.mae.toFixed(2)}°, n=${r.n}</title></rect>`
+    );
+    if (i % tickEvery === 0) parts.push(`<text x="${cx.toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${labelOf(r)}</text>`);
+  });
+  return `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Forecast bias by category">${parts.join("")}</svg>`;
+}
+
+function renderModelTab(states, dash, L) {
+  const profiler = findEntity(states, "profiler_status");
+  const pa = (profiler && profiler.attributes) || {};
+  const chart = pa.chart_data || {};
+  const detail = pa.mode_detail || {};
+  const outdoor = findEntity(states, "outdoor_temp_source");
+  const ver = (dash && dash.verification) || null;
+  const meta = ver && ver.samples ? `${ver.samples} samples, ${ver.span_days} d` : "";
+  const biasLegend = dvLegend([
+    ["k-indoor k-box", "Colder than forecast"],
+    ["k-aux k-box", "Warmer"],
+  ]);
+  const byHour = (ver && ver.by_hour) || [];
+  const byOut = (ver && ver.by_outdoor) || [];
+  return `
+    <div class="dv-row dv-row-73">
+      ${dvCard("Response by outdoor temperature", pa.observations != null ? `${Number(pa.observations).toLocaleString()} obs` : "", dvCurves(chart, detail, hasValue(outdoor) ? Number(outdoor.state) : null, L.wide73))}
+      ${dvCard("Parameters", "", dvParams(states, chart, detail))}
+    </div>
+    <div class="dv-row dv-row-3">
+      ${dvCard("Forecast error by lead", esc(meta), dvLeadChart(ver, L.third))}
+      ${dvCard("1 h bias by hour of day", "", byHour.length ? biasLegend + dvBiasBars(byHour, (r) => dvPad(r.hour), L.third, 3) : dvEmpty("No scored forecasts yet."))}
+      ${dvCard("1 h bias by outdoor temperature", "", byOut.length ? biasLegend + dvBiasBars(byOut, (r) => `${r.bin}°`, L.third, 1) : dvEmpty("No scored forecasts yet."))}
+    </div>`;
+}
+
+// ── Energy ───────────────────────────────────────────────────────────
+
+function dvDayLabel(iso) {
+  const d = new Date(iso + "T12:00:00");
+  return `${DV_DOW[d.getDay()]} ${d.getDate()}`;
+}
+
+function dvScatter(days, fit, auxHours, cooling, W) {
+  const pts = days
+    .filter((d) => d.out != null)
+    .map((d) => ({ d: d.d, x: d.out, y: cooling ? d.cool : d.heat + d.aux, aux: !cooling && d.aux >= auxHours, heat: d.heat, auxH: d.aux }));
+  if (pts.length < 3) return dvEmpty(`${pts.length} full days logged. Needs 3.`);
+  const ML = 34;
+  const MR = 10;
+  const top = 20;
+  const h = 270;
+  const xLo = Math.floor((Math.min(...pts.map((p) => p.x)) - 2) / 10) * 10;
+  const xHi = Math.ceil((Math.max(...pts.map((p) => p.x)) + 2) / 10) * 10;
+  const yHi = Math.max(4, Math.ceil(Math.max(...pts.map((p) => p.y)) * 1.1));
+  const x = dvScale(xLo, xHi, ML, W - MR);
+  const y = dvScale(0, yHi, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yHi, 5)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  for (const v of dvTicks(xLo, xHi, 6)) parts.push(`<text x="${x(v).toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${v}°</text>`);
+  parts.push(`<text x="0" y="10">h/day</text>`);
+  if (fit && !cooling) {
+    const f = (t) => Math.max(0, fit.intercept + fit.slope * Math.max(0, fit.balance - t));
+    const ts = [];
+    for (let t = xLo; t <= xHi; t += 0.5) if (f(t) <= yHi) ts.push(t);
+    const cy = (v) => Math.max(top, Math.min(top + h, y(v)));
+    const up = ts.map((t) => [x(t), cy(f(t) + fit.sd)]);
+    const dn = ts.map((t) => [x(t), cy(Math.max(0, f(t) - fit.sd))]).reverse();
+    parts.push(`<path d="${dvPath(up.concat(dn))}Z" class="dv-band"/>`);
+    parts.push(`<path d="${dvPath(ts.map((t) => [x(t), cy(f(t))]))}" class="dv-line dv-sp dv-thin"/>`);
+  }
+  for (const p of pts) {
+    const title = `${dvDayLabel(p.d)} ${p.d.slice(0, 7)}: ${p.x.toFixed(0)}°, ${cooling ? p.y.toFixed(1) + " h" : p.heat.toFixed(1) + " h" + (p.auxH > 0.01 ? " + " + p.auxH.toFixed(1) + " h aux" : "")}`;
+    parts.push(`<circle cx="${x(p.x).toFixed(1)}" cy="${y(p.y).toFixed(1)}" r="${p.aux ? 4.5 : 4}" class="dv-dot ${cooling ? "dv-cool-fill" : p.aux ? "dv-aux-fill dv-ring" : "dv-heat-fill"}"><title>${title}</title></circle>`);
+  }
+  const stats = fit && !cooling
+    ? `<div class="dv-statline"><span>h = ${fit.slope.toFixed(2)} × (${fit.balance.toFixed(0)} − T) ${fit.intercept < 0 ? "−" : "+"} ${Math.abs(fit.intercept).toFixed(1)}</span><span>R² ${fit.r2.toFixed(2)}</span><span>SD ${fit.sd.toFixed(1)} h</span><span>n ${fit.n}</span></div>`
+    : `<div class="dv-statline"><span>n ${pts.length}</span>${cooling ? "" : "<span>fit needs 10 days</span>"}</div>`;
+  const legend = cooling
+    ? dvLegend([["k-cool k-dot", "Cooling day"]])
+    : dvLegend([
+        ["k-heat k-dot", "Compressor only"],
+        ["k-aux k-dot k-ring", "Aux ran"],
+        ["k-sp", "Fit"],
+        ["k-band", "±1 SD"],
+      ]);
+  return legend + `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Daily runtime hours against mean outdoor temperature">${parts.join("")}</svg>` + stats;
+}
+
+function dvEnergyScatter(energy, W) {
+  const pts = ((energy && energy.days) || []).filter((d) => d.out != null && d.kwh != null);
+  if (pts.length < 3) return dvEmpty(`${pts.length} metered days. Baseline ${(energy && energy.baseline_days) || 0}, needs ${((energy && energy.baseline_days) || 0) + ((energy && energy.days_until_fit) || 0)}.`);
+  const ML = 34;
+  const MR = 10;
+  const top = 20;
+  const h = 210;
+  const xLo = Math.floor((Math.min(...pts.map((p) => p.out)) - 2) / 10) * 10;
+  const xHi = Math.ceil((Math.max(...pts.map((p) => p.out)) + 2) / 10) * 10;
+  const yHi = Math.max(4, Math.ceil(Math.max(...pts.map((p) => p.kwh)) * 1.1));
+  const x = dvScale(xLo, xHi, ML, W - MR);
+  const y = dvScale(0, yHi, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yHi, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  for (const v of dvTicks(xLo, xHi, 6)) parts.push(`<text x="${x(v).toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${v}°</text>`);
+  parts.push(`<text x="0" y="10">kWh</text>`);
+  for (const p of pts) {
+    const cls = p.label === "optimized" ? "dv-indoor-fill" : p.label === "baseline" ? "dv-drift-fill" : "dv-drift-fill dv-faint";
+    parts.push(`<circle cx="${x(p.out).toFixed(1)}" cy="${y(p.kwh).toFixed(1)}" r="4" class="dv-dot ${cls}"><title>${p.d}: ${p.out.toFixed(0)}°, ${p.kwh.toFixed(1)} kWh, ${esc(p.label)}</title></circle>`);
+  }
+  return (
+    dvLegend([
+      ["k-drift k-dot", "Baseline day"],
+      ["k-indoor k-dot", "Optimized day"],
+      ["k-faint k-dot", "Mixed"],
+    ]) +
+    `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Daily metered HVAC energy against mean outdoor temperature">${parts.join("")}</svg>` +
+    `<div class="dv-statline"><span>${dvFmt(energy.kwh_per_hdd, 2)} kWh/HDD</span><span>${dvFmt(energy.kwh_per_cdd, 2)} kWh/CDD</span><span>${esc(energy.source)}</span></div>`
+  );
+}
+
+function dvMonths(days, W) {
+  const by = {};
+  for (const d of days) {
+    const k = d.d.slice(0, 7);
+    by[k] = by[k] || { heat: 0, aux: 0, cool: 0, n: 0 };
+    by[k].heat += d.heat;
+    by[k].aux += d.aux;
+    by[k].cool += d.cool;
+    by[k].n += 1;
+  }
+  const keys = Object.keys(by).sort().slice(-13);
+  if (!keys.length) return dvEmpty("No full days logged yet.");
+  const ML = 34;
+  const MR = 6;
+  const top = 18;
+  const h = 220;
+  const yHi = Math.max(10, ...keys.map((k) => by[k].heat + by[k].aux + by[k].cool)) * 1.08;
+  const x = dvScale(0, Math.max(keys.length, 6), ML, W - MR);
+  const y = dvScale(0, yHi, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yHi, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  const bw = Math.min(40, (x(1) - x(0)) * 0.62);
+  keys.forEach((k, i) => {
+    const m = by[k];
+    const cx = x(i + 0.5);
+    let base = 0;
+    for (const [key, cls, label] of [["heat", "dv-heat-fill", "heating"], ["aux", "dv-aux-fill", "aux"], ["cool", "dv-cool-fill", "cooling"]]) {
+      const v = m[key];
+      if (v < 0.5) continue;
+      const y0 = y(base) - (base > 0 ? 2 : 0);
+      const y1 = y(base + v);
+      parts.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, y0 - y1).toFixed(1)}" class="${cls}"><title>${k}: ${v.toFixed(0)} h ${label}, ${m.n} days</title></rect>`);
+      base += v;
+    }
+    parts.push(`<text x="${cx.toFixed(1)}" y="${(y(base) - 5).toFixed(1)}" text-anchor="middle">${base.toFixed(0)}</text>`);
+    const mo = Number(k.slice(5, 7)) - 1;
+    parts.push(`<text x="${cx.toFixed(1)}" y="${top + h + 14}" text-anchor="middle"${mo === 0 ? ' class="dv-strong"' : ""}>${DV_MONTH[mo]}${mo === 0 || i === 0 ? " " + k.slice(2, 4) : ""}</text>`);
+  });
+  return (
+    dvLegend([
+      ["k-heat k-box", "Heating"],
+      ["k-aux k-box", "Aux"],
+      ["k-cool k-box", "Cooling"],
+    ]) + `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Runtime hours by month">${parts.join("")}</svg>`
+  );
+}
+
+function dvHeatmap(hours, cooling, W) {
+  const idx = cooling ? 4 : 3;
+  const by = {};
+  for (const hr of hours) {
+    const day = hr[0].slice(0, 10);
+    (by[day] = by[day] || {})[Number(hr[0].slice(11, 13))] = hr;
+  }
+  const dates = Object.keys(by).sort().slice(-21);
+  if (!dates.length) return dvEmpty("No hours logged yet.");
+  const ML = 52;
+  const MR = 86;
+  const top = 4;
+  const rowH = 18;
+  const x = dvScale(0, 24, ML, W - MR);
+  const cw = x(1) - x(0);
+  const parts = [];
+  dates.forEach((date, r) => {
+    const yy = top + r * rowH;
+    parts.push(`<text x="0" y="${yy + 12}">${dvDayLabel(date)}</text>`);
+    let total = 0;
+    const outs = [];
+    for (let hcol = 0; hcol < 24; hcol++) {
+      const rec = by[date][hcol];
+      if (!rec) continue;
+      const v = rec[idx] || 0;
+      total += v;
+      if (rec[2] != null) outs.push(rec[2]);
+      const q = v >= 46 ? 4 : v >= 31 ? 3 : v >= 16 ? 2 : v >= 1 ? 1 : 0;
+      parts.push(`<rect x="${(x(hcol) + 1).toFixed(1)}" y="${yy + 1}" width="${Math.max(1, cw - 2).toFixed(1)}" height="${rowH - 2}" class="dv-q${q}"><title>${dvDayLabel(date)} ${dvPad(hcol)}:00: ${v.toFixed(0)} min${rec[2] != null ? ", " + rec[2].toFixed(0) + "° out" : ""}</title></rect>`);
+    }
+    const mean = outs.length ? outs.reduce((p, q) => p + q, 0) / outs.length : null;
+    parts.push(`<text x="${W}" y="${yy + 12}" text-anchor="end">${(total / 60).toFixed(1)} h${mean == null ? "" : " · " + mean.toFixed(0) + "°"}</text>`);
+  });
+  const axisY = top + dates.length * rowH + 14;
+  for (const hcol of [0, 6, 12, 18, 23]) parts.push(`<text x="${x(hcol + 0.5).toFixed(1)}" y="${axisY}" text-anchor="middle">${dvPad(hcol)}</text>`);
+  return (
+    `<div class="dv-legend dv-legend-q"><span>min per hour</span><span><i class="dv-key dv-q0"></i>0</span><span><i class="dv-key dv-q1"></i>1 to 15</span><span><i class="dv-key dv-q2"></i>16 to 30</span><span><i class="dv-key dv-q3"></i>31 to 45</span><span><i class="dv-key dv-q4"></i>46 to 60</span></div>` +
+    `<svg class="dv-svg" width="${W}" height="${axisY + 6}" viewBox="0 0 ${W} ${axisY + 6}" role="img" aria-label="${cooling ? "Cooling" : "Heating"} minutes per hour by day">${parts.join("")}</svg>`
+  );
+}
+
+function dvRecoveries(dash) {
+  const done = ((dash && dash.recoveries) || []).slice(-14);
+  const planned = ((dash && dash.plan && dash.plan.recovery) || []).filter((p) => p.start && p.deadline && p.start > (dash.generated || ""));
+  if (!done.length && !planned.length) return dvEmpty("No morning recoveries logged yet.");
+  const longest = Math.max(60, ...done.map((r) => r.minutes || 0));
+  const hm = (s) => (s ? s.slice(11, 16) : "–");
+  const mins = (a, b) => {
+    const [ah, am] = a.slice(11, 16).split(":").map(Number);
+    const [bh, bm] = b.slice(11, 16).split(":").map(Number);
+    return ah * 60 + am - (bh * 60 + bm);
+  };
+  const rows = done.map((r) => {
+    let late = "";
+    if (r.deadline && r.arrived) {
+      const m = mins(r.arrived, r.deadline);
+      late = m > 0 ? `${m} late` : m < 0 ? `${-m} early` : "on time";
+    }
+    const bar = r.minutes == null ? "not reached" : r.minutes === 0 ? "already warm" : `<span class="dv-inbar"><i style="width:${Math.min(100, (r.minutes / longest) * 100).toFixed(1)}%"></i></span>${r.minutes}`;
+    return `<tr><td>${dvDayLabel(r.start.slice(0, 10))}</td><td>${hm(r.start)}</td><td>${dvFmt(r.out, 0)}°</td><td>${dvFmt(r.in, 1)}°</td><td>${hm(r.arrived)}</td><td class="dv-barcell">${bar}</td><td>${r.aux > 0.5 ? r.aux.toFixed(0) : ""}</td><td>${late}</td></tr>`;
+  });
+  for (const p of planned) {
+    rows.push(`<tr class="dv-planrow"><td>${dvDayLabel(p.start.slice(0, 10))}</td><td>${hm(p.start)}</td><td></td><td></td><td>${hm(p.deadline)} due</td><td>planned</td><td></td><td></td></tr>`);
+  }
+  return `<div class="dv-scroll"><table class="dv-table dv-mono"><thead><tr><th>Day</th><th>Step</th><th>Out</th><th>In</th><th>Warm</th><th>Minutes</th><th>Aux</th><th>Deadline</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+}
+
+function dvSavingsStrip(states, dash) {
+  const measured = findEntity(states, "measured_savings_30d");
+  const trial = findEntity(states, "ab_trial");
+  const total = findEntity(states, "savings_kwh_cumulative");
+  const src = findEntity(states, "outdoor_temp_source");
+  const e = (dash && dash.energy) || {};
+  const ma = (measured && measured.attributes) || {};
+  const cell = (label, value, sub) =>
+    `<div class="dv-stat"><div class="dv-stat-label">${label}</div><div class="dv-stat-value dv-small">${value}</div><div class="dv-stat-sub">${sub || "&nbsp;"}</div></div>`;
+  const reset = total && total.attributes && total.attributes.last_reset ? new Date(total.attributes.last_reset) : null;
+  const need = (e.baseline_days || 0) + (e.days_until_fit || 0);
+  return `<section class="card dv-stats">
+    ${cell("Measured, 30 d", hasValue(measured) ? `${fmt(measured, 1)}<small> kWh</small>` : "–", ma.saved_pct != null ? `${dvFmt(ma.saved_pct, 1)}%, ${ma.days_compared} days` : `baseline ${e.baseline_days || 0} of ${need} days`)}
+    ${cell("A/B trial", trial ? esc(trial.state) : "–", trial && trial.attributes && trial.attributes.difference_pct != null ? `${dvSigned(trial.attributes.difference_pct, 1)}%` : "")}
+    ${cell("Ledger", hasValue(total) ? `${fmt(total, 1)}<small> kWh</small>` : "–", reset ? `since ${DV_MONTH[reset.getMonth()]} ${reset.getDate()}` : "")}
+    ${cell("Rate", src && src.attributes && src.attributes.electricity_rate != null ? `$${dvFmt(src.attributes.electricity_rate, 4)}<small> / kWh</small>` : "–", "")}
+  </section>`;
+}
+
+function renderEnergyTab(states, dash, L) {
+  if (!dash) return dvEmpty("Loading archive…");
+  const days = dash.days || [];
+  const recent = days.slice(-30);
+  const cooling = recent.reduce((s, d) => s + d.cool, 0) > recent.reduce((s, d) => s + d.heat + d.aux, 0);
+  const auxDays = days.filter((d) => d.aux >= (dash.aux_day_hours || 0.25)).length;
+  return `
+    <div class="dv-row dv-row-64">
+      ${dvCard(`${cooling ? "Cooling" : "Heating"} hours vs outdoor`, `${days.length} days${cooling ? "" : `, ${auxDays} with aux`}`, dvScatter(days, dash.fit, dash.aux_day_hours || 0.25, cooling, L.wide64))}
+      ${dvCard("Runtime by month", "hours", dvMonths(days, L.narrow64))}
+    </div>
+    <div class="dv-row dv-row-2">
+      ${dvCard(`${cooling ? "Cooling" : "Heating"} minutes by hour`, "", dvHeatmap(dash.hours || [], cooling, L.half))}
+      ${dvCard("Morning recoveries", "", dvRecoveries(dash))}
+    </div>
+    <div class="dv-row dv-row-2">
+      ${dvCard("Metered kWh vs outdoor", "", dvEnergyScatter(dash.energy, L.half))}
+      ${dvSavingsStrip(states, dash)}
+    </div>`;
+}
+
 class HeatPumpOptimizerPanel extends HTMLElement {
   constructor() {
     super();
@@ -1804,11 +2801,66 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     this._renderScheduled = false;
     this._rafId = null;
     this._lastFingerprint = "";
+    this._dash = null;           // dashboard archive payload (websocket)
+    this._dashFetchedAt = 0;
+    this._dashFetching = false;
+    this._tlModel = null;        // timeline scales for the crosshair
+    this._width = 0;
+    this._resizeObserver = null;
+    this._tab = null;
+    try {
+      this._tab = window.localStorage.getItem("hpo.tab");
+    } catch (_e) {
+      this._tab = null;
+    }
+  }
+
+  connectedCallback() {
+    // Charts are drawn at the measured width, so a resize means a redraw.
+    if (typeof ResizeObserver === "undefined" || this._resizeObserver) return;
+    this._resizeObserver = new ResizeObserver(() => {
+      const w = this._container.clientWidth || 0;
+      if (Math.abs(w - this._width) > 8) this._scheduleRender();
+    });
+    this._resizeObserver.observe(this._container);
   }
 
   disconnectedCallback() {
     if (this._rafId) {
       cancelAnimationFrame(this._rafId);
+      this._rafId = null;
+      this._renderScheduled = false;
+    }
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+  }
+
+  _scheduleRender() {
+    if (this._renderScheduled) return;
+    this._renderScheduled = true;
+    this._rafId = requestAnimationFrame(() => {
+      this._renderScheduled = false;
+      this._rafId = null;
+      this._render();
+    });
+  }
+
+  async _maybeRefreshDash() {
+    if (this._dashFetching || !this._hass || typeof this._hass.callWS !== "function") return;
+    const now = Date.now();
+    if (now - this._dashFetchedAt < 5 * 60 * 1000) return;
+    this._dashFetching = true;
+    this._dashFetchedAt = now;
+    try {
+      this._dash = await this._hass.callWS({ type: "heatpump_optimizer/dashboard" });
+      this._scheduleRender();
+    } catch (e) {
+      // Older backend, or the entry is still loading: the tabs say so.
+      console.warn("HPO: dashboard fetch failed", e);
+    } finally {
+      this._dashFetching = false;
     }
   }
 
@@ -1816,6 +2868,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     this._hass = hass;
     indexEntities(hass);
     this._maybeRefreshHistory();
+    this._maybeRefreshDash();
 
     // Only re-render when optimizer-relevant entity states actually change.
     // HA pushes hass updates for ALL entities (dozens/sec), so rendering on
@@ -1826,14 +2879,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     if (fp === this._lastFingerprint) return;
     this._lastFingerprint = fp;
 
-    if (!this._renderScheduled) {
-      this._renderScheduled = true;
-      this._rafId = requestAnimationFrame(() => {
-        this._renderScheduled = false;
-        this._rafId = null;
-        this._render();
-      });
-    }
+    this._scheduleRender();
   }
 
   /** Build a lightweight fingerprint of optimizer + climate entity states. */
@@ -1856,13 +2902,14 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     try {
       const s = this._hass.states;
       const indoorE = findEntity(s, "apparent_temperature");
+      const indoorWE = findEntity(s, "weighted_indoor_temp");
       const outdoorE = findEntity(s, "outdoor_temp_source");
       const predictedE = findEntity(s, "predicted_indoor_temp");
       const powerE = findEntity(s, "net_hvac_power");
       const auxE = findBinary(s, "aux_heat_active");
       // Find the climate entity for hvac_action history
       const climateE = Object.values(s).find(e => e.entity_id.startsWith("climate.") && e.attributes?.hvac_action != null);
-      const ids = [indoorE, outdoorE, predictedE, powerE, auxE].filter(Boolean).map(e => e.entity_id).join(",");
+      const ids = [indoorE, indoorWE, outdoorE, predictedE, powerE, auxE].filter(Boolean).map(e => e.entity_id).join(",");
       if (!ids) return;
       const start = new Date(now - 24 * 60 * 60 * 1000).toISOString();
       const fetches = [
@@ -1879,19 +2926,35 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         if (series.length > 0) byId[series[0].entity_id] = series;
       }
       // Extract hvac_action timeline from climate entity history
+      // A thermostat in heat_cool never changes *state*; its action and
+      // setpoints change as attributes, and only last_updated moves then.
       let hvacActions = [];
+      let setpoints = [];
       if (Array.isArray(climateData)) {
         for (const series of climateData) {
           if (series.length > 0 && series[0].entity_id === climateE?.entity_id) {
             hvacActions = series.map(pt => ({
-              last_changed: pt.last_changed,
+              last_changed: pt.last_updated || pt.last_changed,
               state: pt.attributes?.hvac_action || "idle",
             }));
+            setpoints = series.map(pt => {
+              const a = pt.attributes || {};
+              const single = dvNum(a.temperature);
+              const low = dvNum(a.target_temp_low);
+              const high = dvNum(a.target_temp_high);
+              return {
+                t: Date.parse(pt.last_updated || pt.last_changed),
+                low: low != null ? low : (pt.state === "heat" ? single : null),
+                high: high != null ? high : (pt.state === "cool" ? single : null),
+              };
+            }).filter(pt => Number.isFinite(pt.t));
           }
         }
       }
       this._retro = {
         indoor:    byId[indoorE?.entity_id]    || [],
+        indoorW:   byId[indoorWE?.entity_id]   || [],
+        setpoints,
         outdoor:   byId[outdoorE?.entity_id]   || [],
         predicted: byId[predictedE?.entity_id] || [],
         power:     byId[powerE?.entity_id]     || [],
@@ -1931,12 +2994,57 @@ class HeatPumpOptimizerPanel extends HTMLElement {
     const isProjected = tierVal === "projected";
     const showSavings = !isLearning;  // projected and above show savings
 
+    // Tabs: the original cards live under Overview; the rest are wide.
+    const tab = DV_TABS.some(([k]) => k === this._tab) ? this._tab : (isLearning ? "overview" : "now");
+    const width = this._container.clientWidth || 1200;
+    this._width = width;
+    const inner = Math.min(width, tab === "overview" ? 720 : 1500) - 32;
+    const two = inner >= 900;
+    const three = inner >= 1100;
+    const gap = 12;
+    const pad = 34; // card padding and border
+    const fit = (w) => Math.max(240, Math.floor(w - pad));
+    const L = {
+      full: fit(inner),
+      wide64: fit(two ? (inner - gap) * 0.64 : inner),
+      narrow64: fit(two ? (inner - gap) * 0.36 : inner),
+      wide73: fit(two ? (inner - gap) * 0.72 : inner),
+      half: fit(two ? (inner - gap) / 2 : inner),
+      third: fit(three ? (inner - 2 * gap) / 3 : inner),
+    };
+    this._tlModel = null;
+    let dashBody = "";
+    if (tab === "now") {
+      const built = renderNowTab(s, this._hass, this._retro, this._dash, L);
+      dashBody = built.html;
+      this._tlModel = built.model;
+    } else if (tab === "model") {
+      dashBody = renderModelTab(s, this._dash, L);
+    } else if (tab === "energy") {
+      dashBody = renderEnergyTab(s, this._dash, L);
+    }
+    const planAt = Date.parse(findEntity(s, "schedule")?.attributes?.last_optimization || "");
+    const chips = [
+      this._dash?.plan?.monitor_only ? `<span class="dv-chip">Monitor only</span>` : "",
+      Number.isFinite(planAt) ? `<span>plan ${dvHM(planAt)}</span>` : "",
+    ].join("");
+    const dark = !!this._hass.themes?.darkMode;
+    const panelClass = ["panel", tab !== "overview" ? "wide" : "", dark ? "dv-dark" : "", two ? "" : "dv-narrow", three ? "" : "dv-mid"]
+      .filter(Boolean).join(" ");
+
     this._container.innerHTML = `
-      <div class="panel">
+      <div class="${panelClass}">
         <header class="header">
-          <h1>Heat Pump Optimizer</h1>
+          <div class="header-row">
+            <h1>Heat Pump Optimizer</h1>
+            <div class="dv-chips">${chips}</div>
+          </div>
+          <div class="tabs" role="tablist">
+            ${DV_TABS.map(([k, label]) => `<button class="tab" role="tab" data-tab="${k}" aria-selected="${k === tab}">${label}</button>`).join("")}
+          </div>
         </header>
         ${renderAlerts(s)}
+        ${tab !== "overview" ? dashBody : `
         ${isLearning ? renderWelcomeCard(s) : ""}
         ${renderHeroStrip(s, this._hass)}
         ${renderEnvironmentCard(s, this._hass)}
@@ -1955,6 +3063,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
         ${renderBuildingCard(s, this._hass)}
         ${showSavings ? renderSavingsCard(s, this._hass, isProjected) : renderSnapshotCard(s, this._hass)}
         ${renderHealthCard(s, this._hass)}
+        `}
       </div>
     `;
 
@@ -1970,6 +3079,41 @@ class HeatPumpOptimizerPanel extends HTMLElement {
   }
 
   _bindEvents() {
+    this._container.querySelectorAll(".tab").forEach((el) => {
+      el.addEventListener("click", () => {
+        this._tab = el.dataset.tab;
+        try {
+          window.localStorage.setItem("hpo.tab", this._tab);
+        } catch (_e) {
+          // private mode: the choice just does not persist
+        }
+        this._render();
+      });
+    });
+
+    const tl = this._container.querySelector(".dv-tl");
+    const readout = this._container.querySelector(".dv-readout");
+    const model = this._tlModel;
+    if (tl && readout && model) {
+      const cross = tl.querySelector(".dv-cross");
+      const resting = dvReadout(model, model.now);
+      readout.textContent = resting;
+      tl.addEventListener("mousemove", (ev) => {
+        const box = tl.getBoundingClientRect();
+        const px = (ev.clientX - box.left) * (tl.viewBox.baseVal.width / box.width);
+        if (px < model.left || px > model.right) return;
+        const t = model.t0 + ((px - model.left) / (model.right - model.left)) * (model.t1 - model.t0);
+        cross.setAttribute("x1", px.toFixed(1));
+        cross.setAttribute("x2", px.toFixed(1));
+        cross.style.display = "";
+        readout.textContent = dvReadout(model, t);
+      });
+      tl.addEventListener("mouseleave", () => {
+        cross.style.display = "none";
+        readout.textContent = resting;
+      });
+    }
+
     const btn = this._container.querySelector("#toggle-optimizer");
     if (btn) {
       const enabled = findEntity(this._hass.states, "enabled");
@@ -3378,6 +4522,151 @@ const PANEL_CSS = `
     color: var(--text-secondary);
     margin-top: 4px;
   }
+
+  /* ── Dashboard tabs (Now / Model / Energy) ── */
+  :host {
+    --s-indoor: #2a78d6;
+    --s-heat: #eb6834;
+    --s-out: #1baf7a;
+    --s-aux: #e34948;
+    --s-cool: #6250d6;
+    --q1: #cde2fb;
+    --q2: #86b6ef;
+    --q3: #3987e5;
+    --q4: #184f95;
+  }
+  .panel.dv-dark {
+    --s-indoor: #3987e5;
+    --s-heat: #d95926;
+    --s-out: #199e70;
+    --s-aux: #e66767;
+    --s-cool: #9085e9;
+    --q1: #184f95;
+    --q2: #256abf;
+    --q3: #3987e5;
+    --q4: #9ec5f4;
+  }
+  .panel.wide { max-width: 1500px; }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .dv-chips { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .dv-chip { border: 1px solid var(--text-primary); color: var(--text-primary); border-radius: 999px; padding: 1px 9px; font-weight: 500; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 10px; border-bottom: 1px solid var(--border); }
+  .tab {
+    appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
+    margin-bottom: -1px; padding: 8px 14px; min-height: 40px;
+    font: inherit; font-size: 14px; font-weight: 500; color: var(--text-secondary); cursor: pointer;
+  }
+  .tab:hover { color: var(--text-primary); }
+  .tab[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--text-primary); }
+  .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  .dv-row { display: grid; gap: 12px; margin-bottom: 12px; align-items: stretch; }
+  .dv-row > .card { margin-bottom: 0; min-width: 0; }
+  .dv-row-64 { grid-template-columns: minmax(0, 64fr) minmax(0, 36fr); }
+  .dv-row-73 { grid-template-columns: minmax(0, 72fr) minmax(0, 28fr); }
+  .dv-row-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .dv-row-3 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr); }
+  .dv-narrow .dv-row, .dv-mid .dv-row-3 { grid-template-columns: minmax(0, 1fr); }
+
+  .dv-head { display: flex; align-items: baseline; justify-content: space-between; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .dv-head h2 { margin: 0; }
+  .dv-meta { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .dv-readout { color: var(--text-primary); white-space: nowrap; }
+  .dv-empty { font-size: 13px; color: var(--text-secondary); padding: 18px 0; }
+  .dv-statline { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 6px; font-size: 12px; font-variant-numeric: tabular-nums; }
+
+  .dv-svg { display: block; max-width: 100%; height: auto; overflow: visible; }
+  .dv-svg text { font-size: 11px; fill: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  .dv-svg text.dv-strong { fill: var(--text-primary); font-weight: 600; }
+  .dv-grid { stroke: var(--border); stroke-width: 1; opacity: 0.7; }
+  .dv-axis { stroke: var(--text-secondary); stroke-width: 1; opacity: 0.6; }
+  .dv-mark { stroke: var(--text-secondary); stroke-width: 1; stroke-dasharray: 2 3; }
+  .dv-now, .dv-cross { stroke: var(--text-primary); stroke-width: 1; }
+  .dv-cross { opacity: 0.5; pointer-events: none; }
+  .dv-future { fill: color-mix(in srgb, var(--text-primary) 3%, transparent); }
+  .dv-band { fill: color-mix(in srgb, var(--text-primary) 9%, transparent); }
+  .dv-fan { fill: color-mix(in srgb, var(--s-indoor) 18%, transparent); }
+  .dv-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .dv-thin { stroke-width: 1.5; }
+  .dv-dash { stroke-dasharray: 6 4; }
+  .dv-indoor { stroke: var(--s-indoor); }
+  .dv-out { stroke: var(--s-out); }
+  .dv-heat { stroke: var(--s-heat); }
+  .dv-cool { stroke: var(--s-cool); }
+  .dv-drift { stroke: var(--text-secondary); }
+  .dv-sp { stroke: var(--text-primary); stroke-width: 1.5; }
+  .dv-indoor-fill { fill: var(--s-indoor); }
+  .dv-heat-fill { fill: var(--s-heat); }
+  .dv-cool-fill { fill: var(--s-cool); }
+  .dv-aux-fill { fill: var(--s-aux); }
+  .dv-drift-fill { fill: var(--text-secondary); }
+  .dv-dot { stroke: var(--card-bg); stroke-width: 1.5; }
+  .dv-ring { stroke: var(--text-primary); stroke-width: 1.5; }
+  .dv-faint { opacity: 0.35; }
+  .dv-run { fill: var(--s-heat); }
+  .dv-planned { opacity: 0.3; }
+  rect.dv-q0 { fill: color-mix(in srgb, var(--text-primary) 6%, transparent); }
+  rect.dv-q1 { fill: var(--q1); }
+  rect.dv-q2 { fill: var(--q2); }
+  rect.dv-q3 { fill: var(--q3); }
+  rect.dv-q4 { fill: var(--q4); }
+
+  .dv-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 6px; font-size: 12px; }
+  .dv-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dv-legend-q { color: var(--text-secondary); margin-top: 6px; margin-bottom: 0; }
+  .dv-key { display: inline-block; width: 16px; height: 0; border-top: 2px solid currentColor; color: var(--text-secondary); }
+  .dv-key.k-dash { border-top-style: dashed; }
+  .dv-key.k-indoor { color: var(--s-indoor); }
+  .dv-key.k-out { color: var(--s-out); }
+  .dv-key.k-heat { color: var(--s-heat); }
+  .dv-key.k-cool { color: var(--s-cool); }
+  .dv-key.k-aux { color: var(--s-aux); }
+  .dv-key.k-drift { color: var(--text-secondary); }
+  .dv-key.k-sp { color: var(--text-primary); border-top-width: 1.5px; }
+  .dv-key.k-dot { width: 9px; height: 9px; border: 0; border-radius: 50%; background: currentColor; }
+  .dv-key.k-box, .dv-key.k-run { width: 10px; height: 10px; border: 0; border-radius: 2px; background: currentColor; }
+  .dv-key.k-run { color: var(--s-heat); }
+  .dv-key.k-planned, .dv-key.k-faint { opacity: 0.35; }
+  .dv-key.k-ring { box-shadow: 0 0 0 1.5px var(--text-primary); }
+  .dv-key.k-band, .dv-key.k-fan { width: 14px; height: 10px; border: 0; border-radius: 2px; }
+  .dv-key.k-band { background: color-mix(in srgb, var(--text-primary) 12%, transparent); }
+  .dv-key.k-fan { background: color-mix(in srgb, var(--s-indoor) 22%, transparent); }
+  .dv-legend-q .dv-key { width: 12px; height: 10px; border: 0; }
+  .dv-key.dv-q0 { background: color-mix(in srgb, var(--text-primary) 6%, transparent); }
+  .dv-key.dv-q1 { background: var(--q1); }
+  .dv-key.dv-q2 { background: var(--q2); }
+  .dv-key.dv-q3 { background: var(--q3); }
+  .dv-key.dv-q4 { background: var(--q4); }
+
+  .dv-stats { display: flex; flex-wrap: wrap; padding: 0; overflow: hidden; }
+  .dv-stat { flex: 1 1 150px; min-width: 0; padding: 12px 16px; box-shadow: -1px 0 0 var(--border); }
+  .dv-stat-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-secondary); }
+  .dv-stat-value { font-size: 24px; font-weight: 500; line-height: 1.25; font-variant-numeric: tabular-nums; }
+  .dv-stat-value.dv-small { font-size: 19px; }
+  .dv-stat-value small { font-size: 13px; font-weight: 400; color: var(--text-secondary); }
+  .dv-stat-sub { font-size: 12px; color: var(--text-secondary); }
+  .dv-cov { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 3px 8px; align-items: center; margin-top: 4px; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .dv-bar { height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--text-primary) 10%, transparent); }
+  .dv-bar i { display: block; height: 6px; border-radius: 3px; background: var(--text-primary); }
+  .dv-n { text-align: right; }
+
+  .dv-scroll { overflow-x: auto; }
+  .dv-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .dv-table th {
+    text-align: left; padding: 5px 10px 5px 0; white-space: nowrap;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--text-secondary); border-bottom: 1px solid var(--border);
+  }
+  .dv-table td { padding: 6px 10px 6px 0; white-space: nowrap; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+  .dv-table tr:last-child td { border-bottom: 0; }
+  .dv-table .dv-num { text-align: right; }
+  .dv-right th, .dv-right td { text-align: right; }
+  .dv-right th:first-child, .dv-right td:first-child { text-align: left; }
+  .dv-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .dv-kv td:last-child { padding-right: 0; }
+  .dv-planrow td { color: var(--text-secondary); }
+  .dv-inbar { display: inline-block; width: 90px; height: 8px; margin-right: 8px; vertical-align: middle; border-radius: 0 4px 4px 0; background: color-mix(in srgb, var(--text-primary) 8%, transparent); }
+  .dv-inbar i { display: block; height: 8px; border-radius: 0 4px 4px 0; background: var(--s-heat); }
 `;
 
 customElements.define("heatpump-optimizer-panel", HeatPumpOptimizerPanel);

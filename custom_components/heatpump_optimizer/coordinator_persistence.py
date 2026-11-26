@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from .adapters.occupancy import OccupancyMode
 from .const import DEFAULT_HISTORY_BOOTSTRAP_DAYS
+from .dashboard_archive import DashboardArchive
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .learning.ab_trial import ABTrial
 from .learning.aux_heat_learner import AuxHeatLearner
@@ -86,6 +87,7 @@ class PersistenceMixin:
             "override_tracker": self.override_tracker.to_dict(),
             "savings_tracker": self.savings_tracker.to_dict(),
             "energy_baseline": self.energy_baseline.to_dict(),
+            "dashboard_archive": self.dashboard_archive.to_dict(),
             "ab_trial": self.ab_trial.to_dict(),
             "ab_trial_paused": self._ab_trial_paused,
             "baseline_capture": self.baseline_capture.to_dict(),
@@ -166,6 +168,11 @@ class PersistenceMixin:
                 )
             except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore energy baseline — using fresh state", exc_info=True)
+        if "dashboard_archive" in stored:
+            try:
+                self.dashboard_archive = DashboardArchive.from_dict(stored["dashboard_archive"])
+            except (KeyError, ValueError, TypeError, AttributeError):
+                _LOGGER.warning("Failed to restore dashboard archive, starting empty", exc_info=True)
         if "ab_trial" in stored:
             try:
                 self.ab_trial = ABTrial.from_dict(stored["ab_trial"])

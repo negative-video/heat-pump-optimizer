@@ -92,6 +92,7 @@ from .const import (
     VERSION,
 )
 from .coordinator import HeatPumpOptimizerCoordinator
+from .dashboard_ws import async_register_dashboard_ws
 from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
@@ -277,6 +278,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # and attempt history bootstrap (recorder guaranteed ready at this point).
     async def _on_ha_started(_hass):
         await coordinator.async_try_history_bootstrap_if_needed()
+        try:
+            await coordinator.async_backfill_dashboard_archive()
+        except Exception:  # noqa: BLE001 - the panel's history is never worth failing startup
+            _LOGGER.debug("Dashboard backfill failed", exc_info=True)
         await coordinator.async_request_refresh()
 
     async_at_started(hass, _on_ha_started)
@@ -288,6 +293,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register services and sidebar panel (only once for the domain)
     if is_first_entry:
         await async_setup_services(hass)
+        async_register_dashboard_ws(hass)
         await _async_register_panel(hass)
 
     # Forward setup to sensor, binary_sensor, and switch platforms
