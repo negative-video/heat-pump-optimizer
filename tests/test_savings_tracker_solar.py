@@ -404,7 +404,13 @@ class TestSavingsTrackerHourBoundary:
         assert report.total_actual_kwh > 0
 
     def test_cumulative_totals_update(self):
-        """Cumulative totals should accumulate across multiple hours."""
+        """Metered totals accumulate hourly; the lifetime saving does not.
+
+        A modeled ratio (or the digital twin) no longer feeds the lifetime
+        ledger hour by hour. Hourly accumulation makes no claim: baseline
+        equals metered energy until a completed day's measured saving is
+        banked by record_measured_day().
+        """
         tracker = SavingsTracker()
         tracker.set_accuracy_tier("estimated")  # cumulative only accumulates at ESTIMATED+
         tracker.set_baseline_ratio(baseline_runtime=90, optimized_runtime=60)
@@ -414,8 +420,8 @@ class TestSavingsTrackerHourBoundary:
 
         totals = tracker.cumulative_totals()
         assert totals["kwh_actual"] > 0
-        assert totals["kwh_baseline"] > totals["kwh_actual"]
-        assert totals["kwh_saved"] > 0
+        assert totals["kwh_baseline"] == totals["kwh_actual"]
+        assert totals["kwh_saved"] == 0
 
     def test_set_baseline_ratio_zero_optimized(self):
         """Zero optimized runtime should default ratio to 1.0."""

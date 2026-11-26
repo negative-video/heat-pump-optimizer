@@ -112,6 +112,11 @@ from .const import (
     CONF_REOPTIMIZE_INTERVAL_HOURS,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
+    CONF_MORNING_HOLD_TEMP,
+    CONF_MORNING_RECOVERY_MODE,
+    CONF_MORNING_WARM_OUTDOOR_TEMP,
+    CONF_MORNING_WEEKDAY_TIME,
+    CONF_MORNING_WEEKEND_TIME,
     CONF_SLEEP_COMFORT_COOL_MAX,
     CONF_SLEEP_COMFORT_COOL_MIN,
     CONF_SLEEP_COMFORT_HEAT_MAX,
@@ -132,7 +137,6 @@ from .const import (
     CONF_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
-    CONF_CALIBRATION_ENABLED,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
     CONF_WIND_SPEED_ENTITY,
@@ -159,6 +163,13 @@ from .const import (
     DEFAULT_ROOM_OCCUPANCY_DEBOUNCE_MINUTES,
     DEFAULT_SAFETY_COOL_MAX,
     DEFAULT_SAFETY_HEAT_MIN,
+    DEFAULT_MORNING_RECOVERY_MODE,
+    DEFAULT_MORNING_WARM_OUTDOOR_TEMP,
+    DEFAULT_MORNING_WEEKDAY_TIME,
+    DEFAULT_MORNING_WEEKEND_TIME,
+    MORNING_RECOVERY_AT_SLEEP_END,
+    MORNING_RECOVERY_WAIT_FOR_WARMTH,
+    MORNING_RECOVERY_WARM_BY,
     DEFAULT_SLEEP_COMFORT_COOL_MAX,
     DEFAULT_SLEEP_COMFORT_COOL_MIN,
     DEFAULT_SLEEP_COMFORT_HEAT_MAX,
@@ -710,6 +721,9 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
 
         # Read current values — options take precedence over initial setup data
         data = self.config_entry.data
+        # Keep our own sensors out of the entity pickers. This name was used
+        # below without being defined, so opening this step raised NameError.
+        exclude = self._get_own_entity_ids()
 
         current_climate = self._options.get(
             CONF_CLIMATE_ENTITY, data.get(CONF_CLIMATE_ENTITY)
@@ -1318,10 +1332,6 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             mode=selector.NumberSelectorMode.SLIDER,
                         ),
                     ),
-                    vol.Optional(
-                        CONF_CALIBRATION_ENABLED,
-                        default=self._options.get(CONF_CALIBRATION_ENABLED, False),
-                    ): selector.BooleanSelector(),
                 }
             ),
         )
@@ -1404,12 +1414,18 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                 errors[CONF_SLEEP_COMFORT_HEAT_MIN] = "heat_range_inverted"
             if not errors:
                 self._options.update(user_input)
+                # The interim temperature is optional: leaving it empty means
+                # "halfway", so an empty field has to clear a stored value.
+                if CONF_MORNING_HOLD_TEMP not in user_input:
+                    self._options.pop(CONF_MORNING_HOLD_TEMP, None)
                 return self.async_create_entry(title="", data=self._options)
 
         data = self.config_entry.data
 
         def _get(key: str, fallback: float) -> float:
             return _f_to_display(self._options.get(key, data.get(key, fallback)), self.hass)
+
+        hold_temp = self._options.get(CONF_MORNING_HOLD_TEMP)
 
         return self.async_show_form(
             step_id="sleep_schedule",
@@ -1444,6 +1460,58 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                         CONF_SLEEP_COMFORT_HEAT_MAX,
                         default=_get(CONF_SLEEP_COMFORT_HEAT_MAX, DEFAULT_SLEEP_COMFORT_HEAT_MAX),
                     ): _comfort_selector(self.hass, 50, 78),
+                    # Morning recovery (heating): how the floor comes back up
+                    vol.Optional(
+                        CONF_MORNING_RECOVERY_MODE,
+                        default=self._options.get(
+                            CONF_MORNING_RECOVERY_MODE, DEFAULT_MORNING_RECOVERY_MODE
+                        ),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value=MORNING_RECOVERY_WARM_BY,
+                                    label="Warm by a set time (comfort first)",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=MORNING_RECOVERY_WAIT_FOR_WARMTH,
+                                    label="Hold a modest temperature, finish when it warms up outside (energy first)",
+                                ),
+                                selector.SelectOptionDict(
+                                    value=MORNING_RECOVERY_AT_SLEEP_END,
+                                    label="Step up when the sleep window ends",
+                                ),
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_MORNING_WEEKDAY_TIME,
+                        default=self._options.get(
+                            CONF_MORNING_WEEKDAY_TIME, DEFAULT_MORNING_WEEKDAY_TIME
+                        ),
+                    ): selector.TimeSelector(),
+                    vol.Optional(
+                        CONF_MORNING_WEEKEND_TIME,
+                        default=self._options.get(
+                            CONF_MORNING_WEEKEND_TIME, DEFAULT_MORNING_WEEKEND_TIME
+                        ),
+                    ): selector.TimeSelector(),
+                    vol.Optional(
+                        CONF_MORNING_HOLD_TEMP,
+                        description={
+                            "suggested_value": (
+                                _f_to_display(hold_temp, self.hass)
+                                if hold_temp is not None else None
+                            )
+                        },
+                    ): _comfort_selector(self.hass, 45, 75),
+                    vol.Optional(
+                        CONF_MORNING_WARM_OUTDOOR_TEMP,
+                        default=_get(
+                            CONF_MORNING_WARM_OUTDOOR_TEMP, DEFAULT_MORNING_WARM_OUTDOOR_TEMP
+                        ),
+                    ): _comfort_selector(self.hass, 10, 60),
                 }
             ),
         )

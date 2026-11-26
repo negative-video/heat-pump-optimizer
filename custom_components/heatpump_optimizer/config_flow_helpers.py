@@ -20,6 +20,8 @@ from .const import (
     CONF_COMFORT_COOL_MIN,
     CONF_COMFORT_HEAT_MAX,
     CONF_COMFORT_HEAT_MIN,
+    CONF_MORNING_HOLD_TEMP,
+    CONF_MORNING_WARM_OUTDOOR_TEMP,
     CONF_SAFETY_COOL_MAX,
     CONF_SAFETY_HEAT_MIN,
     CONF_SLEEP_COMFORT_COOL_MAX,
@@ -86,6 +88,7 @@ def _convert_comfort_input_to_f(user_input: dict[str, Any], hass: HomeAssistant)
         CONF_SAFETY_HEAT_MIN, CONF_SAFETY_COOL_MAX,
         CONF_SLEEP_COMFORT_COOL_MIN, CONF_SLEEP_COMFORT_COOL_MAX,
         CONF_SLEEP_COMFORT_HEAT_MIN, CONF_SLEEP_COMFORT_HEAT_MAX,
+        CONF_MORNING_HOLD_TEMP, CONF_MORNING_WARM_OUTDOOR_TEMP,
     }
     converted = dict(user_input)
     for key in temp_keys:

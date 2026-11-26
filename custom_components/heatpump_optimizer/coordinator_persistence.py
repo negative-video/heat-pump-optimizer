@@ -11,6 +11,7 @@ itself.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from .adapters.occupancy import OccupancyMode
@@ -63,6 +64,24 @@ class PersistenceMixin:
             ),
             "phase": self._phase,
             "active": self._active,
+            # A user pause is a standing instruction; it has to outlive a
+            # restart. It was saved under neither name and so never did.
+            "paused": bool(
+                self._paused
+                and not any(
+                    c.get("type") == "pause_until"
+                    for c in getattr(self, "_active_constraints", [])
+                )
+            ),
+            "morning_recovery_starts": self.strategic.recovery_state(),
+            # Rolling diagnostics that used to restart from empty on every
+            # reload: the stale-sensor window and the forecast-error history
+            # behind the accuracy sensors.
+            "temp_history": list(getattr(self, "_temp_history", []))[-288:],
+            "tactical_error_history": [
+                [t.isoformat(), e]
+                for t, e in getattr(self.tactical, "error_history", [])[-288:]
+            ] if getattr(self, "tactical", None) is not None else [],
             "forced_occupancy_mode": (
                 self.occupancy._forced_mode.value
                 if self.occupancy._forced_mode is not None
@@ -171,6 +190,21 @@ class PersistenceMixin:
                 _LOGGER.warning("Failed to restore A/B trial — using fresh state",
                                 exc_info=True)
         self._ab_trial_paused = bool(stored.get("ab_trial_paused", False))
+        self._paused = bool(stored.get("paused", False)) or self._ab_trial_paused
+        try:
+            self.strategic.restore_recovery_state(stored.get("morning_recovery_starts"))
+        except (TypeError, ValueError, AttributeError):
+            _LOGGER.warning("Failed to restore morning recovery state", exc_info=True)
+        try:
+            history = [float(t) for t in stored.get("temp_history") or []]
+            if history:
+                self._temp_history = history[-288:]
+        except (TypeError, ValueError):
+            _LOGGER.warning("Failed to restore temperature history", exc_info=True)
+        try:
+            self._restore_tactical_history(stored.get("tactical_error_history"))
+        except (TypeError, ValueError, AttributeError):
+            _LOGGER.warning("Failed to restore forecast-error history", exc_info=True)
         # Re-link after any of the three objects above may have been replaced
         self._link_energy_baseline()
         if "coefficient_store" in stored:
@@ -206,6 +240,10 @@ class PersistenceMixin:
         if "counterfactual" in stored:
             try:
                 self.counterfactual = CounterfactualSimulator.from_dict(stored["counterfactual"])
+                # The restored object carries whatever capacity and deadband
+                # were stored, which for older state is the 30,000 BTU/hr
+                # default. Configuration is the authority on both.
+                self._reapply_counterfactual_config()
                 _LOGGER.debug(
                     "Restored counterfactual simulator (virtual_temp=%.1f°F)",
                     self.counterfactual.virtual_indoor_temp,
@@ -239,6 +277,35 @@ class PersistenceMixin:
             except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore aux heat learner — using fresh state",
                                 exc_info=True)
+
+    def _reapply_counterfactual_config(self) -> None:
+        """Push configured capacity and deadband onto the digital twin."""
+        tonnage = getattr(self, "_hvac_tonnage", None)
+        if tonnage:
+            self.counterfactual.set_rated_capacity(
+                q_cool=tonnage * 12000.0,
+                q_heat=tonnage * 12000.0 * 1.1,
+            )
+        deadband = getattr(self, "_thermostat_deadband", None)
+        if deadband is not None and hasattr(self.counterfactual, "_deadband"):
+            self.counterfactual._deadband = deadband
+
+    def _restore_tactical_history(self, raw: list | None) -> None:
+        """Reload recent forecast errors, dropping anything older than a day."""
+        tactical = getattr(self, "tactical", None)
+        if tactical is None or not raw:
+            return
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        restored = []
+        for item in raw:
+            try:
+                when = datetime.fromisoformat(item[0])
+                if when > cutoff:
+                    restored.append((when, float(item[1])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if restored:
+            tactical._error_history = restored
 
     async def async_try_history_bootstrap_if_needed(self) -> None:
         """Public entry point: attempt history bootstrap if not already done.

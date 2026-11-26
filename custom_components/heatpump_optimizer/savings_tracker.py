@@ -30,6 +30,8 @@ that survive HA restarts via Store persistence.
 
 from __future__ import annotations
 
+import dataclasses
+
 import logging
 from collections import deque
 from datetime import datetime, timezone, tzinfo
@@ -37,7 +39,11 @@ from typing import Any
 
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .engine.data_types import BaselineHourResult, DailySavingsReport, HourlySavingsRecord
-from .learning.energy_baseline import EnergyBaseline
+from .learning.energy_baseline import (
+    LABEL_OPTIMIZED,
+    MIN_DEGREE_DAYS_FOR_FIT,
+    EnergyBaseline,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +66,31 @@ ENERGY_SOURCE_NONE = "none"
 # Fraction of an hour's energy that must come from a real sensor before the
 # hour is called measured rather than mixed.
 MEASURED_ENERGY_THRESHOLD = 0.99
+
+
+# Version of the lifetime ledger's meaning. 2 = savings are only claimed for
+# hours the optimizer was actually in control.
+LEDGER_VERSION = 2
+
+# Hours of hourly records kept across a restart (today plus yesterday).
+PERSISTED_HOURLY_RECORDS = 48
+
+
+def _record_to_dict(record: HourlySavingsRecord) -> dict[str, Any]:
+    data = dataclasses.asdict(record)
+    data["hour"] = record.hour.isoformat()
+    return data
+
+
+def _record_from_dict(raw: dict[str, Any]) -> HourlySavingsRecord | None:
+    """Rebuild a persisted hourly record, ignoring fields we no longer have."""
+    try:
+        known = {f.name for f in dataclasses.fields(HourlySavingsRecord)}
+        data = {k: v for k, v in raw.items() if k in known}
+        data["hour"] = datetime.fromisoformat(raw["hour"])
+        return HourlySavingsRecord(**data)
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 class SavingsTracker:
@@ -104,6 +135,15 @@ class SavingsTracker:
         self._hour_solar_offset_kwh: float = 0.0
         self._hour_grid_import_kwh: float = 0.0
         self._hour_aux_kwh: float = 0.0  # incremental resistive kWh this hour
+        # Minutes of this hour the optimizer was actually steering the
+        # thermostat. An hour it did not steer has no savings to claim.
+        self._hour_controlled_minutes: float = 0.0
+        self._hour_observed_minutes: float = 0.0
+
+        # When the lifetime ledger was last zeroed (None = never). Published
+        # as last_reset so recorder statistics treat it as a reset, not as a
+        # sudden gain.
+        self._ledger_reset_at: datetime | None = None
 
         # Counterfactual simulator reference (set by coordinator)
         self._counterfactual: CounterfactualSimulator | None = None
@@ -173,6 +213,7 @@ class SavingsTracker:
         aux_heat_active: bool = False,
         hp_baseline_watts: float = 0.0,
         power_measured: bool = False,
+        controlling: bool = True,
     ) -> None:
         """Record a single update interval (typically 5 minutes).
 
@@ -184,6 +225,10 @@ class SavingsTracker:
             power_measured: True when power_watts came from a configured power
                 sensor rather than a rated-watts estimate. Drives the
                 energy_source label on the resulting hourly record.
+            controlling: True when the optimizer was writing setpoints during
+                this interval. Energy is metered either way; savings are only
+                claimed for hours it was mostly in control. Monitor-only,
+                paused and overridden time is baseline by definition.
         """
         hour_key = int(now.timestamp()) // 3600
 
@@ -205,6 +250,12 @@ class SavingsTracker:
             self._hour_solar_offset_kwh = 0.0
             self._hour_grid_import_kwh = 0.0
             self._hour_aux_kwh = 0.0
+            self._hour_controlled_minutes = 0.0
+            self._hour_observed_minutes = 0.0
+
+        self._hour_observed_minutes += interval_minutes
+        if controlling:
+            self._hour_controlled_minutes += interval_minutes
 
         # Accumulate this interval
         if hvac_running:
@@ -355,6 +406,25 @@ class SavingsTracker:
             cop_savings_kwh = 0.0
             rate_arbitrage = None
 
+        # An hour the optimizer did not steer is a baseline hour: whatever
+        # the house used is what it would have used. The modeled baseline is
+        # discarded rather than compared, otherwise every model error in
+        # monitor-only mode lands in the ledger as a saving or a loss. That
+        # is how an install that never wrote a setpoint showed -1,565 kWh.
+        controlled = (
+            self._hour_observed_minutes <= 0
+            or self._hour_controlled_minutes >= 0.5 * self._hour_observed_minutes
+        )
+        if not controlled:
+            baseline_min = actual_min
+            baseline_kwh = actual_kwh
+            baseline_cost = None
+            baseline_co2 = None
+            runtime_savings_kwh = 0.0
+            cop_savings_kwh = 0.0
+            rate_arbitrage = None
+            avoided_aux_kwh = 0.0
+
         saved_kwh = baseline_kwh - actual_kwh
 
         # ── Carbon ───────────────────────────────────────────────────
@@ -384,6 +454,13 @@ class SavingsTracker:
                 # Legacy: use same rate for baseline
                 baseline_cost = baseline_kwh * avg_rate
             saved_cost = baseline_cost - actual_cost
+
+        if not controlled:
+            # Solar self-consumption would otherwise show up as a "saving".
+            if saved_co2 is not None:
+                saved_co2 = 0.0
+            if saved_cost is not None:
+                saved_cost = 0.0
 
         record = HourlySavingsRecord(
             hour=hour_dt,
@@ -422,23 +499,27 @@ class SavingsTracker:
 
         self._hourly_records.append(record)
 
-        # Only accumulate cumulative totals when baseline is ready (ESTIMATED+).
-        # At LEARNING/PROJECTED the ratio fallback or stale data would produce
-        # phantom savings before the optimizer is actually controlling anything.
+        # Lifetime totals. Metered quantities accumulate here, hour by hour.
+        # The lifetime *saving* does not: it is banked once per completed day
+        # from the measured, weather-normalized baseline, in
+        # record_measured_day(). The hourly saving above compares against the
+        # digital twin, whose absolute energy is not calibrated (replayed
+        # against ten real November days it predicted a quarter of the
+        # house's actual heating energy), so summing it produced a lifetime
+        # figure dominated by twin error. The twin's decomposition is kept as
+        # modeled attribution only.
         if self._accuracy_tier not in (TIER_LEARNING, TIER_PROJECTED):
-            self._cumulative_kwh_saved += saved_kwh
-            self._cumulative_kwh_baseline += baseline_kwh
+            # Until a day's measured saving is banked, the baseline is the
+            # metered energy itself: no claim either way.
+            self._cumulative_kwh_baseline += actual_kwh
             self._cumulative_kwh_actual += actual_kwh
             self._cumulative_kwh_worst_case += worst_case_kwh
+            self._cumulative_aux_heat_kwh += aux_heat_kwh
+            # Modeled attribution (diagnostic)
             self._cumulative_runtime_savings_kwh += runtime_savings_kwh
             self._cumulative_cop_savings_kwh += cop_savings_kwh
-            if saved_cost is not None:
-                self._cumulative_cost_saved += saved_cost
-            if saved_co2 is not None:
-                self._cumulative_co2_saved_grams += saved_co2
             if rate_arbitrage is not None:
                 self._cumulative_rate_arbitrage_savings += rate_arbitrage
-            self._cumulative_aux_heat_kwh += aux_heat_kwh
             self._cumulative_avoided_aux_kwh += avoided_aux_kwh
 
         # Comfort violation tracking
@@ -523,6 +604,52 @@ class SavingsTracker:
             "energy_source": report.energy_source,
         }
 
+    def record_measured_day(self, record: Any) -> None:
+        """Bank one completed day's measured saving into the lifetime ledger.
+
+        Registered as a day listener on the energy baseline. Only days the
+        optimizer controlled, with good sensor coverage, enough weather to
+        normalize against and a usable baseline fit are counted. Both sides
+        of the comparison are metered kWh: what the house used that day, and
+        what the same weather cost on days the optimizer was not running.
+        """
+        baseline = self._energy_baseline
+        if baseline is None or record is None:
+            return
+        if getattr(record, "label", None) != LABEL_OPTIMIZED or not record.usable:
+            return
+        if record.degree_days < MIN_DEGREE_DAYS_FOR_FIT:
+            return
+        fit = baseline.fit()
+        if not fit.is_usable:
+            return
+
+        expected = fit.expected_kwh(record.cdd, record.hdd)
+        saved = expected - record.kwh
+        self._cumulative_kwh_saved += saved
+        # Keeps baseline - actual == saved for the lifetime totals
+        self._cumulative_kwh_baseline += saved
+
+        recent = list(self._hourly_records)[-24:]
+        rates = [r.electricity_rate for r in recent if r.electricity_rate is not None]
+        carbon = [
+            r.carbon_intensity_gco2_kwh for r in recent
+            if r.carbon_intensity_gco2_kwh is not None
+        ]
+        if rates:
+            self._cumulative_cost_saved += saved * (sum(rates) / len(rates))
+        if carbon:
+            self._cumulative_co2_saved_grams += saved * (sum(carbon) / len(carbon))
+        _LOGGER.debug(
+            "Lifetime ledger: %s measured %.2f kWh vs expected %.2f (saved %.2f)",
+            record.date, record.kwh, expected, saved,
+        )
+
+    @property
+    def ledger_reset_at(self) -> datetime | None:
+        """When the lifetime totals were last zeroed, if ever."""
+        return self._ledger_reset_at
+
     def cumulative_totals(self) -> dict[str, float]:
         """Get all-time cumulative savings totals."""
         return {
@@ -555,7 +682,7 @@ class SavingsTracker:
         self._cumulative_comfort_violations = 0
         self._cumulative_aux_heat_kwh = 0.0
         self._cumulative_avoided_aux_kwh = 0.0
-        _LOGGER.info("Cumulative savings reset on tier upgrade")
+        _LOGGER.info("Cumulative savings totals reset")
 
     # ── Persistence ─────────────────────────────────────────────────
 
@@ -576,6 +703,14 @@ class SavingsTracker:
             "cumulative_avoided_aux_kwh": self._cumulative_avoided_aux_kwh,
             "baseline_to_optimized_ratio": self._baseline_to_optimized_ratio,
             "accuracy_tier": self._accuracy_tier,
+            "ledger_version": LEDGER_VERSION,
+            "ledger_reset_at": (
+                self._ledger_reset_at.isoformat() if self._ledger_reset_at else None
+            ),
+            # Recent hours, so "today" survives a restart
+            "hourly_records": [
+                _record_to_dict(r) for r in list(self._hourly_records)[-PERSISTED_HOURLY_RECORDS:]
+            ],
         }
 
     @classmethod
@@ -598,4 +733,31 @@ class SavingsTracker:
             "baseline_to_optimized_ratio", 1.0
         )
         tracker._accuracy_tier = data.get("accuracy_tier", TIER_LEARNING)
+
+        reset_at = data.get("ledger_reset_at")
+        if reset_at:
+            try:
+                tracker._ledger_reset_at = datetime.fromisoformat(reset_at)
+            except (TypeError, ValueError):
+                tracker._ledger_reset_at = None
+
+        for raw in data.get("hourly_records") or []:
+            record = _record_from_dict(raw)
+            if record is not None:
+                tracker._hourly_records.append(record)
+
+        if data.get("ledger_version", 1) < LEDGER_VERSION:
+            # Totals written before the ledger was gated on control. They
+            # compared a model against a model whether or not the optimizer
+            # was running, so they are not savings and cannot be corrected,
+            # only retired. Recorder statistics keep the old history.
+            had = tracker._cumulative_kwh_saved
+            if any(abs(v) > 1e-9 for v in tracker.cumulative_totals().values()):
+                tracker._reset_cumulative()
+                tracker._ledger_reset_at = datetime.now(timezone.utc)
+                _LOGGER.info(
+                    "Lifetime savings ledger predates control gating "
+                    "(%.1f kWh recorded); starting a fresh ledger",
+                    had,
+                )
         return tracker

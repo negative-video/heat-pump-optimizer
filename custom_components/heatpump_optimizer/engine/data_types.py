@@ -59,6 +59,11 @@ class ForecastPoint:
     # Per-hour comfort bounds (set by strategic controller from occupancy timeline)
     comfort_min: float | None = None  # °F, None = use global comfort range
     comfort_max: float | None = None  # °F, None = use global comfort range
+    # Heat setpoint for this hour when it is deliberately above comfort_min:
+    # a morning recovery in progress, where the occupant is promised the
+    # daytime floor at a later time and the thermostat is already heading
+    # there. None = the setpoint is the comfort floor, as usual.
+    heat_target: float | None = None
 
     @property
     def effective_outdoor_temp(self) -> float:

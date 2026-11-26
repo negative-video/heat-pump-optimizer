@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import homeassistant.helpers.issue_registry as ir
+from homeassistant.core import callback
 
 from .const import (
     ACTIVATION_TIER_CONFIDENT,
@@ -49,6 +50,11 @@ from .savings_tracker import (
 
 LEARNING_PERSIST_INTERVAL_HOURS = 1
 
+# "Calibrated" requires recent forecasts to have held up: at least three hours
+# of five-minute comparisons with a mean absolute error under this.
+ACCURACY_GATE_MIN_SAMPLES = 36
+ACCURACY_GATE_MAE_F = 2.0
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -57,16 +63,39 @@ class HelpersMixin:
 
     # ── Helpers ─────────────────────────────────────────────────────
 
-    def _active_comfort_range(self) -> tuple[float, float]:
+    def _plan_mode(self) -> str:
+        """The side the current plan is steering: "heat" or "cool".
+
+        The plan knows this. The thermostat's idle state does not, which is
+        why asking the thermostat first selected the cooling band for every
+        idle winter cycle.
+        """
+        mode = self.strategic.mode
+        if mode in ("heat", "cool"):
+            return mode
+        return self.thermostat.get_active_mode()
+
+    def _active_comfort_range(self, mode: str | None = None) -> tuple[float, float]:
         """Get the current comfort range: occupancy, DR, constraints, safety, tier.
+
+        ``mode`` selects the heat or cool band; it defaults to the side the
+        plan is steering. The starting point is the band the planner derived
+        for this hour (occupancy, sleep window, morning recovery, safety), so
+        a write is clamped against the same band the plan was made in. Only
+        when nothing has been planned yet is it rebuilt from configuration.
 
         All narrowing goes through ``derive_effective_comfort_band`` so the
         layers cannot compound invisibly and the result has a documented
         minimum width. See engine/comfort.py for the ordering.
         """
-        mode = self.thermostat.get_active_mode()
-        base = self.comfort_heat if mode == "heat" else self.comfort_cool
-        comfort = self.occupancy.adjust_comfort_range(base, mode)
+        if mode not in ("heat", "cool"):
+            mode = self._plan_mode()
+        planned = self.strategic.band_at(datetime.now(timezone.utc), mode)
+        if isinstance(planned, tuple):
+            comfort = planned
+        else:
+            base = self.comfort_heat if mode == "heat" else self.comfort_cool
+            comfort = self.occupancy.adjust_comfort_range(base, mode)
 
         # Demand response expiry has a side effect, so it is resolved here
         # rather than inside the pure band derivation.
@@ -240,7 +269,7 @@ class HelpersMixin:
         profiler_conf = self.profiler.confidence()
         model_conf = profiler_conf
 
-        if baseline_conf >= 0.7 and model_conf >= 0.5:
+        if baseline_conf >= 0.7 and model_conf >= 0.5 and not self._forecast_accuracy_poor():
             tier = TIER_CALIBRATED
         elif baseline_conf >= 0.3 and model_conf >= 0.3:
             tier = TIER_SIMULATED
@@ -275,6 +304,23 @@ class HelpersMixin:
         # Wire counterfactual simulator into savings tracker when ready
         if tier in (TIER_SIMULATED, TIER_CALIBRATED):
             self.savings_tracker.set_counterfactual(self.counterfactual)
+
+    def _forecast_accuracy_poor(self) -> bool:
+        """Whether recent indoor-temperature forecasts have been missing badly.
+
+        Confidence measures how much data the model has, not whether its
+        predictions come true. An install once reported 93% confidence and
+        "fully calibrated" on days its forecasts were off by 13-16 F. The
+        "calibrated" label now also requires the forecasts to have been
+        roughly right over the last six hours.
+        """
+        try:
+            errors = self.tactical.get_recent_errors(minutes=360)
+        except (AttributeError, TypeError):
+            return False
+        if not isinstance(errors, list) or len(errors) < ACCURACY_GATE_MIN_SAMPLES:
+            return False
+        return sum(abs(e) for e in errors) / len(errors) > ACCURACY_GATE_MAE_F
 
     def _check_model_progress(self) -> None:
         """Create or clear a repair issue if the model seems stuck."""

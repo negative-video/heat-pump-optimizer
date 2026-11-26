@@ -40,6 +40,18 @@ EXPECTED_RANGES: dict[str, tuple[int, int]] = {
 
 MODES = ("cool_1", "heat_1", "auxiliary_heat_1", "resist")
 
+# Observations a bin needs before its recorded indoor temperature is trusted
+# as that bin's anchor.
+MIN_ANCHOR_SAMPLES = 3
+
+# Smoothing of the exported delta tables. A bin's mean is shrunk toward the
+# mode's trendline with the weight of this many pseudo-observations (two
+# hours of samples), then averaged with its neighbours. A bin with thousands
+# of observations is left essentially untouched; a bin with six is not
+# allowed to claim the heat pump gains 2 F/hr of output between 47 and 48 F.
+SMOOTHING_PRIOR_SAMPLES = 24.0
+SMOOTHING_KERNEL = {0: 1.0, 1: 0.6, 2: 0.3}
+
 # The displayed overall confidence is smoothed with a high-water mark so the
 # number a user sees does not jitter every time a new outdoor temperature bin
 # opens with a single sample.  The mark may never lead the raw value by more
@@ -63,6 +75,15 @@ class BinAccumulator:
     count: int = 0
     sum_solar: float = 0.0
     sum_sq_solar: float = 0.0
+    # Indoor temperature the bin's observations were taken at. Tracked
+    # separately from ``count`` because bins recorded before this existed
+    # have observations with no indoor temperature attached.
+    sum_indoor: float = 0.0
+    indoor_count: int = 0
+
+    @property
+    def mean_indoor(self) -> float | None:
+        return self.sum_indoor / self.indoor_count if self.indoor_count else None
 
     @property
     def mean_delta(self) -> float:
@@ -75,13 +96,21 @@ class BinAccumulator:
         variance = (self.sum_sq_delta / self.count) - (self.mean_delta ** 2)
         return math.sqrt(max(0.0, variance))
 
-    def add(self, delta: float, solar: float | None = None) -> None:
+    def add(
+        self,
+        delta: float,
+        solar: float | None = None,
+        indoor: float | None = None,
+    ) -> None:
         self.sum_delta += delta
         self.sum_sq_delta += delta * delta
         self.count += 1
         if solar is not None:
             self.sum_solar += solar
             self.sum_sq_solar += solar * solar
+        if indoor is not None:
+            self.sum_indoor += indoor
+            self.indoor_count += 1
 
 
 class PerformanceProfiler:
@@ -193,6 +222,9 @@ class PerformanceProfiler:
         # Classify mode
         mode = self._classify_mode(hvac_action, hvac_mode, aux_heat_active)
 
+        # Indoor temperature this delta was measured at (interval midpoint)
+        interval_indoor = (indoor_temp + self._previous_indoor_temp) / 2.0
+
         self._previous_indoor_temp = indoor_temp
         self._previous_timestamp = now
 
@@ -206,7 +238,7 @@ class PerformanceProfiler:
         temp_bin = round(outdoor_temp)
         if temp_bin not in self._bins[mode]:
             self._bins[mode][temp_bin] = BinAccumulator()
-        self._bins[mode][temp_bin].add(delta_f_per_hr, solar_irradiance)
+        self._bins[mode][temp_bin].add(delta_f_per_hr, solar_irradiance, interval_indoor)
         self._total_observations += 1
 
         # Solar-aware bin: classify by attic delta or sun elevation
@@ -316,21 +348,34 @@ class PerformanceProfiler:
                 temperature[mode] = None
                 continue
 
+            trendline = self._fit_trendline(qualified)
+            smoothed = self._smoothed_means(qualified, trendline)
             deltas = {
-                str(t): round(acc.mean_delta, 2)
-                for t, acc in sorted(qualified.items())
+                str(t): round(smoothed[t], 2) for t in sorted(qualified)
             }
             durations = {
                 str(t): round(acc.count * self._expected_interval / 60.0, 1)
                 for t, acc in sorted(qualified.items())
             }
-            trendline = self._fit_trendline(qualified)
 
             temperature[mode] = {
                 "deltas": deltas,
                 "durations": durations,
                 "linear_trendline": trendline,
             }
+
+            # Indoor temperature the table was recorded at, per bin where it
+            # was tracked and as a mode-level mean for the rest.
+            anchors = {
+                str(t): round(acc.mean_indoor, 2)
+                for t, acc in sorted(qualified.items())
+                if acc.indoor_count >= MIN_ANCHOR_SAMPLES
+            }
+            if anchors:
+                temperature[mode]["indoor_anchor"] = anchors
+            anchor_mean = self._indoor_anchor_mean(mode)
+            if anchor_mean is not None:
+                temperature[mode]["indoor_anchor_mean"] = round(anchor_mean, 2)
 
             # Balance points from resist and heat_1 trendlines
             if mode in ("resist", "heat_1") and trendline["slope"] != 0:
@@ -345,6 +390,74 @@ class PerformanceProfiler:
             "differential": {"cool": 1.0, "heat": 1.0},
             "setpoint": {"cool": 74.0, "heat": 68.0},
         }
+
+    def _indoor_anchor_mean(self, mode: str) -> float | None:
+        """Mean indoor temperature a mode's observations were recorded at.
+
+        Falls back to the mean across all modes, and for data recorded before
+        indoor tracking existed, to the last indoor temperature seen: the
+        house's current season is a far better guess at where that data was
+        recorded than a fixed 72 F.
+        """
+        def _mean(accs) -> float | None:
+            total = sum(a.sum_indoor for a in accs)
+            n = sum(a.indoor_count for a in accs)
+            return total / n if n else None
+
+        own = _mean(self._bins[mode].values())
+        if own is not None:
+            return own
+        overall = _mean(
+            acc for bins in self._bins.values() for acc in bins.values()
+        )
+        if overall is not None:
+            return overall
+        if self._total_observations > 0 and self._previous_indoor_temp is not None:
+            return self._previous_indoor_temp
+        return None
+
+    @staticmethod
+    def _smoothed_means(
+        qualified: dict[int, BinAccumulator],
+        trendline: dict[str, float],
+    ) -> dict[int, float]:
+        """Bin means, shrunk toward the trendline and averaged with neighbours.
+
+        Raw means were exported verbatim. With a few hundred heating
+        observations spread over thirty bins that gave a table reading +0.12
+        F/hr at 46-47 F outdoor and +2.18 at 48 F, and a simulator that
+        could not lift the house three degrees in twelve hours at 46 F.
+        """
+        has_trend = bool(trendline) and (
+            trendline.get("slope", 0.0) != 0.0 or trendline.get("intercept", 0.0) != 0.0
+        )
+        prior = SMOOTHING_PRIOR_SAMPLES if has_trend and len(qualified) >= MIN_BINS_FOR_TRENDLINE else 0.0
+
+        shrunk: dict[int, float] = {}
+        weight: dict[int, float] = {}
+        for temp, acc in qualified.items():
+            if prior > 0:
+                trend = trendline["slope"] * temp + trendline["intercept"]
+                shrunk[temp] = (acc.count * acc.mean_delta + prior * trend) / (acc.count + prior)
+            else:
+                shrunk[temp] = acc.mean_delta
+            weight[temp] = acc.count + prior
+
+        if prior <= 0:
+            return shrunk
+
+        smoothed: dict[int, float] = {}
+        for temp in qualified:
+            num = 0.0
+            den = 0.0
+            for offset, kernel in SMOOTHING_KERNEL.items():
+                for neighbour in {temp - offset, temp + offset}:
+                    if neighbour in shrunk:
+                        w = weight[neighbour] * kernel
+                        num += w * shrunk[neighbour]
+                        den += w
+            smoothed[temp] = num / den if den else shrunk[temp]
+        return smoothed
 
     def to_performance_model(self):
         """Build a PerformanceModel from accumulated data.
@@ -651,6 +764,8 @@ class PerformanceProfiler:
                     "count": acc.count,
                     "sum_solar": acc.sum_solar,
                     "sum_sq_solar": acc.sum_sq_solar,
+                    "sum_indoor": acc.sum_indoor,
+                    "indoor_count": acc.indoor_count,
                 }
 
         # Solar-aware bins
@@ -704,6 +819,8 @@ class PerformanceProfiler:
                         count=acc_data["count"],
                         sum_solar=acc_data.get("sum_solar", 0.0),
                         sum_sq_solar=acc_data.get("sum_sq_solar", 0.0),
+                        sum_indoor=acc_data.get("sum_indoor", 0.0),
+                        indoor_count=acc_data.get("indoor_count", 0),
                     )
                     profiler._bins[mode][temp] = acc
                 except (KeyError, ValueError):

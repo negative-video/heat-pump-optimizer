@@ -40,6 +40,13 @@ REQUIRED_STATE_KEYS = [
     "energy_baseline",
     "ab_trial",
     "ab_trial_paused",
+    # A user pause and an in-progress morning recovery are standing state:
+    # losing either on restart resumes control the user had stopped, or
+    # drops a setpoint that had already been raised.
+    "paused",
+    "morning_recovery_starts",
+    "temp_history",
+    "tactical_error_history",
     # No "thermal_estimator": audit item 8 removed the EKF. Its state was
     # nine parameters identified from one observation, so persisting it
     # carried a random walk across restarts rather than knowledge.
@@ -66,6 +73,12 @@ class _StubCoordinator(PersistenceMixin):
 
         self.strategic = MagicMock()
         self.strategic.last_optimization_time = None
+        self.strategic.recovery_state.return_value = {}
+        self.tactical = MagicMock()
+        self.tactical.error_history = []
+        self._paused = False
+        self._active_constraints = []
+        self._temp_history = []
         self.occupancy = MagicMock()
         self.occupancy._forced_mode = None
 

@@ -357,6 +357,7 @@ class ScheduleOptimizer:
             mode,
             hours=hour_keys,
             per_hour_comfort=per_hour_comfort,
+            per_hour_target=self._extract_per_hour_targets(forecast),
         )
         chosen = result.chosen
         flat = result.flat
@@ -397,6 +398,18 @@ class ScheduleOptimizer:
                 if hour_key not in per_hour:
                     per_hour[hour_key] = (pt.comfort_min, pt.comfort_max)
         return per_hour
+
+    @staticmethod
+    def _extract_per_hour_targets(
+        forecast: list[ForecastPoint],
+    ) -> dict[datetime, float]:
+        """Per-hour heat setpoints that differ from the comfort floor."""
+        targets: dict[datetime, float] = {}
+        for pt in forecast:
+            if pt.heat_target is not None:
+                hour_key = pt.time.replace(minute=0, second=0, microsecond=0)
+                targets.setdefault(hour_key, pt.heat_target)
+        return targets
 
     # ``_build_schedule`` used to live here. It ranked hours by efficiency,
     # converted rank to a percentile, and mapped the percentile linearly onto

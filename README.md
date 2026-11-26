@@ -49,7 +49,7 @@ The number shown on the dashboard is lightly smoothed by a high-water mark, so i
 - **Savings tracking** -- A counterfactual digital twin simulates what your thermostat would have done without optimization, using the profiler's measured performance data. Decomposed into runtime, COP, rate, and carbon components.
 - **Occupancy-aware** -- Widens comfort range when away, with calendar integration, pre-conditioning before arrival, and optional thermostat profile control (home/away/sleep).
 - **Room-aware sensing** -- Weights indoor temperature by room occupancy instead of averaging all sensors equally. Includes blend mitigation (detects and compensates for Ecobee/Nest satellite sensor blending) and humidity squelch (suppresses cooling setpoint changes when high humidity would trigger unnecessary dehumidification).
-- **House thermal load breakdown** -- Diagnostic sensors decompose the total passive thermal load on your house into individual components: weather heat transfer, solar heat gain, occupancy heat, and boundary zone (attic/crawlspace) effects. See what's actually driving your home's temperature, not just what the HVAC is doing about it.
+- **House thermal load** -- A diagnostic sensor reports the net passive thermal load on your house from the measured envelope conductance. It is one measured aggregate rather than an itemised breakdown: the separate weather, solar, occupancy and boundary-zone figures earlier versions published came from an estimator that could not tell them apart, and have been removed.
 - **Temperature profile chart** -- Observation coverage visualization showing where the profiler has data and where gaps remain, with per-mode trendlines and observation density by outdoor temperature.
 - **Per-mode confidence** -- Profiler confidence broken down by HVAC mode (cooling, heating, aux heat, passive drift) with coverage, depth, and quality metrics.
 - **Auxiliary appliances** -- Model thermal impacts of other equipment (heat pump water heaters, dryers, ovens) so the profiler skips contaminated observations rather than recording them as building behaviour.
@@ -355,6 +355,25 @@ If you prefer different temperatures at night, enable the sleep schedule in **Co
 
 Sleep bounds only apply when someone is home. If the house is unoccupied during sleeping hours, the normal away-mode comfort range is used instead. When thermostat profile control is enabled, the integration also sets the thermostat's profile to "away" (not "sleep") when nobody is home during the sleep window.
 
+#### Morning warm-up
+
+When the sleep heating minimum is below the daytime heating minimum, something has to decide when the heat setpoint climbs back. A heat pump delivers the least heat in the coldest hours, so a fixed "wake" time asks it to do its biggest job of the day at its worst moment. Instead of a clock time, the optimizer asks what you actually want from the morning:
+
+| Morning warm-up | What it does | Trade-off |
+|-----------------|--------------|-----------|
+| **Warm by a set time** (default) | Holds the sleep minimum as long as it can, then starts the warm-up just in time for the house to reach the daytime minimum by the time you set. The start is sized by simulating the forecast, so cold mornings start earlier. | Comfort first. Costs more on cold mornings, because the heat pump works through the coldest hours. |
+| **Hold a modest temperature, finish when it warms up outside** | From the end of sleep, holds an interim temperature (halfway by default). Raises it to the daytime minimum once the forecast outdoor temperature reaches a threshold (35°F by default), or at the time you set at the latest. | Energy first. The house reaches full temperature later in the morning. |
+| **Step up when the sleep window ends** | The setpoint jumps to the daytime minimum at sleep end, like a plain thermostat schedule. | No optimization. |
+
+| Setting | Default |
+|---------|---------|
+| **Weekday time** | 9:00 AM |
+| **Weekend time** | 12:00 PM |
+| **Interim temperature** | Halfway between the sleep and daytime minimums |
+| **Outdoor temperature to finish at** | 35°F |
+
+The times mean "be warm by" in the first mode and "start the final warm-up no later than" in the second. Once a warm-up has started it is not undone by a later re-plan, and it survives a Home Assistant restart. The current plan is shown in the `morning_recovery` attribute of the Optimization Schedule sensor. Morning warm-up applies to heating only and only when someone is home.
+
 ### Wet Room Squelch
 
 Bathrooms and laundry rooms cause large temperature spikes during showers or dryer use (typically +5–6°F lasting 3–4 hours). These spikes corrupt the thermal model if included in the indoor average.
@@ -425,10 +444,6 @@ Configure in **Configure → Advanced → Wet Room Squelch**. Select the tempera
 | Entity | Description | Unit |
 |--------|-------------|------|
 | House Thermal Load | Net passive thermal load on the house (positive = gaining heat, negative = losing heat) | BTU/hr |
-| Weather Heat Transfer | Heat flowing through walls, windows, and doors due to outdoor conditions and infiltration | BTU/hr |
-| Solar Heat Gain | Heat entering from sunlight, scaled by cloud cover and sun elevation | BTU/hr |
-| Occupancy Heat Gain | Heat from people, electronics, and lighting inside the house | BTU/hr |
-| Boundary Zone Heat Transfer | Heat from attic and crawlspace into the living space | BTU/hr |
 
 Each sensor includes a `model_confidence` attribute and a `reliable` flag (false when the thermal model is still learning). The House Thermal Load sensor includes a full component breakdown and a `direction` attribute ("gaining heat", "losing heat", or "balanced").
 
@@ -472,11 +487,15 @@ Everything below is a *modeled attribution*: it explains where the optimizer bel
 
 #### Savings (Cumulative)
 
+The lifetime totals are measured, not modeled. Each completed day the optimizer was in control is compared with what the same weather cost on days it was not (the weather-normalized energy baseline), and the difference is banked once at the end of the day. Days in monitor-only mode, paused, or under a manual override are never counted, so an install that is not controlling the thermostat reads zero rather than accumulating model error.
+
 | Entity | Description | Unit |
 |--------|-------------|------|
-| Energy Saved Cumulative | All-time energy savings | kWh |
-| Cost Saved Cumulative | All-time cost savings | $ |
-| CO₂ Avoided Cumulative | All-time carbon avoided | kg |
+| Energy Saved Total | Measured energy saved on days the optimizer was in control | kWh |
+| Cost Saved Total | That saving priced at each day's average electricity rate | $ |
+| CO₂ Avoided Total | That saving times each day's average grid carbon intensity | kg |
+
+Totals recorded by versions before this accounting was introduced are retired the first time the new version loads (the history stays in the recorder).
 
 #### Savings Decomposition
 

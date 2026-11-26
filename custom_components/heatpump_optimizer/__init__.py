@@ -31,6 +31,11 @@ from .const import (
     CONF_MAX_SETPOINT_CHANGE_PER_HOUR,
     CONF_MODEL_IMPORT_DATA,
     CONF_MONITOR_ONLY,
+    CONF_MORNING_HOLD_TEMP,
+    CONF_MORNING_RECOVERY_MODE,
+    CONF_MORNING_WARM_OUTDOOR_TEMP,
+    CONF_MORNING_WEEKDAY_TIME,
+    CONF_MORNING_WEEKEND_TIME,
     CONF_OCCUPANCY_ENTITIES,
     CONF_OCCUPANCY_ENTITY,
     CONF_OPTIMIZATION_AGGRESSIVENESS,
@@ -65,6 +70,10 @@ from .const import (
     DEFAULT_COMFORT_HEAT_MAX,
     DEFAULT_COMFORT_HEAT_MIN,
     DEFAULT_MAX_SETPOINT_CHANGE_PER_HOUR,
+    DEFAULT_MORNING_RECOVERY_MODE,
+    DEFAULT_MORNING_WARM_OUTDOOR_TEMP,
+    DEFAULT_MORNING_WEEKDAY_TIME,
+    DEFAULT_MORNING_WEEKEND_TIME,
     DEFAULT_OVERRIDE_GRACE_PERIOD_HOURS,
     DEFAULT_REOPTIMIZE_INTERVAL_HOURS,
     DEFAULT_SAFETY_COOL_MAX,
@@ -217,6 +226,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             opts.get(CONF_SLEEP_COMFORT_HEAT_MIN, DEFAULT_SLEEP_COMFORT_HEAT_MIN),
             opts.get(CONF_SLEEP_COMFORT_HEAT_MAX, DEFAULT_SLEEP_COMFORT_HEAT_MAX),
         ),
+        # How the heat floor comes back up in the morning
+        "morning": {
+            "mode": opts.get(CONF_MORNING_RECOVERY_MODE, DEFAULT_MORNING_RECOVERY_MODE),
+            "weekday_time": opts.get(CONF_MORNING_WEEKDAY_TIME, DEFAULT_MORNING_WEEKDAY_TIME),
+            "weekend_time": opts.get(CONF_MORNING_WEEKEND_TIME, DEFAULT_MORNING_WEEKEND_TIME),
+            "hold_temp": opts.get(CONF_MORNING_HOLD_TEMP),
+            "warm_outdoor_temp": opts.get(
+                CONF_MORNING_WARM_OUTDOOR_TEMP, DEFAULT_MORNING_WARM_OUTDOOR_TEMP
+            ),
+        },
     }
 
     # Monitor-only mode: run full pipeline without writing setpoints

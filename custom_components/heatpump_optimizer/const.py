@@ -290,6 +290,23 @@ DEFAULT_SLEEP_COMFORT_COOL_MAX = 76.0
 DEFAULT_SLEEP_COMFORT_HEAT_MIN = 60.0
 DEFAULT_SLEEP_COMFORT_HEAT_MAX = 66.0
 
+# Morning recovery: how the heat floor returns from the sleep floor to the
+# daytime floor. See engine/morning_recovery.py.
+CONF_MORNING_RECOVERY_MODE = "morning_recovery_mode"
+CONF_MORNING_WEEKDAY_TIME = "morning_weekday_time"
+CONF_MORNING_WEEKEND_TIME = "morning_weekend_time"
+CONF_MORNING_HOLD_TEMP = "morning_hold_temp"
+CONF_MORNING_WARM_OUTDOOR_TEMP = "morning_warm_outdoor_temp"
+
+MORNING_RECOVERY_WARM_BY = "warm_by"
+MORNING_RECOVERY_WAIT_FOR_WARMTH = "wait_for_warmth"
+MORNING_RECOVERY_AT_SLEEP_END = "sleep_end"
+
+DEFAULT_MORNING_RECOVERY_MODE = MORNING_RECOVERY_WARM_BY
+DEFAULT_MORNING_WEEKDAY_TIME = "09:00"
+DEFAULT_MORNING_WEEKEND_TIME = "12:00"
+DEFAULT_MORNING_WARM_OUTDOOR_TEMP = 35.0
+
 # Humidity-gated sensor squelching (wet room exclusion)
 CONF_HUMIDITY_SQUELCH_PAIRS = "humidity_squelch_pairs"
 DEFAULT_HUMIDITY_SQUELCH_ON = 65.0    # %RH — activate squelch above this

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -25,6 +27,19 @@ from .sensor_base import (
     _LearningNullMixin,
     _ThermalLoadMixin,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _ledger_reset(coordinator):
+    """Parse the lifetime ledger's reset time from coordinator data."""
+    raw = (coordinator.data or {}).get("savings_ledger_reset_at")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 async def async_setup_entry(
@@ -105,12 +120,49 @@ async def async_setup_entry(
         CrossSensorSpreadSensor(coordinator, entry),
         # House thermal load breakdown
         HouseThermalLoadSensor(coordinator, entry),
-        WeatherHeatTransferSensor(coordinator, entry),
-        SolarHeatGainSensor(coordinator, entry),
-        OccupancyHeatGainSensor(coordinator, entry),
-        BoundaryZoneHeatTransferSensor(coordinator, entry),
     ]
+    _remove_obsolete_entities(hass, entry)
     async_add_entities(entities)
+
+
+# Sensors that no longer exist. Their registry entries would otherwise linger
+# as permanently unavailable entities after an upgrade.
+#
+# - cooling_capacity / heating_capacity / envelope_r_value / thermal_mass_temp
+#   were states of the removed thermal estimator.
+# - effective_*_capacity were republished in F/h under the same unique_id
+#   after reporting BTU/hr; a unit change on an existing statistic makes the
+#   recorder raise a repair, so they are now effective_*_rate.
+# - The four heat-flow components were itemised estimator states. Nothing
+#   has produced them since, so they could only ever read "unknown".
+OBSOLETE_SENSOR_KEYS = (
+    "cooling_capacity",
+    "heating_capacity",
+    "envelope_r_value",
+    "thermal_mass_temp",
+    "effective_cooling_capacity",
+    "effective_heating_capacity",
+    "weather_heat_transfer",
+    "solar_heat_gain",
+    "occupancy_heat_gain",
+    "boundary_zone_heat_transfer",
+)
+
+
+def _remove_obsolete_entities(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop registry entries for sensors this version no longer provides."""
+    try:
+        from homeassistant.helpers import entity_registry as er
+
+        registry = er.async_get(hass)
+        for key in OBSOLETE_SENSOR_KEYS:
+            entity_id = registry.async_get_entity_id(
+                "sensor", DOMAIN, f"{entry.entry_id}_{key}"
+            )
+            if entity_id:
+                registry.async_remove(entity_id)
+    except Exception:  # noqa: BLE001 - cleanup must never block setup
+        _LOGGER.debug("Obsolete entity cleanup skipped", exc_info=True)
 
 
 class OptimizerPhaseSensor(OptimizerBaseSensor):
@@ -392,7 +444,7 @@ class EffectiveCoolingCapacitySensor(OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(
             coordinator, entry,
-            "effective_cooling_capacity", "Effective Cooling Rate",
+            "effective_cooling_rate", "Effective Cooling Rate",
         )
         self._attr_native_unit_of_measurement = "°F/h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -414,7 +466,7 @@ class EffectiveHeatingCapacitySensor(OptimizerBaseSensor):
     def __init__(self, coordinator, entry):
         super().__init__(
             coordinator, entry,
-            "effective_heating_capacity", "Effective Heating Rate",
+            "effective_heating_rate", "Effective Heating Rate",
         )
         self._attr_native_unit_of_measurement = "°F/h"
         self._attr_state_class = SensorStateClass.MEASUREMENT
@@ -458,6 +510,9 @@ class ScheduleSensor(OptimizerBaseSensor):
         weather = self.coordinator.data.get("weather_forecast")
         if weather:
             attrs["weather_forecast"] = weather[:24]
+        recovery = self.coordinator.data.get("morning_recovery")
+        if recovery:
+            attrs["morning_recovery"] = recovery
         attrs["mode"] = self.coordinator.data.get("mode")
         attrs["last_optimization"] = self.coordinator.data.get("last_optimization")
         attrs["savings_pct"] = self.coordinator.data.get("savings_pct")
@@ -807,6 +862,15 @@ class SavingsKwhCumulativeSensor(_LearningNullMixin, OptimizerBaseSensor):
         self._attr_icon = "mdi:lightning-bolt"
 
     @property
+    def last_reset(self):
+        """When the lifetime ledger was last started over, if it ever was.
+
+        Publishing it lets the recorder treat the change as a reset instead
+        of booking the jump as a gain.
+        """
+        return _ledger_reset(self.coordinator)
+
+    @property
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
@@ -857,6 +921,15 @@ class SavingsCostCumulativeSensor(_LearningNullMixin, OptimizerBaseSensor):
         self._attr_icon = "mdi:currency-usd"
 
     @property
+    def last_reset(self):
+        """When the lifetime ledger was last started over, if it ever was.
+
+        Publishing it lets the recorder treat the change as a reset instead
+        of booking the jump as a gain.
+        """
+        return _ledger_reset(self.coordinator)
+
+    @property
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
@@ -903,6 +976,15 @@ class SavingsCO2CumulativeSensor(_LearningNullMixin, OptimizerBaseSensor):
         self._attr_state_class = SensorStateClass.TOTAL
         self._attr_suggested_display_precision = 1
         self._attr_icon = "mdi:molecule-co2"
+
+    @property
+    def last_reset(self):
+        """When the lifetime ledger was last started over, if it ever was.
+
+        Publishing it lets the recorder treat the change as a reset instead
+        of booking the jump as a gain.
+        """
+        return _ledger_reset(self.coordinator)
 
     @property
     def native_value(self) -> float | None:
@@ -1816,207 +1898,5 @@ class HouseThermalLoadSensor(_ThermalLoadMixin, OptimizerBaseSensor):
             "aux_resistive_heat": round(comps.get("q_aux_resistive", 0.0), 0),
             "hvac_output": round(comps.get("q_hvac", 0.0), 0),
             "stored_heat_exchange": round(comps.get("q_int", 0.0), 0),
-            **self._confidence_attrs(),
-        }
-
-
-class WeatherHeatTransferSensor(_ThermalLoadMixin, OptimizerBaseSensor):
-    """Heat flowing through walls, windows, and doors due to outdoor conditions.
-
-    Combines the building envelope conductance with infiltration effects from
-    wind, open doors/windows, and stack effect. Positive when outdoor heat is
-    entering the house; negative when heat is escaping.
-    """
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "weather_heat_transfer", "Weather Heat Transfer"
-        )
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = "BTU/hr"
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:weather-windy"
-
-    @property
-    def native_value(self) -> float | None:
-        comps = self._get_components()
-        if not comps:
-            return None
-        return comps.get("q_env")
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        comps = self._get_components()
-        if not comps:
-            return {}
-        return {
-            "outdoor_temp": comps.get("effective_outdoor_temp"),
-            "indoor_temp": comps.get("indoor_temp"),
-            "wind_speed_mph": comps.get("wind_speed_mph"),
-            "infiltration_factor": (
-                round(comps["infiltration_factor"], 2)
-                if comps.get("infiltration_factor") is not None else None
-            ),
-            "doors_windows_open": comps.get("doors_windows_open", 0),
-            **self._confidence_attrs(),
-        }
-
-
-class SolarHeatGainSensor(_ThermalLoadMixin, OptimizerBaseSensor):
-    """Heat entering the house from sunlight.
-
-    Uses a learned peak solar gain value scaled by current cloud cover and
-    sun elevation. Higher when skies are clear and the sun is high.
-    """
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "solar_heat_gain", "Solar Heat Gain"
-        )
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = "BTU/hr"
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:white-balance-sunny"
-
-    @property
-    def native_value(self) -> float | None:
-        comps = self._get_components()
-        if not comps:
-            return None
-        return comps.get("q_solar")
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        comps = self._get_components()
-        if not comps:
-            return {}
-        cloud = comps.get("cloud_cover")
-        return {
-            "cloud_cover_pct": round(cloud * 100, 0) if cloud is not None else None,
-            "sun_elevation": (
-                round(comps["sun_elevation"], 1)
-                if comps.get("sun_elevation") is not None else None
-            ),
-            "learned_peak_solar_gain": (
-                round(comps["learned_peak_solar_gain"], 0)
-                if comps.get("learned_peak_solar_gain") is not None else None
-            ),
-            "irradiance_fraction": (
-                round(comps["irradiance_fraction"], 3)
-                if comps.get("irradiance_fraction") is not None else None
-            ),
-            "irradiance_source": comps.get("irradiance_source"),
-            "uv_index": (
-                round(comps["uv_index"], 2)
-                if comps.get("uv_index") is not None else None
-            ),
-            "solar_direct_btu": (
-                round(comps["q_solar_direct"], 0)
-                if comps.get("q_solar_direct") is not None else None
-            ),
-            "solar_via_attic_btu": (
-                round(comps["q_solar_via_attic"], 0)
-                if comps.get("q_solar_via_attic") is not None else None
-            ),
-            **self._confidence_attrs(),
-        }
-
-
-class OccupancyHeatGainSensor(_ThermalLoadMixin, OptimizerBaseSensor):
-    """Heat produced by people, electronics, and lighting inside the house.
-
-    Includes a baseline for always-on electronics/lighting plus additional
-    heat per detected occupant. This value is always positive.
-    """
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "occupancy_heat_gain", "Occupancy Heat Gain"
-        )
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = "BTU/hr"
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:account-group"
-
-    @property
-    def native_value(self) -> float | None:
-        comps = self._get_components()
-        if not comps:
-            return None
-        return comps.get("q_internal")
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        comps = self._get_components()
-        if not comps:
-            return {}
-        return {
-            "people_count": comps.get("people_count"),
-            "base_electronics_gain_btu": 800,
-            **self._confidence_attrs(),
-        }
-
-
-class BoundaryZoneHeatTransferSensor(_ThermalLoadMixin, OptimizerBaseSensor):
-    """Heat flowing from the attic and crawlspace into the living space.
-
-    Only meaningful when attic or crawlspace temperature sensors are
-    configured. A hot attic pushes heat down; a cold crawlspace pulls
-    heat through the floor.
-    """
-
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator, entry):
-        super().__init__(
-            coordinator, entry, "boundary_zone_heat_transfer",
-            "Boundary Zone Heat Transfer",
-        )
-        self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = "BTU/hr"
-        self._attr_suggested_display_precision = 0
-        self._attr_icon = "mdi:home-roof"
-
-    @property
-    def native_value(self) -> float | None:
-        comps = self._get_components()
-        if not comps:
-            return None
-        return comps.get("q_boundary")
-
-    @property
-    def extra_state_attributes(self) -> dict:
-        comps = self._get_components()
-        if not comps:
-            return {}
-        return {
-            "attic_temp": comps.get("attic_temp"),
-            "crawlspace_temp": comps.get("crawlspace_temp"),
-            "attic_contribution_btu": (
-                round(comps["attic_contribution_btu"], 0)
-                if comps.get("attic_contribution_btu") is not None else None
-            ),
-            "attic_solar_portion_btu": (
-                round(comps["attic_solar_contribution_btu"], 0)
-                if comps.get("attic_solar_contribution_btu") is not None else None
-            ),
-            "attic_weather_portion_btu": (
-                round(comps["attic_weather_contribution_btu"], 0)
-                if comps.get("attic_weather_contribution_btu") is not None else None
-            ),
-            "crawlspace_contribution_btu": (
-                round(comps["crawlspace_contribution_btu"], 0)
-                if comps.get("crawlspace_contribution_btu") is not None else None
-            ),
-            "duct_loss_solar_fraction": (
-                round(comps["duct_loss_solar_fraction"], 2)
-                if comps.get("duct_loss_solar_fraction") is not None else None
-            ),
             **self._confidence_attrs(),
         }

@@ -151,8 +151,16 @@ class SchedulePlanner:
         mode: str,
         hours: list[datetime] | None = None,
         per_hour_comfort: dict[datetime, tuple[float, float]] | None = None,
+        per_hour_target: dict[datetime, float] | None = None,
     ) -> PlanResult:
-        """Produce a schedule for the forecast window."""
+        """Produce a schedule for the forecast window.
+
+        ``per_hour_comfort`` is what the occupant is promised each hour and
+        is what plans are scored against. ``per_hour_target`` is the heat
+        setpoint for hours where it is deliberately above that promise (a
+        morning recovery under way). Scoring a ramp against its destination
+        would read every recovery as a comfort failure.
+        """
         hour_keys = hours if hours is not None else self._forecast_hours(forecast)
         if not hour_keys:
             empty = PlanCandidate(label="flat", entries=[])
@@ -162,7 +170,8 @@ class SchedulePlanner:
             )
 
         flat_entries = self.build_flat_schedule(
-            hour_keys, forecast, comfort_range, mode, per_hour_comfort
+            hour_keys, forecast, comfort_range, mode, per_hour_comfort,
+            per_hour_target,
         )
         flat = self._evaluate(
             "flat", flat_entries, indoor_temp, forecast,
@@ -187,6 +196,7 @@ class SchedulePlanner:
                 entries = self._window_schedule(
                     hour_keys, forecast, comfort_range, mode,
                     per_hour_comfort, event_hour, lead, depth,
+                    per_hour_target,
                 )
                 if entries is None:
                     continue
@@ -223,14 +233,17 @@ class SchedulePlanner:
         comfort_range: tuple[float, float],
         mode: str,
         per_hour_comfort: dict[datetime, tuple[float, float]] | None = None,
+        per_hour_target: dict[datetime, float] | None = None,
     ) -> list[ScheduleEntry]:
         """A flat schedule at the comfort-band edge appropriate to the mode."""
         entries = []
         for hour in hour_keys:
             h_min, h_max = self._comfort_for_hour(hour, comfort_range, per_hour_comfort)
             outdoor = self._hour_outdoor_temp(hour, forecast)
-            target = self._flat_edge(mode, h_min, h_max)
+            target = self._hour_target(hour, mode, h_min, h_max, per_hour_target)
             action = "coasting" if self._is_passive_hour(mode, outdoor) else "maintaining"
+            if mode == "heat" and target > h_min + 1e-6:
+                action = "recovering"
             entries.append(
                 self._entry(hour, target, mode, outdoor, action)
             )
@@ -243,8 +256,9 @@ class SchedulePlanner:
         heat_floor: float,
         cool_ceiling: float,
         mode: str,
+        per_hour_bounds: dict[datetime, tuple[float, float]] | None = None,
     ) -> list[ScheduleEntry]:
-        """A flat heat floor / cool ceiling pair for every hour.
+        """A heat floor / cool ceiling pair for every hour.
 
         The shoulder-season representation. A single-mode single-setpoint
         schedule cannot describe a day that needs heat at 06:00 and cooling at
@@ -256,10 +270,21 @@ class SchedulePlanner:
         ``mode`` is the near-term detected mode; it only decides which side
         ``target_temp`` reports for the single-setpoint consumers (tactical
         layer, dashboards).
+
+        ``per_hour_bounds`` maps an hour to its own ``(heat_floor,
+        cool_ceiling)``. The pair is flat within an hour but not necessarily
+        across the day: a sleep window, an away block and the morning
+        recovery all move the floor. Hours without an entry use the flat pair.
         """
         entries = []
+        flat_floor, flat_ceiling = heat_floor, cool_ceiling
         for hour in hour_keys:
             outdoor = self._hour_outdoor_temp(hour, forecast)
+            heat_floor, cool_ceiling = (
+                per_hour_bounds.get(hour, (flat_floor, flat_ceiling))
+                if per_hour_bounds
+                else (flat_floor, flat_ceiling)
+            )
             primary = heat_floor if mode == "heat" else cool_ceiling
             entries.append(
                 ScheduleEntry(
@@ -301,6 +326,7 @@ class SchedulePlanner:
         event_hour: datetime,
         lead_hours: int,
         depth_f: float,
+        per_hour_target: dict[datetime, float] | None = None,
     ) -> list[ScheduleEntry] | None:
         """Flat everywhere, except a pre-conditioning window before the event.
 
@@ -317,7 +343,7 @@ class SchedulePlanner:
         for hour in hour_keys:
             h_min, h_max = self._comfort_for_hour(hour, comfort_range, per_hour_comfort)
             outdoor = self._hour_outdoor_temp(hour, forecast)
-            flat_target = self._flat_edge(mode, h_min, h_max)
+            flat_target = self._hour_target(hour, mode, h_min, h_max, per_hour_target)
 
             if hour in window:
                 if mode == "cool":
@@ -371,6 +397,21 @@ class SchedulePlanner:
         if mode == "heat":
             return h_min
         return (h_min + h_max) / 2
+
+    @classmethod
+    def _hour_target(
+        cls,
+        hour: datetime,
+        mode: str,
+        h_min: float,
+        h_max: float,
+        per_hour_target: dict[datetime, float] | None,
+    ) -> float:
+        """The default setpoint for an hour: the band edge, or a set target."""
+        edge = cls._flat_edge(mode, h_min, h_max)
+        if mode == "heat" and per_hour_target and hour in per_hour_target:
+            return max(edge, per_hour_target[hour])
+        return edge
 
     def _is_passive_hour(self, mode: str, outdoor_temp: float) -> bool:
         """Whether the envelope is already drifting the way HVAC would push.
@@ -471,7 +512,12 @@ class SchedulePlanner:
         # pre-heating fixes that; it means the day wanted cooling or a
         # dual-setpoint shoulder plan.
         if flat.excursion_under_degree_minutes > SATURATION_EXCURSION_DEGREE_MINUTES:
-            event_hour = self._first_excursion_hour(flat.under_points, hour_keys)
+            # Below the floor *and not gaining on it* is saturation. Below a
+            # floor that has just stepped up, and climbing, is a recovery
+            # doing what it was asked to do; pre-heating ahead of it would
+            # simply move the step earlier.
+            stalled = self._losing_ground_points(flat.simulation, flat.under_points)
+            event_hour = self._first_excursion_hour(stalled, hour_keys)
             if event_hour is not None:
                 return (
                     True, event_hour,
@@ -482,6 +528,38 @@ class SchedulePlanner:
             False, None,
             "no aux hours forecast; pre-heating a moderate cold day costs energy",
         )
+
+    @staticmethod
+    def _losing_ground_points(
+        simulation: list[SimulationPoint],
+        under_points: list[datetime],
+    ) -> list[datetime]:
+        """Under-floor times at which the house is not warming.
+
+        Requires the stall to last: a single flat step inside a climb (a
+        thermostat cycling off at its differential) is not a stall. At least
+        30 minutes of under-floor, non-rising points are needed.
+        """
+        if not simulation or not under_points:
+            return []
+        under = set(under_points)
+        stalled: list[datetime] = []
+        previous = None
+        for point in simulation:
+            if (
+                previous is not None
+                and point.time in under
+                and point.indoor_temp <= previous.indoor_temp + 1e-6
+            ):
+                stalled.append(point.time)
+            previous = point
+        if len(simulation) > 1:
+            step_min = (simulation[1].time - simulation[0].time).total_seconds() / 60.0
+        else:
+            step_min = 5.0
+        if len(stalled) * step_min < 30.0:
+            return []
+        return stalled
 
     @staticmethod
     def _first_hour_at_or_below(

@@ -107,6 +107,7 @@ class SensorHub:
 
         # Environmental
         self._outdoor_temp_entities = outdoor_temp_entities or []
+        self.outdoor_sensor_stale: bool = False
         self._outdoor_humidity_entities = outdoor_humidity_entities or []
         self._wind_speed_entity = wind_speed_entity
         self._solar_irradiance_entity = solar_irradiance_entity
@@ -414,6 +415,11 @@ class SensorHub:
         """
         # 1. Standalone sensor entities
         reading = self._read_multi_temp(self._outdoor_temp_entities, "Outdoor temp")
+        # A configured sensor that has gone quiet is worth telling the user
+        # about even though the forecast quietly covers for it below.
+        self.outdoor_sensor_stale = bool(self._outdoor_temp_entities) and (
+            reading is None or reading.stale
+        )
         if reading and not reading.stale:
             self._ema_outdoor_temp = self._apply_ema(
                 reading.value, self._ema_outdoor_temp, self._ema_alpha

@@ -152,6 +152,58 @@ def check_python_syntax() -> None:
         fail("python-syntax", "\n".join(errors))
 
 
+# ── 4b. Undefined names (a missing import parses fine, fails on import) ──
+
+def check_undefined_names() -> None:
+    """Names a module loads but never binds anywhere in the file.
+
+    Neither the syntax check nor the test suite imports the coordinator
+    (Home Assistant is not installed where they run), so a missing import
+    used to reach a release unnoticed.
+    """
+    import builtins
+
+    base = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__package__"}
+    offenders = []
+    for py in sorted(INTEGRATION.rglob("*.py")):
+        tree = ast.parse(py.read_text(), filename=str(py))
+        bound = set(base)
+        annotation_nodes = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    bound.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound.add(node.name)
+            elif isinstance(node, ast.arg):
+                bound.add(node.arg)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+                bound.add(node.id)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                bound.add(node.name)
+            elif isinstance(node, (ast.Global, ast.Nonlocal)):
+                bound.update(node.names)
+            elif isinstance(node, ast.MatchAs) and node.name:
+                bound.add(node.name)
+            for field in ("annotation", "returns"):
+                sub = getattr(node, field, None)
+                if sub is not None:
+                    annotation_nodes.update(id(n) for n in ast.walk(sub))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id not in bound
+                and id(node) not in annotation_nodes
+            ):
+                offenders.append(f"{py.relative_to(REPO_ROOT)}:{node.lineno}: {node.id}")
+
+    if not offenders:
+        ok("undefined-names", "none")
+    else:
+        fail("undefined-names", "\n".join(sorted(set(offenders))))
+
+
 # ── 5. Import resolution (relative imports point to real files) ─────────
 
 def check_import_resolution() -> None:
@@ -271,6 +323,7 @@ def main() -> int:
     check_json_syntax()
     check_translation_sync()
     check_python_syntax()
+    check_undefined_names()
     check_import_resolution()
     check_manifest_structure()
     check_migration_coverage()

@@ -193,6 +193,11 @@ from .engine.comfort import (
     calculate_apparent_temperature,
     derive_effective_comfort_band,
 )
+from .engine.morning_recovery import (
+    RECOVERY_MODES,
+    MorningRecoveryConfig,
+    parse_time,
+)
 from .engine.optimizer import ScheduleOptimizer
 from .engine.precondition_planner import PreconditionPlanner
 from .engine.performance_model import PerformanceModel
@@ -493,8 +498,12 @@ class HeatPumpOptimizerCoordinator(
         self.occupancy = OccupancyAdapter(
             hass,
             entity_ids=occupancy_entity_ids,
+            debounce_minutes=opts.get(
+                CONF_OCCUPANCY_DEBOUNCE_MINUTES, DEFAULT_OCCUPANCY_DEBOUNCE_MINUTES
+            ),
             home_zone_states=opts.get(CONF_HOME_ZONE_STATES, []),
         )
+        self.occupancy.away_comfort_delta = self._away_comfort_delta
 
         # Thermostat profile control (optional — home/away/sleep presets)
         self._profile_adapter: ProfileAdapter | None = None
@@ -572,13 +581,18 @@ class HeatPumpOptimizerCoordinator(
             resist_balance_point=self.model.resist_balance_point or 50.0,
             sleep_config=self.sleep_config,
             reoptimize_interval_hours=float(reopt_hours),
+            safety_limits=self.safety_limits,
+            away_comfort_delta=self._away_comfort_delta,
+            morning_recovery=self._morning_recovery_config(),
         )
 
         # Layer 2: Tactical Controller
         self.tactical = TacticalController()
 
         # Layer 3: Watchdog
-        self.watchdog = WatchdogController()
+        self.watchdog = WatchdogController(
+            grace_period_hours=float(self._override_grace_hours),
+        )
         self.watchdog.set_callbacks(
             on_override_detected=self._on_override_detected,
             on_override_cleared=self._on_override_cleared,
@@ -635,6 +649,10 @@ class HeatPumpOptimizerCoordinator(
         self._history_bootstrap_result: str | None = None  # "ok", reason, or None
         self._bootstrap_retry_count: int = 0
         self._bootstrap_retry_unsub: Any = None  # cancel callback for scheduled retry
+        # Occupancy the current plan's bands were built for
+        self._planned_occupancy: OccupancyMode | None = None
+        # True while a stale forecast has the optimizer standing down
+        self._in_safe_mode: bool = False
         self._demand_response_active: bool = False
         self._demand_response_delta: float = 0.0
         self._demand_response_end: datetime | None = None
@@ -726,11 +744,11 @@ class HeatPumpOptimizerCoordinator(
             if self._unsub_occupancy_listener:
                 self._unsub_occupancy_listener()
 
-        # Write safe midpoint so thermostat doesn't hold an extreme temp
-        thermo_state = self.thermostat.read_state()
-        if thermo_state.available and self._baseline_ready_for_control and not self._monitor_only:
-            comfort = self._active_comfort_range()
-            await self.thermostat.async_write_safe_default(*comfort)
+        # Hand the thermostat back its flat comfort edges, if we moved it
+        try:
+            await self._restore_flat_setpoints("shutdown")
+        except Exception:  # noqa: BLE001 - shutdown must still persist state
+            _LOGGER.warning("Could not restore flat setpoints on shutdown", exc_info=True)
 
         # Persist everything
         await self._persist_state()
@@ -841,6 +859,15 @@ class HeatPumpOptimizerCoordinator(
             if len(self._temp_history) > 288:  # 24h at 5min intervals
                 self._temp_history = self._temp_history[-288:]
 
+        # Refresh auxiliary appliance states. Nothing called this after the
+        # coordinator was split up, so the appliance sensors never left
+        # "unknown".
+        if self.appliance_manager.configured:
+            try:
+                self.appliance_manager.update()
+            except (ValueError, TypeError, AttributeError):
+                _LOGGER.warning("Appliance state refresh failed", exc_info=True)
+
         # Update room-level occupancy and sensor readings (if configured)
         if self.area_manager is not None:
             self.area_manager.update_occupancy()
@@ -931,7 +958,7 @@ class HeatPumpOptimizerCoordinator(
         outdoor_reading = self.sensor_hub.read_outdoor_temp(
             forecast_snapshot=self.strategic.forecast_snapshot
         )
-        if outdoor_reading and outdoor_reading.stale:
+        if (outdoor_reading and outdoor_reading.stale) or self.sensor_hub.outdoor_sensor_stale:
             ir.async_create_issue(
                 self.hass,
                 DOMAIN,
@@ -1003,6 +1030,13 @@ class HeatPumpOptimizerCoordinator(
             _LOGGER.warning("Energy baseline tracking failed", exc_info=True)
 
         # ── Watchdog checks ─────────────────────────────────────────
+        # An override or a pause suspends *control* for this cycle. It does
+        # not suspend observation: the profiler, the aux learner and the
+        # energy accounting below still run. They used to be skipped by an
+        # early return here, so a paused day vanished from metered energy and
+        # the model stopped learning exactly while the user was steering.
+
+        control_suspended = False
 
         # Override detection (skip in monitor mode — we never write setpoints)
         if not self._monitor_only and self.watchdog.is_override_active:
@@ -1010,20 +1044,16 @@ class HeatPumpOptimizerCoordinator(
                 # Grace expired — resume
                 await self._run_strategic_optimization()
             else:
-                self._phase = PHASE_PAUSED
-                return self._build_data(thermo_state)
+                control_suspended = True
         elif not self._monitor_only and not self._paused:
-            override = self.watchdog.check_override(
-                self.thermostat.last_written_setpoint,
-                thermo_state.effective_setpoint,
-            )
+            expected_sp, actual_sp = self.thermostat.expected_and_actual(thermo_state)
+            override = self.watchdog.check_override(expected_sp, actual_sp)
             if override:
                 self.override_tracker.record_override(
-                    expected_setpoint=self.thermostat.last_written_setpoint or 0,
-                    actual_setpoint=thermo_state.effective_setpoint or 0,
+                    expected_setpoint=expected_sp or 0,
+                    actual_setpoint=actual_sp or 0,
                 )
-                self._phase = PHASE_PAUSED
-                return self._build_data(thermo_state)
+                control_suspended = True
 
         # Mode change detection (with hysteresis)
         if thermo_state.hvac_mode:
@@ -1032,142 +1062,12 @@ class HeatPumpOptimizerCoordinator(
         # ── Paused check ────────────────────────────────────────────
 
         if self._paused:
+            control_suspended = True
+
+        if control_suspended:
             self._phase = PHASE_PAUSED
-            return self._build_data(thermo_state)
-
-        # ── Strategic check: need re-optimization? ──────────────────
-
-        if self.strategic.should_reoptimize(
-            new_forecast,
-            occupancy_timeline=self._occupancy_timeline or None,
-        ):
-            await self._run_strategic_optimization(forecast=new_forecast)
-        elif self._outdoor_sensor_diverges_from_forecast():
-            _LOGGER.info("Outdoor sensor diverges from forecast — triggering re-optimization")
-            await self._run_strategic_optimization(forecast=new_forecast)
-
-        # ── Forecast staleness ──────────────────────────────────────
-
-        if self._is_forecast_stale():
-            _LOGGER.warning("Forecast stale — entering safe mode")
-            self._phase = PHASE_SAFE_MODE
-            self._active = False
-            self._fire_event(EVENT_SAFE_MODE_ENTERED, {
-                "reason": "forecast_stale",
-            })
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                "forecast_unavailable",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="forecast_unavailable",
-            )
-            if self._baseline_ready_for_control and not self._monitor_only:
-                comfort = self._active_comfort_range()
-                await self.thermostat.async_write_safe_default(*comfort)
-            # Don't return — let profiler, baseline, and savings continue below
-
-        # ── Tactical: reality check & setpoint execution ────────────
-
-        schedule = self.strategic.schedule
-        current_entry = self._get_current_entry(now)
-
-        if schedule and self._active and current_entry and thermo_state.indoor_temp is not None and self._baseline_ready_for_control:
-            # Run tactical evaluation
-            tactical_result = self.tactical.evaluate(
-                actual_indoor_temp=thermo_state.indoor_temp,
-                schedule=schedule,
-                current_entry=current_entry,
-                now=now,
-                apparent_temp=self._current_apparent_temp,
-            )
-
-            # Track tactical correction for diagnostic sensor
-            self._last_tactical_correction = tactical_result.setpoint_correction
-
-            # Classify phase
-            self._phase = self._classify_phase(current_entry, thermo_state.indoor_temp)
-
-            # Apply tactical correction or write scheduled setpoint
-            if tactical_result.state == TacticalState.DISTURBED:
-                # Don't write setpoints while disturbed (window open, etc.)
-                _LOGGER.debug("Tactical: %s", tactical_result.reason)
-                # Fire event only on transition into disturbed (not every cycle)
-                if self.tactical._disturbed_since and (now - self.tactical._disturbed_since).total_seconds() < DEFAULT_UPDATE_INTERVAL_MINUTES * 60 + 30:
-                    self._fire_event(EVENT_DISTURBED, {
-                        "error": round(tactical_result.error, 1),
-                        "actual_temp": round(tactical_result.actual_temp, 1),
-                        "predicted_temp": round(tactical_result.predicted_temp, 1) if tactical_result.predicted_temp else None,
-                    })
-            elif tactical_result.should_write_setpoint and tactical_result.corrected_setpoint is not None:
-                target = tactical_result.corrected_setpoint
-                comfort = self._active_comfort_range()
-                current_sp = thermo_state.effective_setpoint
-                target = self._apply_rate_limit(target, current_sp)
-                if not self._monitor_only and (current_sp is None or abs(current_sp - target) > 0.5):
-                    if self._check_dwell_time(now):
-                        await self.thermostat.async_set_temperature(target, *comfort)
-                        self._last_written_setpoint_time = now
-            elif current_entry.is_dual_setpoint:
-                # Shoulder-day plan: hand the thermostat both bounds and let
-                # its heat_cool arbitration do the work. Falls back to the
-                # single-setpoint path on a thermostat without dual support.
-                if not self._monitor_only and self._check_dwell_time(now):
-                    wrote = await self.thermostat.async_set_dual_setpoints(
-                        current_entry.target_temp_low,
-                        current_entry.target_temp_high,
-                    )
-                    if wrote:
-                        self._last_written_setpoint_time = now
-                    else:
-                        current_sp = thermo_state.effective_setpoint
-                        if current_sp is not None:
-                            target = self._apply_rate_limit(
-                                current_entry.target_temp, current_sp
-                            )
-                            if abs(current_sp - target) > 0.5:
-                                await self.thermostat.async_set_temperature(
-                                    target,
-                                    current_entry.target_temp_low,
-                                    current_entry.target_temp_high,
-                                )
-                                self._last_written_setpoint_time = now
-            else:
-                # Write scheduled setpoint if different from current
-                current_sp = thermo_state.effective_setpoint
-                if not self._monitor_only and current_sp is not None:
-                    target = self._apply_rate_limit(current_entry.target_temp, current_sp)
-                    diff = abs(current_sp - target)
-                    if diff > 0.5:
-                        if self._check_dwell_time(now):
-                            comfort = self._active_comfort_range()
-                            await self.thermostat.async_set_temperature(target, *comfort)
-                            self._last_written_setpoint_time = now
-
-            # Disturbed-state timeout triggered re-optimization request
-            if self.tactical.needs_reoptimization:
-                _LOGGER.info("Tactical disturbed timeout — triggering re-optimization")
-                self.tactical.clear_reoptimization_flag()
-                await self._run_strategic_optimization()
-
-            # Feed model tracker with prediction error data
-            if tactical_result.predicted_temp is not None:
-                self._feed_model_tracker(thermo_state, tactical_result, current_entry, now)
         else:
-            # Show "learning" when the model isn't ready for control yet,
-            # rather than "idle" which implies the system could be active.
-            if not self._baseline_ready_for_control:
-                self._phase = PHASE_LEARNING
-            else:
-                self._phase = PHASE_IDLE
-
-        # ── Departure detection (Stage 2 pre-conditioning) ───────────
-
-        if self._precondition_plan and thermo_state.indoor_temp is not None:
-            await self._check_departure_trigger(
-                now, thermo_state.indoor_temp, new_forecast
-            )
+            await self._run_control_cycle(now, thermo_state, new_forecast)
 
         # ── Model confidence milestone ────────────────────────────────
         # Sourced from the profiler's measured coverage. Behavior gates on raw
@@ -1257,48 +1157,10 @@ class HeatPumpOptimizerCoordinator(
                 # No power sensor — use declared strip capacity as a fixed prior
                 self._cached_aux_resistive_btu = self._aux_heat_kw * 3412.0  # kW → BTU/hr
 
-        # ── Savings tracking ──────────────────────────────────────────
-
-        try:
-            actual_cop = None
-            if outdoor_temp is not None:
-                mode = self.strategic.mode or "off"
-                actual_cop = self.counterfactual._cop_at_outdoor_temp(outdoor_temp, mode)
-
-            self.savings_tracker.record_interval(
-                now=now,
-                hvac_running=hvac_running,
-                interval_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
-                power_watts=power_watts,
-                carbon_intensity=co2_intensity,
-                electricity_rate=elec_rate,
-                mode=self.strategic.mode or "off",
-                solar_production_watts=solar_reading.value if solar_reading else None,
-                grid_import_watts=grid_import_reading.value if grid_import_reading else None,
-                actual_cop=actual_cop,
-                aux_heat_active=aux_heat_active,
-                hp_baseline_watts=self.aux_heat_learner.learned_hp_watts,
-                power_measured=power_measured,
-            )
-        except (ValueError, TypeError, ZeroDivisionError, KeyError):
-            _LOGGER.warning("Savings tracking failed", exc_info=True)
-
-        # ── Baseline capture (during learning phase) ───────────────
-
-        try:
-            effective_sp = thermo_state.effective_setpoint
-            if not self.baseline_capture.is_ready and effective_sp is not None:
-                self.baseline_capture.record_observation(
-                    now=dt_util.as_local(now),
-                    setpoint=effective_sp,
-                    mode=self.strategic.mode or "off",
-                )
-                if self.baseline_capture.is_ready and self.baseline_capture.template is None:
-                    self.baseline_capture.build_template()
-                    _LOGGER.info("Baseline schedule captured after %d days",
-                                 self.baseline_capture.sample_days)
-        except (ValueError, TypeError, KeyError):
-            _LOGGER.warning("Baseline capture failed", exc_info=True)
+        # The digital twin steps before the ledger records. The ledger closes
+        # an hour by asking the twin for that hour's result; in the other
+        # order the twin had not closed it yet, the lookup came back empty on
+        # every hour, and the ratio fallback always applied.
 
         # ── Counterfactual simulation step ─────────────────────────
         # The counterfactual models a dual-setpoint (heat_cool) thermostat
@@ -1313,9 +1175,13 @@ class HeatPumpOptimizerCoordinator(
                 )
                 adj_cool = OccupancyAdapter.adjust_comfort_for_mode(
                     self.comfort_cool, "cool", effective_mode,
+                    away_delta=self._away_comfort_delta,
+                    safety_limits=self.safety_limits,
                 )
                 adj_heat = OccupancyAdapter.adjust_comfort_for_mode(
                     self.comfort_heat, "heat", effective_mode,
+                    away_delta=self._away_comfort_delta,
+                    safety_limits=self.safety_limits,
                 )
                 # Baseline setpoints: midpoints of the occupancy-adjusted comfort ranges
                 baseline_sp_low = (adj_heat[0] + adj_heat[1]) / 2
@@ -1350,6 +1216,50 @@ class HeatPumpOptimizerCoordinator(
         except (ValueError, TypeError, ZeroDivisionError, KeyError):
             _LOGGER.warning("Counterfactual simulation failed", exc_info=True)
 
+        # ── Savings tracking ──────────────────────────────────────────
+
+        try:
+            actual_cop = None
+            if outdoor_temp is not None:
+                mode = self.strategic.mode or "off"
+                actual_cop = self.counterfactual._cop_at_outdoor_temp(outdoor_temp, mode)
+
+            self.savings_tracker.record_interval(
+                now=now,
+                hvac_running=hvac_running,
+                interval_minutes=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                power_watts=power_watts,
+                carbon_intensity=co2_intensity,
+                electricity_rate=elec_rate,
+                mode=self.strategic.mode or "off",
+                solar_production_watts=solar_reading.value if solar_reading else None,
+                grid_import_watts=grid_import_reading.value if grid_import_reading else None,
+                actual_cop=actual_cop,
+                aux_heat_active=aux_heat_active,
+                hp_baseline_watts=self.aux_heat_learner.learned_hp_watts,
+                power_measured=power_measured,
+                controlling=self.optimizer_is_controlling,
+            )
+        except (ValueError, TypeError, ZeroDivisionError, KeyError):
+            _LOGGER.warning("Savings tracking failed", exc_info=True)
+
+        # ── Baseline capture (during learning phase) ───────────────
+
+        try:
+            effective_sp = thermo_state.effective_setpoint
+            if not self.baseline_capture.is_ready and effective_sp is not None:
+                self.baseline_capture.record_observation(
+                    now=dt_util.as_local(now),
+                    setpoint=effective_sp,
+                    mode=self.strategic.mode or "off",
+                )
+                if self.baseline_capture.is_ready and self.baseline_capture.template is None:
+                    self.baseline_capture.build_template()
+                    _LOGGER.info("Baseline schedule captured after %d days",
+                                 self.baseline_capture.sample_days)
+        except (ValueError, TypeError, KeyError):
+            _LOGGER.warning("Baseline capture failed", exc_info=True)
+
         # ── Performance profiler feed ─────────────────────────────
         # The profiler handles hvac_mode="off" internally (sets _previous_*
         # for interval tracking but doesn't record a delta). We must call it
@@ -1379,7 +1289,13 @@ class HeatPumpOptimizerCoordinator(
                     aux_heat_active=self._is_aux_heat_running(thermo_state),
                     solar_irradiance=solar_reading.value if solar_reading else None,
                     now=now,
-                    appliance_btu=self.appliance_manager.total_thermal_impact_btu(),
+                    # Appliance heat stays inside the measured drift. It is
+                    # not subtracted here because nothing adds it back when
+                    # the simulator predicts: an appliance's state over the
+                    # next day is not forecastable, and a table recorded
+                    # "without appliances" then simulated without them is
+                    # biased by exactly their average contribution.
+                    appliance_btu=0.0,
                     c_air=c_air,
                     attic_temp=_profiler_attic.value if _profiler_attic else None,
                     sun_elevation=_profiler_sun_elev,
@@ -1419,6 +1335,270 @@ class HeatPumpOptimizerCoordinator(
                 _LOGGER.warning("Failed to persist learning state, will retry next cycle", exc_info=True)
 
         return self._build_data(thermo_state)
+
+    async def _run_control_cycle(
+        self,
+        now: datetime,
+        thermo_state: Any,
+        new_forecast: list[ForecastPoint] | None,
+    ) -> None:
+        """Plan and act for one cycle: strategic, safe mode, tactical, writes.
+
+        Everything that can move the thermostat lives here, so a suspended
+        cycle (override, pause) skips it as a unit.
+        """
+        # ── Strategic check: need re-optimization? ──────────────────
+
+        if self.strategic.should_reoptimize(
+            new_forecast,
+            occupancy_timeline=self._occupancy_timeline or None,
+        ):
+            await self._run_strategic_optimization(forecast=new_forecast)
+        elif (
+            self._planned_occupancy is not None
+            and self.occupancy.get_effective_mode(self._occupancy_timeline or None)
+            != self._planned_occupancy
+        ):
+            # The plan's bands were built for a different occupancy. Someone
+            # coming home should not wait for the next scheduled re-plan.
+            _LOGGER.info("Occupancy changed since the last plan — re-optimizing")
+            await self._run_strategic_optimization(forecast=new_forecast)
+        elif self._outdoor_sensor_diverges_from_forecast():
+            _LOGGER.info("Outdoor sensor diverges from forecast — triggering re-optimization")
+            await self._run_strategic_optimization(forecast=new_forecast)
+
+        # ── Forecast staleness ──────────────────────────────────────
+
+        if self._is_forecast_stale():
+            self._active = False
+            if not self._in_safe_mode:
+                # Act once, on the way in. This block used to run on every
+                # cycle of an outage: an event and a setpoint write each
+                # five minutes for as long as the weather service was down.
+                self._in_safe_mode = True
+                _LOGGER.warning("Forecast stale — entering safe mode")
+                self._fire_event(EVENT_SAFE_MODE_ENTERED, {
+                    "reason": "forecast_stale",
+                })
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    "forecast_unavailable",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="forecast_unavailable",
+                )
+                if self._baseline_ready_for_control:
+                    await self._restore_flat_setpoints("forecast stale")
+            self._phase = PHASE_SAFE_MODE
+        elif self._in_safe_mode:
+            self._in_safe_mode = False
+
+        # ── Tactical: reality check & setpoint execution ────────────
+
+        schedule = self.strategic.schedule
+        current_entry = self._get_current_entry(now)
+
+        if schedule and self._active and current_entry and thermo_state.indoor_temp is not None and self._baseline_ready_for_control:
+            # Run tactical evaluation
+            tactical_result = self.tactical.evaluate(
+                actual_indoor_temp=thermo_state.indoor_temp,
+                schedule=schedule,
+                current_entry=current_entry,
+                now=now,
+                apparent_temp=self._current_apparent_temp,
+            )
+
+            # Track tactical correction for diagnostic sensor
+            self._last_tactical_correction = tactical_result.setpoint_correction
+
+            # Classify phase
+            self._phase = self._classify_phase(current_entry, thermo_state.indoor_temp)
+
+            # Apply tactical correction or write scheduled setpoint
+            if tactical_result.state == TacticalState.DISTURBED:
+                # Don't write setpoints while disturbed (window open, etc.)
+                _LOGGER.debug("Tactical: %s", tactical_result.reason)
+                # Fire event only on transition into disturbed (not every cycle)
+                if self.tactical._disturbed_since and (now - self.tactical._disturbed_since).total_seconds() < DEFAULT_UPDATE_INTERVAL_MINUTES * 60 + 30:
+                    self._fire_event(EVENT_DISTURBED, {
+                        "error": round(tactical_result.error, 1),
+                        "actual_temp": round(tactical_result.actual_temp, 1),
+                        "predicted_temp": round(tactical_result.predicted_temp, 1) if tactical_result.predicted_temp else None,
+                    })
+            elif tactical_result.should_write_setpoint and tactical_result.corrected_setpoint is not None:
+                await self._write_setpoint(
+                    now, thermo_state, current_entry,
+                    corrected=tactical_result.corrected_setpoint,
+                )
+            else:
+                # Write the scheduled setpoint(s) if they differ from current
+                await self._write_setpoint(now, thermo_state, current_entry)
+
+            # Disturbed-state timeout triggered re-optimization request
+            if self.tactical.needs_reoptimization:
+                _LOGGER.info("Tactical disturbed timeout — triggering re-optimization")
+                self.tactical.clear_reoptimization_flag()
+                await self._run_strategic_optimization()
+
+            # Feed model tracker with prediction error data
+            if tactical_result.predicted_temp is not None:
+                self._feed_model_tracker(thermo_state, tactical_result, current_entry, now)
+        else:
+            # Show "learning" when the model isn't ready for control yet,
+            # rather than "idle" which implies the system could be active.
+            if self._in_safe_mode:
+                self._phase = PHASE_SAFE_MODE
+            elif not self._baseline_ready_for_control:
+                self._phase = PHASE_LEARNING
+            else:
+                self._phase = PHASE_IDLE
+
+        # ── Departure detection (Stage 2 pre-conditioning) ───────────
+
+        if self._precondition_plan and thermo_state.indoor_temp is not None:
+            await self._check_departure_trigger(
+                now, thermo_state.indoor_temp, new_forecast
+            )
+
+    # ── Setpoint writes ─────────────────────────────────────────────
+
+    def _write_bands(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """The (heat band, cool band) setpoints may be written within, now."""
+        return (
+            self._active_comfort_range("heat"),
+            self._active_comfort_range("cool"),
+        )
+
+    async def _write_setpoint(
+        self,
+        now: datetime,
+        thermo_state: Any,
+        entry: ScheduleEntry,
+        corrected: float | None = None,
+    ) -> bool:
+        """The one place a planned setpoint leaves the optimizer.
+
+        A heat_cool thermostat always gets both setpoints, each clamped to
+        its own band and to the safety limits: the planned target on the side
+        the plan is steering, and the flat comfort edge on the other. A
+        single-setpoint thermostat gets the target for the mode it is in.
+
+        There used to be three write branches. One wrote a tactical
+        correction through whichever comfort band the thermostat's idle state
+        happened to select, one wrote a dual pair with no clamp at all, and
+        one wrote a heat target clamped to the cooling band. Between them
+        they put 70-76 F on the heat setpoint in winter and 56 F below a
+        58 F safety floor.
+
+        ``corrected`` is a tactical correction to the planned target. It may
+        only relax the target toward the flat comfort edge (less heating,
+        less cooling). A thermostat holding an edge is already a closed
+        loop; "the house is colder than the model predicted" is a reason to
+        fix the model, not to raise the heat setpoint above the floor the
+        occupant asked for.
+        """
+        if self._monitor_only:
+            return False
+
+        mode = entry.mode if entry.mode in ("heat", "cool") else self._plan_mode()
+        heat_band, cool_band = self._write_bands()
+
+        if entry.is_dual_setpoint:
+            heat_target, cool_target = entry.target_temp_low, entry.target_temp_high
+        elif mode == "heat":
+            heat_target, cool_target = entry.target_temp, cool_band[1]
+        else:
+            heat_target, cool_target = heat_band[0], entry.target_temp
+
+        if corrected is not None:
+            if mode == "heat":
+                heat_target = min(heat_target, max(corrected, heat_band[0]))
+            else:
+                cool_target = max(cool_target, min(corrected, cool_band[1]))
+
+        heat_target = max(heat_band[0], min(heat_band[1], heat_target))
+        cool_target = max(cool_band[0], min(cool_band[1], cool_target))
+
+        if thermo_state.hvac_mode == "heat_cool":
+            cur_low = thermo_state.target_temp_low
+            cur_high = thermo_state.target_temp_high
+            low = self._apply_rate_limit(heat_target, cur_low)
+            high = self._apply_rate_limit(cool_target, cur_high)
+            if (
+                cur_low is not None and cur_high is not None
+                and abs(cur_low - low) <= 0.5 and abs(cur_high - high) <= 0.5
+            ):
+                return False
+            if not self._check_dwell_time(now):
+                return False
+            wrote = await self.thermostat.async_set_dual_setpoints(
+                low, high, primary=mode,
+            )
+        elif thermo_state.hvac_mode in ("heat", "cool"):
+            # The thermostat's own mode decides which target it can use.
+            side = thermo_state.hvac_mode
+            target = heat_target if side == "heat" else cool_target
+            band = heat_band if side == "heat" else cool_band
+            current_sp = thermo_state.effective_setpoint
+            target = self._apply_rate_limit(target, current_sp)
+            if current_sp is not None and abs(current_sp - target) <= 0.5:
+                return False
+            if not self._check_dwell_time(now):
+                return False
+            wrote = await self.thermostat.async_set_temperature(target, *band)
+        else:
+            return False
+
+        if wrote:
+            self._last_written_setpoint_time = now
+        return wrote
+
+    async def _restore_flat_setpoints(self, reason: str) -> bool:
+        """Put back the flat comfort edges when the optimizer stops steering.
+
+        Only when there is something of ours to undo and nobody has told us
+        to keep our hands off: not in monitor mode, not while paused, not
+        during a manual override, and not if this session never wrote a
+        setpoint. Unloading while paused used to write a setpoint anyway.
+        """
+        if (
+            self._monitor_only
+            or self._paused
+            or self.watchdog.is_override_active
+            or self.thermostat.last_written_setpoint is None
+        ):
+            return False
+        state = self.thermostat.read_state()
+        if not state.available:
+            return False
+
+        heat_band, cool_band = self._write_bands()
+        floor, ceiling = heat_band[0], cool_band[1]
+        # A morning recovery already under way keeps its setpoint
+        planned_heat = self.strategic.heat_target_at(datetime.now(timezone.utc))
+        if isinstance(planned_heat, (int, float)):
+            floor = max(heat_band[0], min(heat_band[1], float(planned_heat)))
+        if state.hvac_mode == "heat_cool":
+            if (
+                state.target_temp_low is not None
+                and state.target_temp_high is not None
+                and abs(state.target_temp_low - floor) <= 0.5
+                and abs(state.target_temp_high - ceiling) <= 0.5
+            ):
+                return False  # already flat
+        elif state.hvac_mode in ("heat", "cool"):
+            edge = floor if state.hvac_mode == "heat" else ceiling
+            current = state.effective_setpoint
+            if current is not None and abs(current - edge) <= 0.5:
+                return False
+        _LOGGER.info(
+            "Restoring flat setpoints (%s): heat %.1f°F / cool %.1f°F",
+            reason, floor, ceiling,
+        )
+        return await self.thermostat.async_write_flat_default(
+            floor, ceiling, self._plan_mode(),
+        )
 
     # ── Strategic optimization ──────────────────────────────────────
 
@@ -1494,25 +1674,14 @@ class HeatPumpOptimizerCoordinator(
                     exc_info=True,
                 )
 
-        # Adjust comfort for current occupancy (calendar-aware if available)
+        # Current occupancy (calendar-aware if available). The planner applies
+        # it, the sleep window and the morning recovery per hour, once. They
+        # used to be applied here as well and then again per hour, which put
+        # the away delta on twice and planned below the safety floor.
         effective_mode = self.occupancy.get_effective_mode(occupancy_timeline)
-        comfort_cool = OccupancyAdapter.adjust_comfort_for_mode(
-            self.comfort_cool, "cool", effective_mode
-        )
-        comfort_heat = OccupancyAdapter.adjust_comfort_for_mode(
-            self.comfort_heat, "heat", effective_mode
-        )
-
-        # Apply sleep comfort bounds when HOME and within sleep window
-        if (
-            self.sleep_config.get("enabled")
-            and effective_mode == OccupancyMode.HOME
-            and StrategicPlanner._is_in_sleep_window(
-                datetime.now(timezone.utc), self.sleep_config
-            )
-        ):
-            comfort_cool = self.sleep_config.get("comfort_cool", comfort_cool)
-            comfort_heat = self.sleep_config.get("comfort_heat", comfort_heat)
+        self._planned_occupancy = effective_mode
+        comfort_cool = self.comfort_cool
+        comfort_heat = self.comfort_heat
 
         # If reactive overrides calendar (person came home early), fire event
         if (
@@ -1616,6 +1785,7 @@ class HeatPumpOptimizerCoordinator(
                     _aux_threshold,
                     _aux_active,
                     self._optimization_weights(),
+                    effective_mode,
                 ),
                 timeout=OPTIMIZER_TIMEOUT_S,
             )
@@ -1655,7 +1825,7 @@ class HeatPumpOptimizerCoordinator(
             # Update savings tracker with new baseline ratio — only when
             # the optimizer is actually controlling the thermostat, otherwise
             # the ratio produces phantom savings during baseline capture.
-            if self._baseline_ready_for_control:
+            if self.optimizer_is_controlling:
                 self.savings_tracker.set_baseline_ratio(
                     schedule.baseline_runtime_minutes,
                     schedule.optimized_runtime_minutes,
@@ -2028,6 +2198,8 @@ class HeatPumpOptimizerCoordinator(
         """Wire the energy baseline into the savings tracker and A/B trial."""
         self.savings_tracker.set_energy_baseline(self.energy_baseline)
         self.energy_baseline.add_day_listener(self.ab_trial.record_day)
+        # The lifetime savings ledger is banked from measured days
+        self.energy_baseline.add_day_listener(self.savings_tracker.record_measured_day)
 
     @property
     def optimizer_is_controlling(self) -> bool:
@@ -2041,6 +2213,7 @@ class HeatPumpOptimizerCoordinator(
             and not self._paused
             and not self._monitor_only
             and not self.watchdog.is_override_active
+            and self._baseline_ready_for_control
         )
 
     def _record_energy_baseline_interval(self, now: datetime, thermo_state: Any) -> None:
@@ -2529,6 +2702,23 @@ class HeatPumpOptimizerCoordinator(
 
     # ── Kalman filter feeding ────────────────────────────────────────
 
+    def _morning_recovery_config(self) -> MorningRecoveryConfig:
+        """Occupant's morning preference, from the sleep-schedule options."""
+        raw = (self.sleep_config or {}).get("morning") or {}
+        defaults = MorningRecoveryConfig()
+        mode = raw.get("mode", defaults.mode)
+        if mode not in RECOVERY_MODES:
+            mode = defaults.mode
+        hold = _float_or_none(raw.get("hold_temp"))
+        warm = _float_or_none(raw.get("warm_outdoor_temp"))
+        return MorningRecoveryConfig(
+            mode=mode,
+            weekday_time=parse_time(raw.get("weekday_time"), defaults.weekday_time),
+            weekend_time=parse_time(raw.get("weekend_time"), defaults.weekend_time),
+            hold_temp=hold,
+            warm_outdoor_temp=warm if warm is not None else defaults.warm_outdoor_temp,
+        )
+
     def _optimization_weights(self) -> OptimizationWeights:
         """Build the multi-objective weights from configured options.
 
@@ -2538,16 +2728,18 @@ class HeatPumpOptimizerCoordinator(
         while the README advertised rate arbitrage and the config flow
         collected rate entities for it (audit item 5).
 
-        Cost weight only turns on when a rate source actually exists. On a
-        flat tariff the normalized cost score is identical across hours, so
-        this changes nothing there; that is asserted by test, because "flat
-        rate behaves exactly like no rate" is the property that makes the
-        wiring safe to enable by default.
+        Both weights are the user's sliders (0 = ignore), and each only
+        applies when its data source exists. Cost used to be forced to 1.0
+        whenever a rate entity was configured, whatever the slider said, so a
+        user who had set it to 0 was still cost-weighted. On a flat tariff
+        the normalized cost score is identical across hours, so any weight
+        changes nothing there; that is asserted by test.
         """
+        has_rate_source = bool(self._rate_entity_id or self._tou_schedule)
         return OptimizationWeights(
             energy_efficiency=1.0,
             carbon_intensity=self._carbon_weight if self._co2_entity_id else 0.0,
-            electricity_cost=1.0 if self._rate_entity_id else 0.0,
+            electricity_cost=self._cost_weight if has_rate_source else 0.0,
         )
 
     def _get_active_model(self):

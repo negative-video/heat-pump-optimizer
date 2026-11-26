@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+Found by replaying the real setup path and five-minute cycle against ten days of recorder data from a live house, plus a winter simulation of schedule alternatives.
+
+### Added
+
+- **Morning warm-up.** How the heat setpoint returns from the sleep minimum to the daytime minimum is now an occupant preference instead of a clock time. "Warm by a set time" (default: 9:00 on weekdays, 12:00 on weekends) holds the sleep minimum and starts just in time, sized by simulation. "Hold a modest temperature, finish when it warms up outside" holds an interim temperature and finishes once the forecast reaches a threshold. The previous step-at-sleep-end behavior remains available. Configure under Sleep Schedule.
+- `tools/validate.py` and the test suite now fail on a name that is used but never defined in a module.
+
+### Fixed
+
+- The integration could not be imported: `coordinator_helpers.py` used `@callback` without importing it.
+- Opening Configure → Equipment raised an error: the step used a variable it never defined.
+- On a heat/cool (auto) thermostat the heat setpoint could be written to 70-76°F. The side to write was guessed from the indoor temperature against the wrong comfort band. Both setpoints are now always written explicitly, each clamped to its own band.
+- Away and vacation targets could fall below the safety floor: the dual-setpoint write had no clamp and the away widening was applied twice.
+- The "safe default" written on every Home Assistant stop or reload, and repeatedly during a forecast outage, was a comfort-band midpoint (heat 70°F in winter). The optimizer now restores the flat comfort edges, once, and only if it has something of its own to undo.
+- A user pause was lost on restart, and unloading while paused wrote a setpoint.
+- Pausing or a manual override stopped the profiler, the aux-heat learner and energy metering, not just control.
+- Passive-drift and HVAC-rate lookups assumed every table was recorded at 72°F indoors. Each bin now carries the indoor temperature it was recorded at. On a house that winters at 62°F, six-hour coast forecasts improved from 2.4°F to 1.0°F mean error.
+- Thinly observed bins were used verbatim, producing a heating table that read +0.12°F/hr at 46-47°F and +2.18 at 48°F. Exported tables are now shrunk toward the trendline and smoothed across neighbouring bins.
+- Mode detection chose "cool" on a 31°F morning when the afternoon was mild.
+- Mild days produced no plan at all, left the thermostat at its last setpoint and re-planned every five minutes.
+- Tactical corrections could raise the heat setpoint above the comfort floor (or lower the cool setpoint below the ceiling) because the house was colder (or warmer) than the model predicted. Corrections may now only relax a pre-conditioning target toward the flat edge.
+- Override detection compared the heat setpoint it wrote with the cool setpoint the thermostat reported, and treated its own writes as manual overrides.
+- Savings accrued whether or not the optimizer was controlling anything. Hours in monitor-only mode, paused or overridden now claim nothing, and the lifetime totals are banked from measured days instead of the digital twin. Totals from earlier versions are retired on first load.
+- The digital twin was consulted before it had closed the hour, so its result was never used.
+- After an upgrade the counterfactual ran at a default 30,000 BTU/hr instead of the configured tonnage.
+- A calendar's default "home" marked an empty house as occupied; a calendar "away" was ignored when no presence entities were configured.
+- Auxiliary appliance states were never refreshed, so their sensors stayed unknown.
+- `away_comfort_delta`, `override_grace_period_hours`, `occupancy_debounce_minutes` and `cost_weight` were read from options and then ignored.
+- A configured outdoor sensor that had gone stale was silently replaced by the forecast without raising the repair issue.
+- "Calibrated" savings accuracy was reported regardless of how wrong recent temperature forecasts had been.
+- Restarting cleared today's energy, the forecast-error history and the stale-sensor window.
+
+### Removed
+
+- Weather Heat Transfer, Solar Heat Gain, Occupancy Heat Gain and Boundary Zone Heat Transfer sensors. Nothing had produced their values since the thermal estimator was removed. Their registry entries, and those of four older estimator sensors, are cleaned up on upgrade.
+- The "Enable coefficient calibration" option, which no longer did anything.
+
+### Changed
+
+- Effective Cooling/Heating Rate have new entity IDs (`..._effective_cooling_rate`, `..._effective_heating_rate`). Their unit had changed from BTU/hr to °F/h under the old IDs, which the recorder reports as a unit conflict.
+- Auxiliary appliance heat is no longer subtracted from profiler observations. It stays inside the measured drift, because nothing added it back at prediction time.
+
 ## 0.1.0
 
 Initial release.

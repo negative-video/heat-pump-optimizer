@@ -223,7 +223,6 @@
           "override_grace_period_hours": "Override grace period",
           "reoptimize_interval_hours": "Re-optimization interval",
           "max_setpoint_change_per_hour": "Maximum temperature change rate",
-          "calibration_enabled": "Enable coefficient calibration (experimental)",
           "thermostat_deadband": "Thermostat deadband (°F)",
           "dwell_time_minutes": "Minimum time between setpoint changes"
         },
@@ -232,7 +231,6 @@
           "override_grace_period_hours": "How long to pause optimization after you manually adjust the thermostat.",
           "reoptimize_interval_hours": "How often to rebuild the schedule from the latest forecast.",
           "max_setpoint_change_per_hour": "Limits how quickly the optimizer can change your setpoint to avoid jarring temperature swings.",
-          "calibration_enabled": "Applies daily calibration of physics coefficients (wind infiltration, attic conductance, COP slopes) to your specific home. When off, the calibrator still runs in observe-only mode and logs proposed adjustments to diagnostic sensors.",
           "thermostat_deadband": "The temperature deadband (hysteresis) your thermostat uses. Used by the counterfactual simulator to model baseline behavior. Most thermostats use 0.5°F.",
           "dwell_time_minutes": "Minimum time between setpoint writes (5-30 min). Increase if your thermostat reacts poorly to frequent changes."
         }
@@ -259,23 +257,33 @@
       },
       "sleep_schedule": {
         "title": "Sleep Schedule",
-        "description": "Optional tighter comfort bounds during sleeping hours. When enabled, the optimizer uses these narrower ranges at night so it won't pre-heat or pre-cool aggressively while you're sleeping.",
+        "description": "Optional tighter comfort bounds during sleeping hours, and how the house warms back up afterwards. When enabled, the optimizer uses these narrower ranges at night so it won't pre-heat or pre-cool aggressively while you're sleeping. The morning options below apply to heating: they decide when the heat setpoint climbs from the sleep minimum back to the daytime minimum.",
         "data": {
           "sleep_schedule_enabled": "Enable sleep schedule",
           "sleep_schedule_start": "Bedtime",
-          "sleep_schedule_end": "Wake time",
+          "sleep_schedule_end": "Sleep ends",
           "sleep_comfort_cool_min": "Sleep: coolest target (cooling)",
           "sleep_comfort_cool_max": "Sleep: warmest allowed (cooling)",
           "sleep_comfort_heat_min": "Sleep: coolest allowed (heating)",
-          "sleep_comfort_heat_max": "Sleep: warmest target (heating)"
+          "sleep_comfort_heat_max": "Sleep: warmest target (heating)",
+          "morning_recovery_mode": "Morning warm-up",
+          "morning_weekday_time": "Weekday time",
+          "morning_weekend_time": "Weekend time",
+          "morning_hold_temp": "Interim temperature (energy first only)",
+          "morning_warm_outdoor_temp": "Outdoor temperature to finish at (energy first only)"
         },
         "data_description": {
           "sleep_schedule_start": "When to switch to sleep comfort bounds (e.g. 22:00).",
-          "sleep_schedule_end": "When to switch back to daytime comfort bounds (e.g. 07:00).",
+          "sleep_schedule_end": "When sleep comfort bounds stop applying (e.g. 07:00). The heat setpoint then follows the morning warm-up choice below.",
           "sleep_comfort_cool_min": "How cool the optimizer will target at night when cooling. Example: 70\u00b0F.",
           "sleep_comfort_cool_max": "How warm you'll accept at night when cooling. Example: 76\u00b0F.",
           "sleep_comfort_heat_min": "How cool you'll accept at night when heating. Example: 60\u00b0F.",
-          "sleep_comfort_heat_max": "How warm the optimizer will target at night when heating. Example: 66\u00b0F."
+          "sleep_comfort_heat_max": "How warm the optimizer will target at night when heating. Example: 66\u00b0F.",
+          "morning_recovery_mode": "Warm by a set time: the house reaches the daytime heating minimum by the time below, starting as late as the forecast allows. Costs more on cold mornings because the heat pump works in the coldest hours. Hold and wait: holds the interim temperature after sleep ends and finishes once it is warm enough outside, or at the time below at the latest. Uses less energy; the house reaches full temperature later.",
+          "morning_weekday_time": "Monday to Friday. Warm by a set time: when the house should be at the daytime minimum. Hold and wait: the latest the final warm-up may start.",
+          "morning_weekend_time": "Saturday and Sunday. Same meaning as the weekday time.",
+          "morning_hold_temp": "Heat setpoint held between the end of sleep and the final warm-up. Leave empty to use halfway between the sleep minimum and the daytime minimum.",
+          "morning_warm_outdoor_temp": "The final warm-up starts once the forecast outdoor temperature reaches this. Heat pumps deliver noticeably more heat above about 35\u00b0F."
         }
       },
       "presence": {
@@ -621,8 +629,8 @@
       "model_confidence": { "name": "Model Confidence", "description": "How well the optimizer understands your home's thermal behavior. Grows over days and weeks as it observes more heating and cooling cycles." },
       "thermal_time_constant": { "name": "Thermal Time Constant", "description": "How long your home holds a temperature offset. A short time constant means stored heat or coolth leaks away before it can be used, which is what decides whether pre-conditioning pays." },
       "thermal_mass": { "name": "Building Heat Storage", "description": "How much heat your home's walls, floors, and furnishings can absorb. Higher values mean temperatures change slowly, which is good for coasting." },
-      "effective_cooling_capacity": { "name": "Effective Cooling Rate", "description": "How fast the equipment itself can pull the house down at the current outdoor temperature, with the envelope load removed. Measured, not derived from a nameplate rating." },
-      "effective_heating_capacity": { "name": "Effective Heating Rate", "description": "How fast the equipment itself can push the house up at the current outdoor temperature, with the envelope load removed. Measured, not derived from a nameplate rating." },
+      "effective_cooling_rate": { "name": "Effective Cooling Rate", "description": "How fast the equipment itself can pull the house down at the current outdoor temperature, with the envelope load removed. Measured, not derived from a nameplate rating." },
+      "effective_heating_rate": { "name": "Effective Heating Rate", "description": "How fast the equipment itself can push the house up at the current outdoor temperature, with the envelope load removed. Measured, not derived from a nameplate rating." },
       "schedule": { "name": "Optimization Schedule", "description": "The optimizer's current plan showing when it will pre-heat, pre-cool, or coast over the next 24 hours." },
       "outdoor_temp_source": { "name": "Outdoor Temperature", "description": "The outdoor temperature the optimizer is using, sourced from your weather entity or outdoor sensors." },
       "indoor_temp_source": { "name": "Indoor Temperature", "description": "The indoor temperature reading the optimizer is using, which may be averaged from multiple sensors." },
@@ -632,11 +640,11 @@
       "energy_baseline_status": { "name": "Energy Baseline Status", "description": "Where the weather-normalized baseline came from: measured (fitted to your own optimizer-off days), profile_seed (estimated from a thermostat profile), or none (not enough data yet). Attributes show the kWh per degree-day slopes so you can check them by hand." },
       "ab_trial": { "name": "A/B Validation Trial", "description": "Status of the A/B trial that alternates the optimizer on and off and compares metered kWh per degree-day between the two. The only test that can actually confirm the savings." },
       "savings_kwh_today": { "name": "Modeled Savings Today", "description": "Kilowatt-hours saved today according to the digital twin simulation of your old schedule. This is a modeled comparison, not a measurement: use Measured Savings for the real number." },
-      "savings_kwh_cumulative": { "name": "Modeled Savings Total", "description": "Total kilowatt-hours saved since installation according to the digital twin simulation. Modeled, not measured." },
+      "savings_kwh_cumulative": { "name": "Energy Saved Total", "description": "Kilowatt-hours saved on days the optimizer was in control, measured against the weather-normalized energy use of days it was not. Banked once per completed day. Days in monitor-only mode, paused or overridden are never counted." },
       "savings_cost_today": { "name": "Cost Saved Today", "description": "Money saved on your electricity bill today by running HVAC more efficiently." },
-      "savings_cost_cumulative": { "name": "Cost Saved Total", "description": "Total money saved since the optimizer was installed." },
+      "savings_cost_cumulative": { "name": "Cost Saved Total", "description": "The measured energy saving priced at that day's average electricity rate, summed over days the optimizer was in control." },
       "savings_co2_today": { "name": "CO2 Avoided Today", "description": "Grams of carbon dioxide emissions avoided today by using less electricity or shifting to cleaner grid hours." },
-      "savings_co2_cumulative": { "name": "CO2 Avoided Total", "description": "Total carbon dioxide emissions avoided since the optimizer was installed." },
+      "savings_co2_cumulative": { "name": "CO2 Avoided Total", "description": "The measured energy saving multiplied by that day's average grid carbon intensity, summed over days the optimizer was in control." },
       "baseline_kwh_today": { "name": "Baseline Energy Today", "description": "How much energy your old thermostat schedule would have used today without the optimizer." },
       "worst_case_kwh_today": { "name": "Worst Case Energy Today", "description": "Maximum possible energy usage if HVAC ran continuously all day. Used as an upper bound for savings calculations." },
       "hvac_energy_today": { "name": "HVAC Energy Today", "description": "Actual HVAC energy consumed today. Compatible with the HA Energy Dashboard. Use HA's utility_meter integration to create weekly, monthly, or yearly tracking." },

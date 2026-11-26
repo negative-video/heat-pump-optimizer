@@ -146,9 +146,12 @@ class TestCoordinatorBuildsWeights:
         # Assistant, which is not installed in this environment.
         src = io.open(os.path.join(CC, "coordinator.py"), encoding="utf-8").read()
         assert "_optimization_weights" in src
-        assert "electricity_cost=1.0 if self._rate_entity_id else 0.0" in src, (
-            "cost weight must be gated on an actual configured rate source"
+        # Gated on a rate source, and scaled by the user's slider rather than
+        # forced to 1.0: a configured weight of 0 has to mean "ignore cost".
+        assert "electricity_cost=self._cost_weight if has_rate_source else 0.0" in src, (
+            "cost weight must be the configured slider, gated on a rate source"
         )
+        assert "has_rate_source = bool(self._rate_entity_id or self._tou_schedule)" in src
 
     def test_strategic_optimize_accepts_weights(self):
         import inspect

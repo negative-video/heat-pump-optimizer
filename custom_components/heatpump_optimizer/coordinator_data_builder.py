@@ -261,6 +261,14 @@ class DataBuilderMixin:
             "history_bootstrap_result": self._history_bootstrap_result,
             "bootstrap_retry_count": self._bootstrap_retry_count,
 
+            # Lifetime ledger reset marker (drives last_reset on the totals)
+            "savings_ledger_reset_at": (
+                self.savings_tracker.ledger_reset_at.isoformat()
+                if self.savings_tracker.ledger_reset_at else None
+            ),
+            # What the planner decided about upcoming mornings
+            "morning_recovery": self.strategic.recovery_plan,
+
             "house_thermal_load_btu": self._compute_net_passive_load(),
 
             # Coefficient calibration (slow outer loop)

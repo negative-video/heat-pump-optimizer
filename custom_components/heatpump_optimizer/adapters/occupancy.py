@@ -53,6 +53,9 @@ class OccupancyAdapter:
             entity_ids = [entity_id]
         self.entity_ids = entity_ids or []
         self.debounce_minutes = debounce_minutes
+        # How far the comfort band widens when nobody is home. Configurable;
+        # the module constant is only the default.
+        self.away_comfort_delta: float = AWAY_COMFORT_DELTA
         self._forced_mode: OccupancyMode | None = None
         self._last_active: dict[str, datetime] = {}
         # Extra person entity states that count as "home" (e.g., zone names)
@@ -118,13 +121,17 @@ class OccupancyAdapter:
         Returns:
             Adjusted (min, max) comfort range.
         """
-        return self.adjust_comfort_for_mode(comfort, mode, self.get_mode())
+        return self.adjust_comfort_for_mode(
+            comfort, mode, self.get_mode(), away_delta=self.away_comfort_delta
+        )
 
     @staticmethod
     def adjust_comfort_for_mode(
         comfort: tuple[float, float],
         hvac_mode: str,
         occupancy_mode: OccupancyMode,
+        away_delta: float = AWAY_COMFORT_DELTA,
+        safety_limits: tuple[float, float] | None = None,
     ) -> tuple[float, float]:
         """Adjust comfort range for a specific occupancy mode.
 
@@ -135,23 +142,32 @@ class OccupancyAdapter:
             comfort: Base (min, max) comfort range in °F.
             hvac_mode: HVAC mode ("cool" or "heat").
             occupancy_mode: The occupancy state to apply.
+            away_delta: °F the band widens in each direction when away.
+            safety_limits: Absolute (heat floor, cool ceiling). An away or
+                vacation band is never allowed past these: an empty house
+                still has pipes and plants in it.
 
         Returns:
             Adjusted (min, max) comfort range.
         """
         if occupancy_mode == OccupancyMode.HOME:
-            return comfort
-
-        if occupancy_mode == OccupancyMode.VACATION:
+            adjusted = (comfort[0], comfort[1])
+        elif occupancy_mode == OccupancyMode.VACATION:
             if hvac_mode == "cool":
-                return (comfort[0], VACATION_COOL_SETPOINT)
-            return (VACATION_HEAT_SETPOINT, comfort[1])
+                adjusted = (comfort[0], VACATION_COOL_SETPOINT)
+            else:
+                adjusted = (VACATION_HEAT_SETPOINT, comfort[1])
+        else:
+            # Away: widen in each direction
+            adjusted = (comfort[0] - away_delta, comfort[1] + away_delta)
 
-        # Away: widen by AWAY_COMFORT_DELTA in each direction
-        return (
-            comfort[0] - AWAY_COMFORT_DELTA,
-            comfort[1] + AWAY_COMFORT_DELTA,
-        )
+        if safety_limits is None:
+            return adjusted
+        lo = max(adjusted[0], safety_limits[0])
+        hi = min(adjusted[1], safety_limits[1])
+        if hi < lo:
+            hi = lo
+        return (lo, hi)
 
     def get_effective_mode(
         self,
@@ -167,13 +183,23 @@ class OccupancyAdapter:
 
         This enables graceful override: if the calendar says AWAY but the
         reactive sensor detects someone home, the person wins.
+
+        The reverse does not hold. The calendar is a forecast, and its "home"
+        is usually just the default for "no event right now". When presence
+        entities are configured and none of them is home, the house is empty
+        whatever the calendar says; the calendar may only refine that to
+        vacation. Letting a default "home" win here reported a house as
+        occupied through 131 hours in which nobody was in it.
         """
         if self._forced_mode is not None:
             return self._forced_mode
 
-        # Reactive check: if entities detect someone is home, that trumps calendar
+        # Reactive check: if entities detect someone is home, that trumps
+        # calendar. With no presence entities the reactive answer is only a
+        # default ("home"), not a detection, and must not outrank a calendar
+        # event that says otherwise.
         reactive_mode = self._get_reactive_mode()
-        if reactive_mode == OccupancyMode.HOME:
+        if self.entity_ids and reactive_mode == OccupancyMode.HOME:
             return OccupancyMode.HOME
 
         # Calendar check: look up current time in the timeline
@@ -182,11 +208,12 @@ class OccupancyAdapter:
             for point in calendar_timeline:
                 if point.start_time <= now < point.end_time:
                     mode_str = point.mode.lower()
-                    if mode_str == "away":
-                        return OccupancyMode.AWAY
                     if mode_str == "vacation":
                         return OccupancyMode.VACATION
-                    if mode_str == "home":
+                    if mode_str == "away":
+                        return OccupancyMode.AWAY
+                    if mode_str == "home" and not self.entity_ids:
+                        # No presence entities: the calendar is all we have.
                         return OccupancyMode.HOME
                     break
 

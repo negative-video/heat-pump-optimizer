@@ -322,8 +322,14 @@ class TestOptimizeWithTimeline:
         # Occupancy hash should be stored
         assert planner._last_occupancy_hash != ""
 
-    def test_no_timeline_no_stamping(self):
-        """Without timeline, forecast points remain unstamped."""
+    def test_no_timeline_stamps_home_band(self):
+        """Without a timeline every hour carries the HOME band for the mode.
+
+        Bands are derived per hour unconditionally now (the sleep window and
+        the morning recovery both need that, calendar or not), so the stamp
+        is always present; with no timeline and no sleep schedule it simply
+        equals the band that was passed in.
+        """
         optimizer = _mock_optimizer()
         planner = StrategicPlanner(optimizer=optimizer, resist_balance_point=50.2)
 
@@ -337,9 +343,9 @@ class TestOptimizeWithTimeline:
         )
 
         assert schedule is not None
-        # No stamping without timeline
-        assert forecast[0].comfort_min is None
-        assert forecast[0].comfort_max is None
+        # Cool mode at 90F outdoor: every hour gets the HOME cool band
+        assert all(pt.comfort_min == 70.0 for pt in forecast)
+        assert all(pt.comfort_max == 78.0 for pt in forecast)
 
 
 # ── Tests: Lookup Occupancy At ────────────────────────────────────────

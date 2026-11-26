@@ -307,13 +307,25 @@ class TestOptimize:
         assert result is not None
         assert sp.mode == "heat"
 
-    def test_off_mode_returns_none(self):
-        """When detect_mode returns off, optimize returns None."""
+    def test_mild_day_holds_a_flat_floor_and_ceiling(self):
+        """Near the balance point there is still a plan: the comfort edges.
+
+        Mild weather used to return no schedule at all. The thermostat then
+        kept whatever had last been written, and because nothing recorded
+        that a run had happened, the planner re-ran every cycle.
+        """
         sp = make_planner(balance_point=50.0)
         forecast = make_forecast([49, 50, 51, 50, 49, 50, 51, 50])
+        assert sp.detect_mode(forecast) == "off"
+
         result = sp.optimize(70.0, forecast, COMFORT_COOL, COMFORT_HEAT)
-        assert result is None
-        assert sp.mode is None
+
+        assert result is not None and result.dual_setpoint
+        assert {e.target_temp_low for e in result.entries} == {COMFORT_HEAT[0]}
+        assert {e.target_temp_high for e in result.entries} == {COMFORT_COOL[1]}
+        assert sp.mode in ("heat", "cool")
+        # The run is recorded, so the next cycle does not plan again
+        assert sp.should_reoptimize(forecast) is False
 
     def test_optimizer_exception_returns_none(self):
         mock_opt = make_mock_optimizer()

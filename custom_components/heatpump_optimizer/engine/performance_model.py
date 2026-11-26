@@ -31,9 +31,10 @@ from ..const import DEFAULT_HVAC_POWER_WATTS
 # residential 10 kW backup element; overridden per install where known.
 DEFAULT_AUX_POWER_WATTS = 10000.0
 
-# The empirical delta tables are anchored at the indoor temperature the
-# thermostat usually holds. Both the HVAC tables and the drift table share
-# this anchor, which is what lets gross = net - drift come out clean.
+# Fallback indoor anchor for a delta table whose recording temperature is
+# unknown (the synthetic defaults, or an imported profile that predates anchor
+# tracking). A profiler-built model carries the indoor temperature each bin
+# was actually recorded at and never needs this.
 NOMINAL_INDOOR_F = 72.0
 
 
@@ -67,6 +68,19 @@ class PerformanceModel:
         else:
             self._aux_heat_deltas = {}
             self._aux_heat_trendline = None
+
+        # Indoor temperature each table was recorded at. A delta measured
+        # with the house at 62 F says nothing direct about a house at 72 F;
+        # every indoor correction below is relative to these anchors.
+        self._indoor_anchors: dict[str, dict[int, float]] = {}
+        self._indoor_anchor_means: dict[str, float] = {}
+        for _mode in ("cool_1", "heat_1", "auxiliary_heat_1", "resist"):
+            _section = profile_data["temperature"].get(_mode) or {}
+            _table = _section.get("indoor_anchor") or {}
+            if _table:
+                self._indoor_anchors[_mode] = {int(k): float(v) for k, v in _table.items()}
+            if _section.get("indoor_anchor_mean") is not None:
+                self._indoor_anchor_means[_mode] = float(_section["indoor_anchor_mean"])
 
         # Balance points
         self.heat_balance_point = profile_data["balance_point"].get("heat_1")  # 24.9°F
@@ -245,34 +259,68 @@ class PerformanceModel:
             return True
         return not (observed[0] <= outdoor_temp <= observed[1])
 
-    def _indoor_correction(self, indoor_temp: float | None) -> float:
-        """Drift-slope correction for running away from the nominal indoor temp.
+    def indoor_anchor(self, mode: str, outdoor_temp: float) -> float:
+        """Indoor temperature the ``mode`` table was recorded at, near this
+        outdoor temperature.
+
+        Per outdoor bin where the profiler tracked it, because a house is not
+        held at one temperature all year: the bins near 30 F outdoor were
+        recorded in winter at the heating setpoint and the bins near 90 F in
+        summer at the cooling setpoint. Falls back to the mode's mean, then
+        to ``NOMINAL_INDOOR_F``.
+        """
+        table = self._indoor_anchors.get(mode)
+        if table:
+            temps = sorted(table)
+            if outdoor_temp <= temps[0]:
+                return table[temps[0]]
+            if outdoor_temp >= temps[-1]:
+                return table[temps[-1]]
+            lower = max(t for t in temps if t <= outdoor_temp)
+            upper = min(t for t in temps if t >= outdoor_temp)
+            if lower == upper:
+                return table[lower]
+            frac = (outdoor_temp - lower) / (upper - lower)
+            return table[lower] + frac * (table[upper] - table[lower])
+        return self._indoor_anchor_means.get(mode, NOMINAL_INDOOR_F)
+
+    def _indoor_correction(
+        self,
+        indoor_temp: float | None,
+        mode: str = "resist",
+        outdoor_temp: float | None = None,
+    ) -> float:
+        """Drift-slope correction for running away from the recorded indoor temp.
 
         The empirical delta tables were recorded at whatever indoor temp the
-        thermostat happened to hold, which is ~72 F. The optimizer's entire
-        purpose is to visit temperatures that are not that: pre-cool to 70,
-        coast to 78. At 70 F indoor the envelope gain is larger, so net
-        cooling is genuinely slower than the table says.
+        thermostat happened to hold. The optimizer's entire purpose is to
+        visit temperatures that are not that: pre-cool to 70, coast to 78. At
+        70 F indoor the envelope gain is larger, so net cooling is genuinely
+        slower than the table says.
 
         Decomposing net = gross + drift, the gross HVAC forcing is
         indoor-independent to first order; only the drift term moves with
-        indoor temp. Since ``passive_drift`` already applies
-        ``base - slope * (T_in - 72)``, the same term carries through to the
-        net rate unchanged:
+        indoor temp, so with ``A`` the temperature the table was recorded at:
 
-            net(T_in) = [net_table - drift_base] + [drift_base - k(T_in - 72)]
-                      = net_table - k(T_in - 72)
+            net(T_in) = net_table - k(T_in - A)
 
         Note this is the *same* sign for heating and cooling, not mirrored:
         a warmer house both cools faster and heats slower for the same reason.
-        Applying it here keeps the simulator's pre-cool cost and coast payback
-        mutually consistent, which they were not while drift was corrected and
-        the HVAC rates were not.
+
+        ``A`` used to be a constant 72 F. On a house that winters at 62 F
+        that made every winter lookup 10 F times the drift slope too warm:
+        at 30 F outdoor and 60 F indoor the model predicted the house would
+        warm itself, and six-hour coast forecasts ran 2.4 F high.
         """
         if indoor_temp is None:
             return 0.0
         slope = (self._resist_trendline or {}).get("slope", 0.03)
-        return slope * (indoor_temp - 72.0)
+        anchor = (
+            self.indoor_anchor(mode, outdoor_temp)
+            if outdoor_temp is not None
+            else self._indoor_anchor_means.get(mode, NOMINAL_INDOOR_F)
+        )
+        return slope * (indoor_temp - anchor)
 
     def cooling_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of cooling runtime at given outdoor temp.
@@ -292,7 +340,7 @@ class PerformanceModel:
         """
         return self._lookup_delta(
             self._cool_deltas, self._cool_trendline, outdoor_temp
-        ) - self._indoor_correction(indoor_temp)
+        ) - self._indoor_correction(indoor_temp, "cool_1", outdoor_temp)
 
     def heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of heating runtime at given outdoor temp.
@@ -308,7 +356,7 @@ class PerformanceModel:
         """
         return self._lookup_delta(
             self._heat_deltas, self._heat_trendline, outdoor_temp
-        ) - self._indoor_correction(indoor_temp)
+        ) - self._indoor_correction(indoor_temp, "heat_1", outdoor_temp)
 
     def aux_heating_delta(self, outdoor_temp: float, indoor_temp: float | None = None) -> float:
         """Indoor °F change per hour of auxiliary (electric resistance) heat runtime.
@@ -319,7 +367,7 @@ class PerformanceModel:
             return 0.0
         return self._lookup_delta(
             self._aux_heat_deltas, self._aux_heat_trendline, outdoor_temp
-        ) - self._indoor_correction(indoor_temp)
+        ) - self._indoor_correction(indoor_temp, "auxiliary_heat_1", outdoor_temp)
 
     def passive_drift(
         self,
@@ -358,7 +406,7 @@ class PerformanceModel:
         if indoor_temp is None:
             return base
         slope = trendline["slope"] if trendline else 0.03
-        return base - slope * (indoor_temp - 72.0)
+        return base - slope * (indoor_temp - self.indoor_anchor("resist", outdoor_temp))
 
     # ── Gross HVAC forcing and energy ──────────────────────────────
 
@@ -372,24 +420,34 @@ class PerformanceModel:
 
         ``net_delta(T_out) - passive_drift(T_out, solar)``, sign-aware:
         negative for cooling, positive for heating. Both terms are evaluated
-        at the tables' shared nominal indoor anchor, because the gross rate is
-        indoor-independent to first order -- only the drift component shifts
-        with indoor temperature, and it has been subtracted out.
+        at the indoor temperature the HVAC table was recorded at, because the
+        gross rate is indoor-independent to first order -- only the drift
+        component shifts with indoor temperature, and it has been subtracted
+        out.
 
         This is the correct input to any efficiency comparison. The net delta
         is not: at a hot outdoor temperature most of the machine's output is
         merely cancelling a simultaneous envelope gain, so the net rate reads
         as capacity loss that the equipment did not actually suffer.
         """
-        drift = self.passive_drift(outdoor_temp, solar_condition=solar_condition)
+        table = {"cool": "cool_1", "heat": "heat_1", "aux_heat": "auxiliary_heat_1"}.get(mode)
+        if table is None:
+            return 0.0
+        # Subtract the drift the house had *while that table was recorded*:
+        # the drift table evaluated at the HVAC table's own indoor anchor.
+        # With one shared anchor this reduced to drift(T_out); with measured
+        # per-table anchors it no longer does.
+        drift = self.passive_drift(
+            outdoor_temp,
+            indoor_temp=self.indoor_anchor(table, outdoor_temp),
+            solar_condition=solar_condition,
+        )
 
         if mode == "cool":
             return self.cooling_delta(outdoor_temp) - drift
         if mode == "heat":
             return self.heating_delta(outdoor_temp) - drift
-        if mode == "aux_heat":
-            return self.aux_heating_delta(outdoor_temp) - drift
-        return 0.0
+        return self.aux_heating_delta(outdoor_temp) - drift
 
     def set_power_table(
         self,
