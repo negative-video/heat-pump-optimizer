@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1
+
+### Fixed
+
+- The sidebar panel was a blank page. `panel.js` had a syntax error (a dangling `else` left by the estimator removal), so the browser refused to load it.
+- The panel looked entities up by internal key, while entity IDs come from display names. Seventeen lookups never matched: the panel was permanently in its "learning" layout, and the savings, model-accuracy and pre-conditioning figures never appeared. Entities are now resolved through the frontend entity registry, with the ID suffix as a fallback.
+- The Building Profile and learning cards graded an R-value, thermal mass, HVAC tonnage and solar gain from sensors that no longer exist. They now show what is measured: the thermal time constant and the current heating and cooling rates.
+- The House Thermal Load card no longer lists removed components as "+0 BTU/hr".
+
+### Added
+
+- `tools/validate.py` and the test suite parse the panel's JavaScript, so a syntax error fails validation instead of reaching a browser.
+
 ## 0.3.0
 
 Found by replaying the real setup path and five-minute cycle against ten days of recorder data from a live house, plus a winter simulation of schedule alternatives.

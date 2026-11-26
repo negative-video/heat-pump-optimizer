@@ -22,10 +22,57 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
-/** Find the optimizer entity whose ID contains the prefix and ends with `_<suffix>`. */
+// Entity IDs come from the entity's display name, not from the internal key
+// the cards were written against. These lookups never matched anything, so
+// the savings tier always read as "learning" and the savings, accuracy and
+// pre-conditioning figures never appeared.
+const ENTITY_ALIASES = {
+  savings_accuracy_tier: "savings_accuracy",
+  model_accuracy: "model_accuracy_mae",
+  savings_kwh_today: "energy_saved_today",
+  savings_kwh_cumulative: "energy_saved_total",
+  savings_cost_today: "cost_saved_today",
+  savings_cost_cumulative: "cost_saved_total",
+  savings_co2_today: "co2_avoided_today",
+  savings_co2_cumulative: "co2_avoided_total",
+  baseline_kwh_today: "baseline_energy_today",
+  baseline_avg_cop: "baseline_average_cop",
+  optimized_avg_cop: "optimized_average_cop",
+  cop_improvement_pct: "cop_improvement",
+  rate_savings_today: "rate_arbitrage_savings_today",
+  preconditioning_status: "pre_conditioning_status",
+  profiler_status: "profiler",
+};
+
+// Entity IDs keyed by the integration's own entity key, from the frontend's
+// entity registry. This is exact: it does not depend on what an entity is
+// called, in which language, or whether the user renamed it. The suffix
+// match below remains for entities without a key (binary sensors, the
+// switch) and for frontends that do not expose the registry.
+let ENTITY_IDS_BY_KEY = {};
+function indexEntities(hass) {
+  const out = {};
+  const registry = hass && hass.entities;
+  if (registry) {
+    for (const [id, entry] of Object.entries(registry)) {
+      if (entry && entry.platform === "heatpump_optimizer" && entry.translation_key) {
+        out[entry.translation_key] = id;
+      }
+    }
+  }
+  ENTITY_IDS_BY_KEY = out;
+}
+
+/** Find an optimizer entity by its key, falling back to an ID suffix match. */
 function findEntity(states, suffix) {
-  for (const id of Object.keys(states)) {
-    if (id.includes(ENTITY_PREFIX) && id.endsWith(`_${suffix}`)) return states[id];
+  const byKey = ENTITY_IDS_BY_KEY[suffix];
+  if (byKey && states[byKey]) return states[byKey];
+  const wanted = [suffix];
+  if (ENTITY_ALIASES[suffix]) wanted.push(ENTITY_ALIASES[suffix]);
+  for (const name of wanted) {
+    for (const id of Object.keys(states)) {
+      if (id.includes(ENTITY_PREFIX) && id.endsWith(`_${name}`)) return states[id];
+    }
   }
   return null;
 }
@@ -115,7 +162,7 @@ function renderAlerts(states) {
   const auxHeat = findBinary(states, "aux_heat_active");
 
   if (phase?.state === "safe_mode")
-    alerts.push({ cls: "alert-error", msg: "Safe mode \u2014 using conservative defaults" });
+    alerts.push({ cls: "alert-error", msg: "Safe mode: using conservative defaults" });
   if (auxHeat?.state === "on") {
     const auxThresh = findEntity(states, "aux_heat_threshold");
     const threshMsg = hasValue(auxThresh) ? ` (threshold: ${fmt(auxThresh, 0)}° eff)` : "";
@@ -124,11 +171,11 @@ function renderAlerts(states) {
   if (stale?.state === "on")
     alerts.push({ cls: "alert-warning", msg: "Temperature sensor may be stale" });
   if (override?.state === "on")
-    alerts.push({ cls: "alert-info", msg: "Manual override detected \u2014 optimizer paused" });
+    alerts.push({ cls: "alert-info", msg: "Manual override detected: optimizer paused" });
 
   const learning = findEntity(states, "learning_progress");
   if (learning?.state?.startsWith("Day ") && learning.state.includes("Observing")) {
-    alerts.push({ cls: "alert-info", msg: `${learning.state} \u2014 thermostat unchanged` });
+    alerts.push({ cls: "alert-info", msg: `${learning.state}: thermostat unchanged` });
   } else if (learning?.state?.startsWith("Baseline captured")) {
     alerts.push({ cls: "alert-info", msg: `${learning.state}` });
   } else if (learning?.state?.startsWith("Optimizer active") && learning.state.includes("conservative")) {
@@ -267,7 +314,7 @@ function renderDecisionCard(states, hass) {
   let narrative = "";
   if (tacticalState === "disturbed") {
     const err = hasValue(predError) ? `${Number(predError.state) > 0 ? "+" : ""}${fmt(predError)}` : "";
-    narrative = `Large divergence from model${err ? ` (${err}\u00b0 drift)` : ""} \u2014 possible window open or appliance`;
+    narrative = `Large divergence from model${err ? ` (${err}\u00b0 drift)` : ""}: possible window open or appliance`;
   } else if (hasValue(predicted) && hasValue(apparent)) {
     const pred = Number(predicted.state);
     const act = Number(apparent.state);
@@ -717,65 +764,24 @@ function getClimateZone(states) {
   return "mixed";
 }
 
-/** [F] Building Profile — thermal model with plain-English narrative + visual scales. */
+/** [F] Building Profile — what has been measured about the house and equipment. */
 function renderBuildingCard(states, hass) {
-  const rValue = findEntity(states, "thermal_time_constant");
+  // All of these are measured from the home's own temperature history. The
+  // card used to grade an "R-value", a thermal mass, an HVAC tonnage and a
+  // solar gain; those were states of a thermal estimator that has been
+  // removed, and the entities behind them no longer exist.
+  const timeConstant = findEntity(states, "thermal_time_constant");
   const thermalMass = findEntity(states, "thermal_mass");
-  const coolCap = findEntity(states, "cooling_capacity");
-  const heatCap = findEntity(states, "heating_capacity");
+  const coolRate = findEntity(states, "effective_cooling_rate");
+  const heatRate = findEntity(states, "effective_heating_rate");
   const confidence = findEntity(states, "model_confidence");
 
-  const hasData = hasValue(rValue) || hasValue(thermalMass) || hasValue(coolCap) || hasValue(heatCap);
+  const hasData = hasValue(timeConstant) || hasValue(coolRate) || hasValue(heatRate);
   if (!hasData) return "";
 
   const confPct = hasValue(confidence) ? Number(confidence.state) : 0;
   const converging = confPct < 50;
-  const zone = getClimateZone(states);
-
-  // ── Climate-relative thresholds ──
-  const R_GOOD = zone === "cold" ? 15 : zone === "mixed" ? 12 : 9;
-  const R_POOR = zone === "cold" ? 7  : zone === "mixed" ? 5  : 4;
-  const R_MAX  = zone === "cold" ? 25 : zone === "mixed" ? 20 : 15;
-
-  // ── Classify parameters ──
-  let rBand = "medium", rLabel = "Typical for your region";
-  if (hasValue(rValue)) {
-    const rv = Number(rValue.state);
-    if (rv >= R_GOOD) { rBand = "good"; rLabel = "Well insulated"; }
-    else if (rv < R_POOR) { rBand = "poor"; rLabel = "Leaky envelope"; }
-  }
-
-  let massBand = "medium", massLabel = "Mixed construction";
-  if (hasValue(thermalMass)) {
-    const tm = Number(thermalMass.state);
-    if (tm >= 5000) { massBand = "high"; massLabel = "Masonry / concrete"; }
-    else if (tm < 1500) { massBand = "low"; massLabel = "Wood frame"; }
-  }
-
-  let coolSizeLabel = "";
-  if (hasValue(coolCap)) {
-    const qk = Number(coolCap.state) / 1000;
-    coolSizeLabel = qk < 12 ? "< 1 ton" : `${(qk / 12).toFixed(1)} ton`;
-  }
-
-  // ── Plain-English narrative ──
-  let narrative = "";
-  if (hasValue(rValue) && hasValue(thermalMass)) {
-    if (rBand === "good" && massBand === "high")
-      narrative = "Tight envelope and heavy thermal mass \u2014 holds temperature well, ideal for pre-conditioning ahead of rate changes.";
-    else if (rBand === "good" && massBand === "low")
-      narrative = "Well insulated but lightweight \u2014 heats and cools fast, best served by just-in-time pre-conditioning.";
-    else if (rBand === "good")
-      narrative = "Low heat loss lets the optimizer focus on shifting runtime to cheaper, cleaner hours.";
-    else if (massBand === "high")
-      narrative = "Heavy construction absorbs temperature swings, but the envelope leaks more than average. Rate-timed cycles save the most.";
-    else if (rBand === "poor" && massBand === "low")
-      narrative = "Responds quickly to outdoor conditions \u2014 the optimizer stays ahead of swings rather than coasting.";
-    else if (rBand === "poor")
-      narrative = "Higher-than-average heat loss. The optimizer prioritizes running during the cheapest, most efficient windows.";
-    else
-      narrative = "Typical thermal characteristics \u2014 the optimizer balances pre-conditioning, rate windows, and occupancy.";
-  }
+  const unit = tempUnit(hass);
 
   // ── Position bar: track with a dot marker ──
   function posBar(pct, colorVar) {
@@ -783,114 +789,53 @@ function renderBuildingCard(states, hass) {
     return `<div class="profile-bar-track"><div class="profile-bar-marker" style="left:${clamped}%;background:${colorVar}"></div></div>`;
   }
 
-  // ── Profile rows ──
   const profileRows = [];
+  let narrative = "";
 
-  if (hasValue(rValue)) {
-    const pct = Math.min(100, (Number(rValue.state) / R_MAX) * 100);
-    const color = rBand === "good" ? "var(--green)" : rBand === "poor" ? "var(--red)" : "var(--orange)";
-    const qCls = rBand === "good" ? "quality-good" : rBand === "poor" ? "quality-poor" : "quality-medium";
+  if (hasValue(timeConstant)) {
+    const tau = Number(timeConstant.state);
+    let label, cls, color;
+    if (tau >= 24) { label = "Holds temperature well"; cls = "quality-good"; color = "var(--green)"; }
+    else if (tau < 10) { label = "Drifts quickly"; cls = "quality-poor"; color = "var(--red)"; }
+    else { label = "Typical"; cls = "quality-medium"; color = "var(--orange)"; }
     profileRows.push(`
       <div class="profile-row">
         <div class="profile-row-header">
-          <span class="profile-label">Insulation</span>
-          <span class="profile-qual ${qCls}">${rLabel}</span>
+          <span class="profile-label">Heat retention</span>
+          <span class="profile-qual ${cls}">${label} (${tau.toFixed(0)} h)</span>
         </div>
-        ${posBar(pct, color)}
-        <div class="profile-scale"><span>Leaky</span><span>Well insulated</span></div>
+        ${posBar(Math.min(100, (tau / 48) * 100), color)}
+        <div class="profile-scale"><span>Drifts quickly</span><span>Holds temperature</span></div>
       </div>`);
+    narrative = `With the system off, the gap between indoor and outdoor temperature closes with a time constant of about ${tau.toFixed(0)} hours, averaged over the conditions seen so far.`;
   }
 
-  if (hasValue(thermalMass)) {
-    const tm = Number(thermalMass.state);
-    const pct = Math.min(100, (tm / 10000) * 100);
-    const color = massBand === "high" ? "var(--green)" : massBand === "low" ? "var(--text-secondary)" : "var(--accent)";
+  // Equipment rates at the current outdoor temperature, envelope load removed
+  const rateRows = [];
+  if (hasValue(heatRate)) rateRows.push(["Heating now", Math.abs(Number(heatRate.state))]);
+  if (hasValue(coolRate)) rateRows.push(["Cooling now", Math.abs(Number(coolRate.state))]);
+  for (const [label, rate] of rateRows) {
     profileRows.push(`
       <div class="profile-row">
         <div class="profile-row-header">
-          <span class="profile-label">Thermal Mass</span>
-          <span class="profile-qual">${massLabel}</span>
+          <span class="profile-label">${label}</span>
+          <span class="profile-qual">${rate.toFixed(1)} ${unit}/h</span>
         </div>
-        ${posBar(pct, color)}
-        <div class="profile-scale"><span>Light frame</span><span>Heavy masonry</span></div>
-      </div>`);
-  }
-
-  if (hasValue(coolCap)) {
-    const pct = Math.min(100, (Number(coolCap.state) / 60000) * 100);
-    profileRows.push(`
-      <div class="profile-row">
-        <div class="profile-row-header">
-          <span class="profile-label">HVAC Capacity</span>
-          <span class="profile-qual">${coolSizeLabel}</span>
-        </div>
-        ${posBar(pct, "var(--blue)")}
-        <div class="profile-scale"><span>Smaller</span><span>Larger</span></div>
-      </div>`);
-  }
-
-  // Solar gain — from model_confidence attributes or show estimating state
-  const solarGain = confidence?.attributes?.solar_gain_btu;
-  if (solarGain != null) {
-    const sg = Number(solarGain);
-    let solarDesc;
-    if (sg < 1000) solarDesc = "Minimal exposure";
-    else if (sg < 3000) solarDesc = "Partial shade";
-    else if (sg < 6000) solarDesc = "Typical exposure";
-    else solarDesc = "High exposure";
-    const pct = Math.min(100, (sg / 10000) * 100);
-    profileRows.push(`
-      <div class="profile-row">
-        <div class="profile-row-header">
-          <span class="profile-label">Solar Gain</span>
-          <span class="profile-qual">${solarDesc}</span>
-        </div>
-        ${posBar(pct, "var(--orange)")}
-        <div class="profile-scale"><span>Minimal</span><span>High</span></div>
-      </div>`);
-  } else {
-    profileRows.push(`
-      <div class="profile-row">
-        <div class="profile-row-header">
-          <span class="profile-label">Solar Gain</span>
-          <span class="profile-qual quality-medium">Measuring\u2026</span>
-        </div>
+        ${posBar(Math.min(100, (rate / 5) * 100), "var(--blue)")}
+        <div class="profile-scale"><span>Slower</span><span>Faster</span></div>
       </div>`);
   }
 
   // ── Raw values (collapsible, power users) ──
   const rawRows = [];
-  if (hasValue(rValue)) rawRows.push(`<div class="diag-row"><span>R-Value</span><span>${Number(rValue.state).toFixed(1)} hr\u00b7\u00b0F/BTU</span></div>`);
-  if (hasValue(thermalMass)) rawRows.push(`<div class="diag-row"><span>Thermal Mass</span><span>${Number(thermalMass.state).toFixed(0)} BTU/\u00b0F</span></div>`);
-  if (hasValue(coolCap)) rawRows.push(`<div class="diag-row"><span>Cooling</span><span>${(Number(coolCap.state) / 1000).toFixed(1)}k BTU/hr</span></div>`);
-  if (hasValue(heatCap)) rawRows.push(`<div class="diag-row"><span>Heating</span><span>${(Number(heatCap.state) / 1000).toFixed(1)}k BTU/hr</span></div>`);
-  if (solarGain != null) rawRows.push(`<div class="diag-row"><span>Solar Gain</span><span>${Number(solarGain).toFixed(0)} BTU/hr peak</span></div>`);
+  if (hasValue(timeConstant)) rawRows.push(`<div class="diag-row"><span>Time constant</span><span>${Number(timeConstant.state).toFixed(1)} h</span></div>`);
+  if (hasValue(heatRate)) rawRows.push(`<div class="diag-row"><span>Heating rate</span><span>${Number(heatRate.state).toFixed(2)} ${unit}/h</span></div>`);
+  if (hasValue(coolRate)) rawRows.push(`<div class="diag-row"><span>Cooling rate</span><span>${Number(coolRate.state).toFixed(2)} ${unit}/h</span></div>`);
+  if (hasValue(thermalMass)) rawRows.push(`<div class="diag-row"><span>Thermal mass (from floor area)</span><span>${Number(thermalMass.state).toFixed(0)} BTU/\u00b0F</span></div>`);
 
-  // ── Model type line ──
-  let modelTypeLine = "";
-  if (isAvailable(confidence)) {
-    const cfa = confidence.attributes || {};
-    let mt;
-    else mt = "Heuristic";
-    modelTypeLine = `<div class="model-type">${mt}</div>`;
-  }
-
-  // ── Parameter uncertainty (power users) ──
-  let uncertaintySection = "";
-  if (confidence?.attributes?.parameter_uncertainty && !converging) {
-    const pu = confidence.attributes.parameter_uncertainty;
-    const puRows = Object.entries(pu).map(([k, v]) => {
-      const label = { r_inv: "R (conductance)", c_inv: "C (air mass)", q_cool: "Cooling cap", q_heat: "Heating cap", solar: "Solar gain" }[k] || k;
-      return `<div class="diag-row"><span>${label}</span><span>\u00b1${Number(v).toExponential(1)}</span></div>`;
-    }).join("");
-    if (puRows) {
-      uncertaintySection = `
-        <details class="diag-details">
-          <summary class="diag-summary">Parameter Uncertainty</summary>
-          <div class="diag-grid">${puRows}</div>
-        </details>`;
-    }
-  }
+  const modelTypeLine = isAvailable(confidence)
+    ? `<div class="model-type">${confPct > 0 ? "Measured profile" : "Default profile"}</div>`
+    : "";
 
   return `
     <div class="card building-card">
@@ -906,7 +851,6 @@ function renderBuildingCard(states, hass) {
           <div class="diag-grid">${rawRows.join("")}</div>
         </details>` : ""}
       ${modelTypeLine}
-      ${uncertaintySection}
     </div>`;
 }
 
@@ -994,8 +938,11 @@ function renderThermalLoadCard(states, _hass) {
     ...envComponents,
     hvacComponent,
   ];
+  // Only components the sensor actually reports. The itemised breakdown came
+  // from the removed thermal estimator; listing each as "+0 BTU/hr" read as
+  // a measurement of nothing.
   const detailRows = [
-    ...allDetailComponents.map(c =>
+    ...allDetailComponents.filter(c => Math.abs(c.value) > 0.5).map(c =>
       `<div class="diag-row"><span>${c.label}</span><span>${fmtBtu(c.value)} BTU/hr</span></div>`
     ),
     attrs.stored_heat_exchange != null
@@ -1443,37 +1390,28 @@ function renderUnifiedTimeline(states, _hass, retro) {
 /** [G] Learning Progress Cards — three-card grid during learning mode. */
 function renderLearningProgressCards(states) {
   const modelConf = findEntity(states, "model_confidence");
-  const rValue = findEntity(states, "thermal_time_constant");
-  const thermalMass = findEntity(states, "thermal_mass");
-  const coolCap = findEntity(states, "cooling_capacity");
+  const timeConstant = findEntity(states, "thermal_time_constant");
+  const coolRate = findEntity(states, "effective_cooling_rate");
+  const heatRate = findEntity(states, "effective_heating_rate");
   const baselineConf = findEntity(states, "baseline_confidence");
   const profilerStatus = findEntity(states, "profiler_status") || findEntity(states, "profiler");
-
-  const zone = getClimateZone(states);
-  const R_GOOD = zone === "cold" ? 15 : zone === "mixed" ? 12 : 9;
-  const R_POOR = zone === "cold" ? 7  : zone === "mixed" ? 5  : 4;
 
   // ── Thermal Model card ──
   const confPct = hasValue(modelConf) ? Math.min(100, Number(modelConf.state)) : 0;
   let rLine = "", massLine = "", capLine = "";
-  if (hasValue(rValue)) {
-    const rv = Number(rValue.state);
+  if (hasValue(timeConstant)) {
+    const tau = Number(timeConstant.state);
     let lbl, cls;
-    if (rv >= R_GOOD) { lbl = "Well insulated"; cls = "quality-good"; }
-    else if (rv < R_POOR) { lbl = "Needs attention"; cls = "quality-poor"; }
-    else { lbl = "Typical for region"; cls = "quality-medium"; }
-    rLine = `<div class="lp-param"><span class="lp-param-label">Insulation</span><span class="lp-param-val">${rv.toFixed(1)}</span><span class="lp-param-qual ${cls}">${lbl}</span></div>`;
+    if (tau >= 24) { lbl = "Holds temperature well"; cls = "quality-good"; }
+    else if (tau < 10) { lbl = "Drifts quickly"; cls = "quality-poor"; }
+    else { lbl = "Typical"; cls = "quality-medium"; }
+    rLine = `<div class="lp-param"><span class="lp-param-label">Heat retention</span><span class="lp-param-val">${tau.toFixed(0)} h</span><span class="lp-param-qual ${cls}">${lbl}</span></div>`;
   }
-  if (hasValue(thermalMass)) {
-    const tm = Number(thermalMass.state);
-    let lbl, cls;
-    if (tm >= 4000) { lbl = "High, holds temp well"; cls = "quality-good"; }
-    else if (tm < 1500) { lbl = "Light, responds fast"; cls = "quality-neutral"; }
-    else { lbl = "Moderate"; cls = "quality-medium"; }
-    massLine = `<div class="lp-param"><span class="lp-param-label">Thermal Mass</span><span class="lp-param-val">${(tm / 1000).toFixed(1)}k BTU/\u00b0F</span><span class="lp-param-qual ${cls}">${lbl}</span></div>`;
+  if (hasValue(heatRate)) {
+    massLine = `<div class="lp-param"><span class="lp-param-label">Heating rate</span><span class="lp-param-val">${Math.abs(Number(heatRate.state)).toFixed(2)} \u00b0F/h</span></div>`;
   }
-  if (hasValue(coolCap)) {
-    capLine = `<div class="lp-param"><span class="lp-param-label">Cooling rate</span><span class="lp-param-val">${Math.abs(Number(coolCap.state)).toFixed(2)} °F/h</span></div>`;
+  if (hasValue(coolRate)) {
+    capLine = `<div class="lp-param"><span class="lp-param-label">Cooling rate</span><span class="lp-param-val">${Math.abs(Number(coolRate.state)).toFixed(2)} \u00b0F/h</span></div>`;
   }
   // Per-mode profiler confidence. This previously read the EKF's
   // per-parameter confidence, whose keys no longer exist, so every row
@@ -1876,6 +1814,7 @@ class HeatPumpOptimizerPanel extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    indexEntities(hass);
     this._maybeRefreshHistory();
 
     // Only re-render when optimizer-relevant entity states actually change.

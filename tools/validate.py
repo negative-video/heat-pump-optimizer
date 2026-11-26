@@ -204,6 +204,69 @@ def check_undefined_names() -> None:
         fail("undefined-names", "\n".join(sorted(set(offenders))))
 
 
+# ── 4c. Frontend syntax (the panel is one JS file nothing else parses) ──
+
+def _js_syntax_error(path: Path) -> tuple[str | None, str | None]:
+    """Parse a JS file with whatever engine is available.
+
+    Returns (engine, error). engine is None when no engine could run.
+    """
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node:
+        try:
+            run = subprocess.run([node, "--check", str(path)], capture_output=True, text=True, timeout=60)
+            # A node that cannot start (broken install) is not a verdict
+            if run.returncode == 0:
+                return "node", None
+            if "SyntaxError" in run.stderr:
+                return "node", run.stderr.strip().splitlines()[-1] if run.stderr.strip() else "syntax error"
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    jsc = Path("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc")
+    if jsc.exists():
+        script = f"try {{ checkSyntax({str(path)!r}); print('OK') }} catch (e) {{ print('ERR ' + e) }}"
+        try:
+            run = subprocess.run([str(jsc), "-e", script], capture_output=True, text=True, timeout=60)
+            out = run.stdout.strip()
+            if out == "OK":
+                return "jsc", None
+            if out.startswith("ERR "):
+                return "jsc", out[4:]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return None, None
+
+
+def check_frontend_syntax() -> None:
+    """The sidebar panel must parse.
+
+    A dangling ``else`` left in panel.js by a refactor shipped in 0.3.0: the
+    browser refused the module and the panel rendered as a blank page. No
+    Python check could have seen it.
+    """
+    errors = []
+    engines = set()
+    files = sorted((INTEGRATION / "frontend").glob("*.js"))
+    for js in files:
+        engine, error = _js_syntax_error(js)
+        if engine is None:
+            continue
+        engines.add(engine)
+        if error:
+            errors.append(f"{js.relative_to(REPO_ROOT)}: {error}")
+
+    if errors:
+        fail("frontend-syntax", "\n".join(errors))
+    elif not engines:
+        ok("frontend-syntax", "SKIPPED: no JavaScript engine found (install node)")
+    else:
+        ok("frontend-syntax", f"{len(files)} file(s) via {', '.join(sorted(engines))}")
+
+
 # ── 5. Import resolution (relative imports point to real files) ─────────
 
 def check_import_resolution() -> None:
@@ -324,6 +387,7 @@ def main() -> int:
     check_translation_sync()
     check_python_syntax()
     check_undefined_names()
+    check_frontend_syntax()
     check_import_resolution()
     check_manifest_structure()
     check_migration_coverage()
