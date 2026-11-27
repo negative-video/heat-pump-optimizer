@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+
+- Home Assistant logged a warning for the three twin kWh sensors: the energy device class is only allowed with a total, and these are trailing-window measurements. They keep the kWh unit without the device class.
+
 ## 0.5.0
 
 ### Added

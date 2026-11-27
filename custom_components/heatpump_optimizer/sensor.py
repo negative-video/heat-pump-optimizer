@@ -1870,7 +1870,8 @@ class TwinReferenceSavings30dSensor(OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "twin_reference_savings_30d", "Twin Savings vs Reference 30 Days")
-        self._attr_device_class = SensorDeviceClass.ENERGY
+        # No energy device class: Home Assistant only allows it with a total
+        # state class, and a trailing window is a measurement, not a total.
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
@@ -1900,7 +1901,8 @@ class TwinPlanEffect30dSensor(OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "twin_plan_effect_30d", "Twin Optimizer Effect 30 Days")
-        self._attr_device_class = SensorDeviceClass.ENERGY
+        # No energy device class: Home Assistant only allows it with a total
+        # state class, and a trailing window is a measurement, not a total.
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 1
@@ -1928,7 +1930,8 @@ class CostOfADegreeSensor(OptimizerBaseSensor):
 
     def __init__(self, coordinator, entry):
         super().__init__(coordinator, entry, "cost_of_a_degree", "Cost of a Degree Today")
-        self._attr_device_class = SensorDeviceClass.ENERGY
+        # No energy device class: Home Assistant only allows it with a total
+        # state class, and a trailing window is a measurement, not a total.
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
         self._attr_state_class = SensorStateClass.MEASUREMENT
         self._attr_suggested_display_precision = 2
