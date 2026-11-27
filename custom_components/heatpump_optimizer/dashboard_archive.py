@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -60,25 +61,44 @@ def _percentile(sorted_values: list[float], fraction: float) -> float:
     return sorted_values[index]
 
 
-def fit_runtime_to_weather(days: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Least-squares fit of daily heating hours against heating degrees.
+def fit_runtime_to_weather(
+    days: list[dict[str, Any]],
+    *,
+    value: Callable[[dict[str, Any]], float] | None = None,
+    balance_range: Iterable[float] = FIT_BALANCE_RANGE_F,
+    cooling: bool = False,
+    driver: Callable[[dict[str, Any], float], float] | None = None,
+    min_days: int = FIT_MIN_DAYS,
+    min_active_days: int = FIT_MIN_HEATING_DAYS,
+    active_threshold: float = 0.25,
+) -> dict[str, Any] | None:
+    """Least-squares fit of a daily quantity against degrees from a balance.
 
-    ``hours = intercept + slope * max(0, balance - mean_outdoor)``, with the
-    balance temperature chosen by grid search. Returns None until there are
-    enough days, and enough of them with heating, for the slope to mean
-    anything.
+    ``y = intercept + slope * x`` with ``x = max(0, balance - mean_outdoor)``
+    (``max(0, mean_outdoor - balance)`` when ``cooling``), the balance chosen
+    by grid search over ``balance_range``. By default ``y`` is heating plus
+    aux hours. ``driver(day, b)`` replaces the degree formula (the twin's
+    indoor-aware year-over-year fit). Returns None until there are enough
+    days, and enough of them active, for the slope to mean anything.
     """
-    points = [(d["out"], d["heat"] + d["aux"]) for d in days if d.get("out") is not None]
-    if len(points) < FIT_MIN_DAYS or sum(1 for _, y in points if y > 0.25) < FIT_MIN_HEATING_DAYS:
+    get = value or (lambda d: d["heat"] + d["aux"])
+    points = [(d, get(d)) for d in days if d.get("out") is not None]
+    if len(points) < min_days or sum(1 for _, y in points if y > active_threshold) < min_active_days:
         return None
     mean_y = sum(y for _, y in points) / len(points)
     total = sum((y - mean_y) ** 2 for _, y in points)
     if total <= 0:
         return None
 
+    def degrees(d: dict[str, Any], b: float) -> float:
+        if driver is not None:
+            return driver(d, b)
+        return max(0.0, d["out"] - b) if cooling else max(0.0, b - d["out"])
+
     best: dict[str, Any] | None = None
-    for balance in FIT_BALANCE_RANGE_F:
-        xs = [max(0.0, balance - t) for t, _ in points]
+    best_r2 = -math.inf  # compared unrounded; the stored r2 is rounded
+    for balance in balance_range:
+        xs = [degrees(d, balance) for d, _ in points]
         mean_x = sum(xs) / len(xs)
         spread = sum((x - mean_x) ** 2 for x in xs)
         if spread <= 0:
@@ -90,7 +110,8 @@ def fit_runtime_to_weather(days: list[dict[str, Any]]) -> dict[str, Any] | None:
         residuals = [y - max(0.0, intercept + slope * x) for x, (_, y) in zip(xs, points, strict=True)]
         sse = sum(r * r for r in residuals)
         r2 = 1.0 - sse / total
-        if best is None or r2 > best["r2"]:
+        if r2 > best_r2:
+            best_r2 = r2
             best = {
                 "balance": float(balance),
                 "slope": round(slope, 4),
@@ -368,6 +389,35 @@ class DashboardArchive:
             "ctl": round(sum(h[7] for h in rows) / len(rows), 2),
             "n": len(rows),
         }
+
+    def merge_days(self, days: list[Any]) -> int:
+        """Add imported whole days (twin ``DayInputs``) to the daily roll-up.
+
+        Same row shape as ``_summarize_day``; dates already present are
+        skipped, so live and recorder days always win. Returns days added.
+        """
+        have = {d["d"] for d in self._days}
+        added = []
+        for day in days:
+            if day.date in have or not day.hours:
+                continue
+            outdoor = [v for v in day.outdoor if v is not None]
+            hours = max(1, round(day.covered_min / 60.0))
+            added.append(
+                {
+                    "d": day.date,
+                    "out": round(sum(outdoor) / len(outdoor), 1) if outdoor else None,
+                    "heat": round(sum(day.heat_min) / 60.0, 2),
+                    "cool": round(sum(day.cool_min) / 60.0, 2),
+                    "aux": round(sum(day.aux_min) / 60.0, 2),
+                    "ctl": round(day.controlled, 2),
+                    "n": min(hours, day.hours),
+                }
+            )
+            have.add(day.date)
+        if added:
+            self._days = sorted([*self._days, *added], key=lambda d: d["d"])[-MAX_DAYS:]
+        return len(added)
 
     # ── Morning recoveries ───────────────────────────────────────────
 

@@ -119,6 +119,8 @@ from .const import (
     CONF_TOU_SCHEDULE,
     CONF_TRAVEL_TIME_SENSOR,
     CONF_TRAVEL_TIME_SENSORS,
+    CONF_TWIN_REFERENCE_COOL_F,
+    CONF_TWIN_REFERENCE_HEAT_F,
     CONF_UV_INDEX_ENTITY,
     CONF_WEATHER_ENTITIES,
     CONF_WEATHER_ENTITY,
@@ -170,6 +172,7 @@ from .const import (
     DEFAULT_SLEEP_SCHEDULE_START,
     DEFAULT_SOLAR_PANEL_EFFICIENCY,
     DEFAULT_SUN_ENTITY,
+    DEFAULT_TWIN_REFERENCE_F,
     DOMAIN,
     INIT_MODE_IMPORT,
     INIT_MODE_LEARNING,
@@ -793,6 +796,34 @@ class HeatPumpOptimizerOptionsFlow(OptionsFlow):
                             max=30,
                             step=0.5,
                             unit_of_measurement="kW",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_TWIN_REFERENCE_HEAT_F,
+                        description={
+                            "suggested_value": self._options.get(CONF_TWIN_REFERENCE_HEAT_F, DEFAULT_TWIN_REFERENCE_F)
+                        },
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=55,
+                            max=80,
+                            step=0.5,
+                            unit_of_measurement="°F",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_TWIN_REFERENCE_COOL_F,
+                        description={
+                            "suggested_value": self._options.get(CONF_TWIN_REFERENCE_COOL_F, DEFAULT_TWIN_REFERENCE_F)
+                        },
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=65,
+                            max=85,
+                            step=0.5,
+                            unit_of_measurement="°F",
                             mode=selector.NumberSelectorMode.BOX,
                         )
                     ),

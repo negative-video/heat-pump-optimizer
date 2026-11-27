@@ -86,6 +86,7 @@ class TestServiceRegistration:
             "set_occupancy", "demand_response", "export_model",
             "import_model", "set_constraint",
             "start_ab_trial", "stop_ab_trial", "ab_trial_result",
+            "import_thermostat_history",
         ]
         for name in expected:
             assert name in registered
@@ -94,7 +95,44 @@ class TestServiceRegistration:
     def test_unload_removes_all(self, mock_hass):
         _run(services_mod.async_unload_services(mock_hass))
         removed = [a[0][1] for a in mock_hass.services.async_remove.call_args_list]
-        assert len(removed) == 13
+        assert len(removed) == 14
+
+
+# ── import_thermostat_history ────────────────────────────────────────
+
+
+class TestImportThermostatHistory:
+    def test_rejects_path_outside_allowlist(self, mock_hass, mock_coordinator):
+        _setup(mock_hass, mock_coordinator)
+        mock_hass.config.is_allowed_path = MagicMock(return_value=False)
+        handler = _handler(mock_hass, "import_thermostat_history")
+        with pytest.raises(Exception, match="not allowed"):
+            _run(handler(_call({"path": "/etc/passwd"})))
+        mock_coordinator.async_import_thermostat_history.assert_not_called()
+
+    def test_returns_counts(self, mock_hass, mock_coordinator):
+        _setup(mock_hass, mock_coordinator)
+        mock_hass.config.is_allowed_path = MagicMock(return_value=True)
+
+        async def _import(path):
+            return {"read": 3, "merged": 2, "skipped": 1, "simulated": 2}
+
+        mock_coordinator.async_import_thermostat_history = _import
+        handler = _handler(mock_hass, "import_thermostat_history")
+        out = _run(handler(_call({"path": "/config/export.csv"})))
+        assert out["merged"] == 2
+
+    def test_unreadable_file(self, mock_hass, mock_coordinator):
+        _setup(mock_hass, mock_coordinator)
+        mock_hass.config.is_allowed_path = MagicMock(return_value=True)
+
+        async def _import(path):
+            raise FileNotFoundError(path)
+
+        mock_coordinator.async_import_thermostat_history = _import
+        handler = _handler(mock_hass, "import_thermostat_history")
+        with pytest.raises(Exception, match="Could not read"):
+            _run(handler(_call({"path": "/config/missing.csv"})))
 
 
 # ── rebootstrap ──────────────────────────────────────────────────────

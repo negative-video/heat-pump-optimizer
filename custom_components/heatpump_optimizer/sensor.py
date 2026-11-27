@@ -70,6 +70,11 @@ async def async_setup_entry(
         MeasuredSavings30dSensor(coordinator, entry),
         EnergyBaselineStatusSensor(coordinator, entry),
         ABTrialSensor(coordinator, entry),
+        # Twin statistics (modeled, twin against twin; TWIN_STATS_SPEC)
+        TwinAccuracySensor(coordinator, entry),
+        TwinReferenceSavings30dSensor(coordinator, entry),
+        TwinPlanEffect30dSensor(coordinator, entry),
+        CostOfADegreeSensor(coordinator, entry),
         # Savings tracking sensors (modeled, digital twin)
         SavingsKwhTodaySensor(coordinator, entry),
         SavingsKwhCumulativeSensor(coordinator, entry),
@@ -1828,4 +1833,116 @@ class HouseThermalLoadSensor(_ThermalLoadMixin, OptimizerBaseSensor):
             "hvac_output": round(comps.get("q_hvac", 0.0), 0),
             "stored_heat_exchange": round(comps.get("q_int", 0.0), 0),
             **self._confidence_attrs(),
+        }
+
+
+class TwinAccuracySensor(OptimizerBaseSensor):
+    """How far the twin's replay runtime sits from the real runtime (percent)."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "twin_accuracy", "Twin Accuracy")
+        self._attr_native_unit_of_measurement = "%"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:home-search"
+
+    @property
+    def native_value(self) -> float | None:
+        return (self.coordinator.data or {}).get("twin_accuracy_pct")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "grade": data.get("twin_grade"),
+            "daily_error_pct": data.get("twin_daily_error_pct"),
+            "indoor_mae": data.get("twin_indoor_mae"),
+            "days": data.get("twin_days"),
+            "compressor_gain": data.get("twin_compressor_gain"),
+            "aux_gain": data.get("twin_aux_gain"),
+        }
+
+
+class TwinReferenceSavings30dSensor(OptimizerBaseSensor):
+    """Modeled kWh saved against holding the reference setpoints, 30 days."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "twin_reference_savings_30d", "Twin Savings vs Reference 30 Days")
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:home-thermometer-outline"
+
+    @property
+    def native_value(self) -> float | None:
+        return (self.coordinator.data or {}).get("twin_reference_kwh")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "cost": data.get("twin_reference_cost"),
+            "pct": data.get("twin_reference_pct"),
+            "band_pct": data.get("twin_reference_band_pct"),
+            "reference_heat_f": data.get("twin_reference_heat_f"),
+            "reference_cool_f": data.get("twin_reference_cool_f"),
+            "days": data.get("twin_reference_days"),
+            "grade": data.get("twin_grade"),
+            "method": "modeled",
+        }
+
+
+class TwinPlanEffect30dSensor(OptimizerBaseSensor):
+    """Modeled kWh the optimizer plan saves (positive) or costs, 30 days."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "twin_plan_effect_30d", "Twin Optimizer Effect 30 Days")
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 1
+        self._attr_icon = "mdi:chart-timeline-variant"
+
+    @property
+    def native_value(self) -> float | None:
+        return (self.coordinator.data or {}).get("twin_effect_kwh")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "cost": data.get("twin_effect_cost"),
+            "band_pct": data.get("twin_effect_band_pct"),
+            "days": data.get("twin_effect_days"),
+            "arm": data.get("twin_effect_arm"),
+            "grade": data.get("twin_grade"),
+            "method": "modeled",
+        }
+
+
+class CostOfADegreeSensor(OptimizerBaseSensor):
+    """kWh one degree warmer (cooler in summer) costs today."""
+
+    def __init__(self, coordinator, entry):
+        super().__init__(coordinator, entry, "cost_of_a_degree", "Cost of a Degree Today")
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_suggested_display_precision = 2
+        self._attr_icon = "mdi:thermometer-plus"
+
+    @property
+    def native_value(self) -> float | None:
+        return (self.coordinator.data or {}).get("twin_degree_kwh")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data or {}
+        return {
+            "cost": data.get("twin_degree_cost"),
+            "source": data.get("twin_degree_source"),
+            "season": data.get("twin_degree_season"),
         }

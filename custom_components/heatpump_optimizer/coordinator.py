@@ -171,6 +171,7 @@ from .coordinator_dashboard import DashboardMixin
 from .coordinator_data_builder import DataBuilderMixin
 from .coordinator_helpers import HelpersMixin
 from .coordinator_persistence import PersistenceMixin
+from .coordinator_twin import TwinMixin, twin_location
 from .dashboard_archive import DashboardArchive
 from .engine.comfort import (
     calculate_apparent_temperature,
@@ -212,6 +213,7 @@ from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
 from .learning.thermal_profile import derive_thermal_profile, thermal_mass_for
+from .learning.twin_ledger import TwinLedger
 from .savings_tracker import (
     TIER_LEARNING,
     SavingsTracker,
@@ -242,6 +244,7 @@ class HeatPumpOptimizerCoordinator(
     HelpersMixin,
     PersistenceMixin,
     DashboardMixin,
+    TwinMixin,
     DataUpdateCoordinator,
 ):
     """Coordinator that manages the full optimization lifecycle."""
@@ -606,6 +609,11 @@ class HeatPumpOptimizerCoordinator(
 
         # Forecast scoring, hourly log and morning recoveries for the panel
         self.dashboard_archive = DashboardArchive()
+
+        # Twin ledger: per-day twin replays and the twin statistics
+        _twin_tz, _twin_lat, _twin_lon = twin_location(hass)
+        self.twin_ledger = TwinLedger(_twin_tz, _twin_lat or 0.0, _twin_lon or 0.0)
+        self._twin_summary_cache = None
 
         # Set rated HVAC capacity from user's tonnage config
         if self._hvac_tonnage:
@@ -1080,6 +1088,15 @@ class HeatPumpOptimizerCoordinator(
             self._record_dashboard_cycle(now, thermo_state, outdoor_temp, aux_heat_active)
         except (ValueError, TypeError, AttributeError, KeyError):
             _LOGGER.warning("Dashboard archive update failed", exc_info=True)
+
+        # ── Twin ledger (per-day replays, twin statistics) ──
+
+        try:
+            self._record_twin_cycle(
+                now, thermo_state, outdoor_temp, aux_heat_active, power_watts, power_measured, new_forecast
+            )
+        except (ValueError, TypeError, AttributeError, KeyError, ZeroDivisionError):
+            _LOGGER.warning("Twin ledger update failed", exc_info=True)
 
         # Effective outdoor temp for aux learner (wind-chill-adjusted if available)
         _eff_outdoor = outdoor_temp

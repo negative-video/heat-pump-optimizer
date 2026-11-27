@@ -6,6 +6,7 @@ import logging
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import HomeAssistantError
 
 from .adapters.occupancy import OccupancyMode
 from .const import DOMAIN
@@ -26,6 +27,7 @@ SERVICE_RESET_MODEL = "reset_model"
 SERVICE_START_AB_TRIAL = "start_ab_trial"
 SERVICE_STOP_AB_TRIAL = "stop_ab_trial"
 SERVICE_AB_TRIAL_RESULT = "ab_trial_result"
+SERVICE_IMPORT_THERMOSTAT_HISTORY = "import_thermostat_history"
 
 
 async def async_setup_services(hass: HomeAssistant) -> None:
@@ -93,6 +95,19 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             model_data = call.data.get("model_data", {})
             _LOGGER.info("Service call: import model")
             coordinator.import_model(model_data)
+
+    async def handle_import_thermostat_history(call: ServiceCall) -> dict:
+        coordinator = await _get_coordinator()
+        if not coordinator:
+            return {}
+        path = str(call.data["path"])
+        if not hass.config.is_allowed_path(path):
+            raise HomeAssistantError(f"Path is not allowed: {path} (add it to allowlist_external_dirs)")
+        _LOGGER.info("Service call: import thermostat history from %s", path)
+        try:
+            return await coordinator.async_import_thermostat_history(path)
+        except (OSError, UnicodeDecodeError) as err:
+            raise HomeAssistantError(f"Could not read {path}: {err}") from err
 
     async def handle_set_constraint(call: ServiceCall) -> None:
         coordinator = await _get_coordinator()
@@ -195,6 +210,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN,
+        SERVICE_IMPORT_THERMOSTAT_HISTORY,
+        handle_import_thermostat_history,
+        schema=vol.Schema({vol.Required("path"): str}),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
         SERVICE_SET_CONSTRAINT,
         handle_set_constraint,
         schema=vol.Schema(
@@ -249,3 +271,4 @@ async def async_unload_services(hass: HomeAssistant) -> None:
     hass.services.async_remove(DOMAIN, SERVICE_START_AB_TRIAL)
     hass.services.async_remove(DOMAIN, SERVICE_STOP_AB_TRIAL)
     hass.services.async_remove(DOMAIN, SERVICE_AB_TRIAL_RESULT)
+    hass.services.async_remove(DOMAIN, SERVICE_IMPORT_THERMOSTAT_HISTORY)

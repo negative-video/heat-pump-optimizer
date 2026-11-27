@@ -92,6 +92,11 @@ def _register_stubs():
     ha_core.callback = lambda f: f
     sys.modules.setdefault("homeassistant.core", ha_core)
 
+    ha_exceptions = types.ModuleType("homeassistant.exceptions")
+    ha_exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})
+    ha_exceptions.ConfigEntryNotReady = type("ConfigEntryNotReady", (ha_exceptions.HomeAssistantError,), {})
+    sys.modules.setdefault("homeassistant.exceptions", ha_exceptions)
+
     ha_const = types.ModuleType("homeassistant.const")
     ha_const.UnitOfTemperature = type("UnitOfTemperature", (), {
         "CELSIUS": "°C",

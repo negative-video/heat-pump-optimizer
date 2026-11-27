@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- **Twin.** A simulated copy of the house replays every day from your real setpoints, then reruns the same day holding a reference temperature (72 by default), 1 F warmer, the optimizer's plan and your usual schedule. Every comparison is twin against twin on the same weather, so model error cancels instead of showing up as savings.
+  - The twin's rates are fitted from the house's own history: heat loss to outside, heating and cooling strength by outdoor temperature, strip heat, and sun on the roof and one wall, including heat stored and released hours later. The wall direction is picked from the data.
+  - Strip heat follows how the thermostat actually stages it: after a learned stretch of compressor runtime (30 minutes on an Ecobee), below a learned outdoor temperature.
+  - Each day is simulated by a fit that never saw it, and the twin is graded against real runtime. A poor grade hides every modeled figure.
+  - New Twin tab: accuracy, savings against the reference, optimizer effect, cost of one degree, aux heat by cause (recovery, cold, other), and same weather last year.
+  - New sensors: Twin Accuracy, Twin Savings vs Reference 30 Days, Twin Optimizer Effect 30 Days, Cost of a Degree Today.
+  - New options for the reference heat and cool setpoints.
+  - New service `import_thermostat_history` reads a Beestat 5-minute export so the twin and the Energy tab start with last season.
+  - The twin backfills from recorder history once on first start.
+
+### Fixed
+
+- The runtime-to-weather fit compared each candidate against a rounded copy of the best one, so near-ties could pick the wrong balance temperature.
+
 ## 0.4.0
 
 ### Added

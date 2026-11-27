@@ -282,6 +282,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await coordinator.async_backfill_dashboard_archive()
         except Exception:  # noqa: BLE001 - the panel's history is never worth failing startup
             _LOGGER.debug("Dashboard backfill failed", exc_info=True)
+        try:
+            await coordinator.async_backfill_twin()
+        except Exception:  # noqa: BLE001 - the twin's history is never worth failing startup
+            _LOGGER.debug("Twin backfill failed", exc_info=True)
         await coordinator.async_request_refresh()
 
     async_at_started(hass, _on_ha_started)

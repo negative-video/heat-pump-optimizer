@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from .adapters.occupancy import OccupancyMode
 from .const import DEFAULT_HISTORY_BOOTSTRAP_DAYS
+from .coordinator_twin import twin_location
 from .dashboard_archive import DashboardArchive
 from .engine.counterfactual_simulator import CounterfactualSimulator
 from .learning.ab_trial import ABTrial
@@ -28,6 +29,7 @@ from .learning.model_tracker import ModelTracker
 from .learning.override_tracker import OverrideTracker
 from .learning.performance_profiler import PerformanceProfiler
 from .learning.solar_adjuster import SolarAdjuster
+from .learning.twin_ledger import TwinLedger
 from .savings_tracker import SavingsTracker
 
 if TYPE_CHECKING:
@@ -88,6 +90,7 @@ class PersistenceMixin:
             "savings_tracker": self.savings_tracker.to_dict(),
             "energy_baseline": self.energy_baseline.to_dict(),
             "dashboard_archive": self.dashboard_archive.to_dict(),
+            "twin_ledger": self.twin_ledger.to_dict(),
             "ab_trial": self.ab_trial.to_dict(),
             "ab_trial_paused": self._ab_trial_paused,
             "baseline_capture": self.baseline_capture.to_dict(),
@@ -173,6 +176,12 @@ class PersistenceMixin:
                 self.dashboard_archive = DashboardArchive.from_dict(stored["dashboard_archive"])
             except (KeyError, ValueError, TypeError, AttributeError):
                 _LOGGER.warning("Failed to restore dashboard archive, starting empty", exc_info=True)
+        if "twin_ledger" in stored:
+            try:
+                tz, lat, lon = twin_location(self.hass)
+                self.twin_ledger = TwinLedger.from_dict(stored["twin_ledger"], tz, lat, lon)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                _LOGGER.warning("Failed to restore twin ledger, starting empty", exc_info=True)
         if "ab_trial" in stored:
             try:
                 self.ab_trial = ABTrial.from_dict(stored["ab_trial"])

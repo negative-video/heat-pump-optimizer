@@ -37,6 +37,11 @@ CONF_HVAC_TONNAGE = "hvac_tonnage"
 CONF_HVAC_SEER = "hvac_seer"
 CONF_AUX_HEAT_TYPE = "aux_heat_type"
 CONF_AUX_HEAT_KW = "aux_heat_kw"
+# Twin reference hold (TWIN_STATS_SPEC 4.1): the fixed setpoints the
+# "vs holding 72" figure compares against.
+CONF_TWIN_REFERENCE_HEAT_F = "twin_reference_heat_f"
+CONF_TWIN_REFERENCE_COOL_F = "twin_reference_cool_f"
+DEFAULT_TWIN_REFERENCE_F = 72.0
 
 # Defaults — comfort optimization range (where the optimizer works when home)
 DEFAULT_COMFORT_COOL_MIN = 72.0

@@ -170,23 +170,32 @@ class DashboardMixin:
             "controlling": self.optimizer_is_controlling,
             "monitor_only": bool(self._monitor_only),
         }
+        try:
+            payload["twin"] = self.twin_payload()
+        except (ValueError, TypeError, AttributeError, KeyError, ZeroDivisionError):
+            _LOGGER.warning("Twin payload failed", exc_info=True)
+            payload["twin"] = None
         payload["generated"] = local_now.strftime("%Y-%m-%dT%H:%M")
         return payload
 
-    async def async_backfill_dashboard_archive(self) -> None:
-        """Replay recorder history into a new archive so the panel has a past.
+    async def _async_recorder_series(
+        self, days: int = BACKFILL_DAYS, step_minutes: int = BACKFILL_STEP_MINUTES
+    ) -> dict[str, Any] | None:
+        """Recorder history on a regular grid, shared by the archive and twin backfills.
 
-        Runs once, when fewer than a day of hours have been logged. It fills
-        the hourly log and the morning recoveries; forecast scoring cannot be
-        backfilled because past plans were never stored.
+        Returns ``{"grid": [...], <series>: [...]}`` with every series filled
+        forward onto the grid: ``indoor`` (the panel's weighted temperature
+        when the recorder kept enough of it, else the thermostat's),
+        ``thermostat_indoor``, ``outdoor``, ``action``, ``aux``,
+        ``heat_setpoint``, ``mode``, ``temperature``, ``target_low`` and
+        ``target_high``. None when the recorder is unavailable or has no
+        thermostat history.
         """
-        if self.dashboard_archive.hour_count >= BACKFILL_IF_FEWER_HOURS:
-            return
         try:
             from homeassistant.components.recorder import get_instance
             from homeassistant.components.recorder.history import get_significant_states
         except ImportError:
-            return
+            return None
 
         outdoor_ids = list(getattr(self.sensor_hub, "_outdoor_temp_entities", []) or [])[:1]
         aux_id = getattr(self, "_aux_heat_override_entity_id", None)
@@ -212,7 +221,7 @@ class DashboardMixin:
             entity_ids.append(weighted_id)
 
         end = datetime.now(UTC).replace(second=0, microsecond=0)
-        start = end - timedelta(days=BACKFILL_DAYS)
+        start = end - timedelta(days=days)
         try:
             states = await get_instance(self.hass).async_add_executor_job(
                 get_significant_states,
@@ -227,8 +236,8 @@ class DashboardMixin:
                 False,  # no_attributes
             )
         except Exception:  # noqa: BLE001 - recorder API differs across versions
-            _LOGGER.debug("Dashboard backfill: recorder query failed", exc_info=True)
-            return
+            _LOGGER.debug("Recorder history query failed", exc_info=True)
+            return None
 
         def _stamp(state: Any) -> datetime | None:
             when = getattr(state, "last_updated", None) or getattr(state, "last_changed", None)
@@ -254,10 +263,13 @@ class DashboardMixin:
                 continue
             climate.append((when, state))
         if not climate:
-            return
+            return None
 
         def _attr(name: str) -> list[tuple[datetime, Any]]:
             return [(when, (state.attributes or {}).get(name)) for when, state in climate]
+
+        def _temps(name: str) -> list[tuple[datetime, float | None]]:
+            return [(when, _number(value, celsius)) for when, value in _attr(name)]
 
         low = _attr("target_temp_low")
         single = [
@@ -268,7 +280,8 @@ class DashboardMixin:
             (when, _number(value if value is not None else single[i][1], celsius))
             for i, (when, value) in enumerate(low)
         ]
-        indoor = [(when, _number(value, celsius)) for when, value in _attr("current_temperature")]
+        thermostat_indoor = _temps("current_temperature")
+        indoor = thermostat_indoor
         if weighted_id:
             weighted = [
                 (when, _number(state.state, celsius))
@@ -302,17 +315,43 @@ class DashboardMixin:
                 if (when := _stamp(state)) is not None
             ]
 
-        steps = int((end - start).total_seconds() // (BACKFILL_STEP_MINUTES * 60))
-        grid = [start + timedelta(minutes=BACKFILL_STEP_MINUTES * i) for i in range(steps)]
+        steps = int((end - start).total_seconds() // (step_minutes * 60))
+        grid = [start + timedelta(minutes=step_minutes * i) for i in range(steps)]
+        return {
+            "grid": grid,
+            "indoor": _fill_forward(indoor, grid),
+            "thermostat_indoor": _fill_forward(thermostat_indoor, grid),
+            "outdoor": _fill_forward(outdoor, grid),
+            "action": _fill_forward(action, grid),
+            "aux": _fill_forward(aux, grid),
+            "heat_setpoint": _fill_forward(setpoints, grid),
+            "mode": _fill_forward([(when, state.state) for when, state in climate], grid),
+            "temperature": _fill_forward(_temps("temperature"), grid),
+            "target_low": _fill_forward(_temps("target_temp_low"), grid),
+            "target_high": _fill_forward(_temps("target_temp_high"), grid),
+        }
+
+    async def async_backfill_dashboard_archive(self) -> None:
+        """Replay recorder history into a new archive so the panel has a past.
+
+        Runs once, when fewer than a day of hours have been logged. It fills
+        the hourly log and the morning recoveries; forecast scoring cannot be
+        backfilled because past plans were never stored.
+        """
+        if self.dashboard_archive.hour_count >= BACKFILL_IF_FEWER_HOURS:
+            return
+        series = await self._async_recorder_series()
+        if series is None:
+            return
         archive = DashboardArchive()
         fed = replay_history(
             archive,
-            grid,
-            indoor=_fill_forward(indoor, grid),
-            outdoor=_fill_forward(outdoor, grid),
-            action=_fill_forward(action, grid),
-            aux=_fill_forward(aux, grid),
-            heat_setpoint=_fill_forward(setpoints, grid),
+            series["grid"],
+            indoor=series["indoor"],
+            outdoor=series["outdoor"],
+            action=series["action"],
+            aux=series["aux"],
+            heat_setpoint=series["heat_setpoint"],
         )
         if archive.hour_count <= self.dashboard_archive.hour_count:
             return

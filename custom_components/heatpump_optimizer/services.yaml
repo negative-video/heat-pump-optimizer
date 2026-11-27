@@ -94,6 +94,20 @@ import_model:
       selector:
         object:
 
+import_thermostat_history:
+  name: Import Thermostat History
+  description: >-
+    Import a Beestat 5-minute export (CSV) so the twin has last season to
+    compare against. Days already recorded are kept.
+  fields:
+    path:
+      name: Path
+      description: Full path to the CSV file. The folder must be in allowlist_external_dirs.
+      required: true
+      example: /config/beestat_export.csv
+      selector:
+        text:
+
 set_constraint:
   name: Set Constraint
   description: >-

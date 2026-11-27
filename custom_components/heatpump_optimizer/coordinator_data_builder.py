@@ -280,6 +280,7 @@ class DataBuilderMixin:
             # Metered kWh against a degree-day regression of the user's own
             # optimizer-off days. No thermal model on either side.
             **self._measured_savings_data(),
+            **self._twin_sensor_data(),
             "baseline_kwh_today": today_savings.total_baseline_kwh,
             "actual_kwh_today": today_savings.total_actual_kwh,
             "actual_kwh_cumulative": cumulative["kwh_actual"],

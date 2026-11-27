@@ -26,6 +26,7 @@ from custom_components.heatpump_optimizer.coordinator_persistence import (
 )
 from custom_components.heatpump_optimizer.learning.ab_trial import ABTrial
 from custom_components.heatpump_optimizer.dashboard_archive import DashboardArchive
+from custom_components.heatpump_optimizer.learning.twin_ledger import TwinLedger
 from custom_components.heatpump_optimizer.learning.energy_baseline import (
     EnergyBaseline,
 )
@@ -35,6 +36,7 @@ from custom_components.heatpump_optimizer.learning.energy_baseline import (
 # persistent subsystem to the coordinator means adding it here too.
 REQUIRED_STATE_KEYS = [
     "dashboard_archive",
+    "twin_ledger",
     "model_tracker",
     "solar_adjuster",
     "override_tracker",
@@ -94,6 +96,7 @@ class _StubCoordinator(PersistenceMixin):
         self.ab_trial = ABTrial()
         self._ab_trial_paused = False
         self.dashboard_archive = DashboardArchive()
+        self.twin_ledger = TwinLedger("UTC")
 
         for name in (
             "model_tracker", "solar_adjuster", "override_tracker",

@@ -44,6 +44,9 @@ const ENTITY_ALIASES = {
   profiler_status: "profiler",
   weighted_indoor_temp: "weighted_indoor_temperature",
   measured_savings_30d: "measured_savings_30_days",
+  twin_reference_savings_30d: "twin_savings_vs_reference_30_days",
+  twin_plan_effect_30d: "twin_optimizer_effect_30_days",
+  cost_of_a_degree: "cost_of_a_degree_today",
   ab_trial: "a_b_validation_trial",
 };
 
@@ -1805,6 +1808,7 @@ const DV_TABS = [
   ["now", "Now"],
   ["model", "Model"],
   ["energy", "Energy"],
+  ["twin", "Twin"],
 ];
 
 function dvNum(v) {
@@ -2785,6 +2789,274 @@ function renderEnergyTab(states, dash, L) {
     </div>`;
 }
 
+// ── Twin ─────────────────────────────────────────────────────────────
+// Twin-against-twin figures (docs/internal/TWIN_STATS_SPEC.md section 8).
+// Modeled figures say "modeled" once per card, in the meta slot.
+
+const TWIN_TRUSTED = ["good", "fair"];
+
+function dvTwinReason(tw) {
+  if (!tw) return "No twin data yet.";
+  const fitNeed = tw.model && tw.model.days_needed;
+  if (fitNeed > 0 && (tw.days || 0) === 0) return `Twin learning this house, about ${fitNeed} days to go`;
+  if (tw.grade === "warming_up") return `${tw.days_needed || 7} days needed, ${tw.days || 0} so far`;
+  if (tw.grade === "idle") return "Too little runtime to judge";
+  if (tw.grade === "poor") {
+    const g = dvNum(tw.gain);
+    const c = dvNum(tw.comp_gain);
+    const a = dvNum(tw.aux_gain);
+    const off = (v) => (v == null ? 0 : Math.abs(v - 1));
+    if (off(c) > off(g) && off(c) >= off(a)) return `Twin compressor runs ${Math.round(off(c) * 100)}% ${c > 1 ? "long" : "short"}`;
+    if (off(a) > off(g)) return `Twin aux runs ${Math.round(off(a) * 100)}% ${a > 1 ? "long" : "short"}`;
+    if (g != null) return `Twin runs ${Math.round(off(g) * 100)}% ${g > 1 ? "long" : "short"}`;
+    return "Twin does not track this house yet";
+  }
+  return "";
+}
+
+function dvMoney(v) {
+  const n = dvNum(v);
+  return n == null ? "–" : (n < 0 ? "−$" : "$") + Math.abs(n).toFixed(2);
+}
+
+function dvTwinStrip(tw) {
+  const trusted = TWIN_TRUSTED.includes(tw.grade);
+  const reason = dvTwinReason(tw);
+  const cell = (label, value, sub) =>
+    `<div class="dv-stat"><div class="dv-stat-label">${label}</div><div class="dv-stat-value dv-small">${value}</div><div class="dv-stat-sub">${sub || "&nbsp;"}</div></div>`;
+  const ref = tw.reference || {};
+  const band = (b) => (b == null ? "" : `about ±${Math.round(b * 100)}%`);
+  const refCell = trusted && ref.saved_kwh != null
+    ? cell(`vs holding ${dvFmt(ref.heat_f, 0)}, 30 d`, `${dvFmt(ref.saved_kwh, 0)}<small> kWh</small>`, [dvMoney(ref.saved_cost), band(ref.band), "modeled"].filter((x) => x && x !== "–").join(", "))
+    : cell(`vs holding ${dvFmt(ref.heat_f ?? 72, 0)}, 30 d`, "–", esc(reason));
+  const eff = tw.effect;
+  const effLabel = eff && eff.key === "schedule" ? "vs your schedule, 30 d" : "Optimizer plan, 30 d";
+  const effCell = !eff
+    ? cell(effLabel, "–", "No plan days yet")
+    : trusted && eff.kwh != null
+      ? cell(effLabel, `${dvSigned(eff.kwh, 0)}<small> kWh</small>`, [dvMoney(eff.cost), band(eff.band)].filter((x) => x && x !== "–").join(", "))
+      : cell(effLabel, "–", esc(reason));
+  const deg = tw.degree || {};
+  const warmer = deg.season === "cool" ? "1 degree cooler today" : "1 degree warmer today";
+  const degCell = deg.today_kwh != null
+    ? cell(warmer, deg.today_cost != null ? `${dvMoney(deg.today_cost)}<small> / day</small>` : `${dvFmt(deg.today_kwh, 1)}<small> kWh</small>`, `${dvFmt(deg.today_kwh, 1)} kWh, ${esc(deg.source || "")}`)
+    : cell(warmer, "–", "Needs 10 days in season");
+  const g = dvNum(tw.gain);
+  const accCell = cell("Twin accuracy", g == null ? "–" : `${dvSigned((g - 1) * 100, 0)}<small>%</small>`, g == null ? esc(reason) : `${esc(tw.grade.replace("_", " "))}, ${tw.days} days`);
+  return `<section class="card dv-stats">${refCell}${effCell}${degCell}${accCell}</section>`;
+}
+
+function dvTwinDaily(daily, W) {
+  const rows = (daily || []).slice(-60);
+  if (rows.length < 2) return dvEmpty(`${rows.length} days logged. Needs 2.`);
+  const ML = 34;
+  const MR = 6;
+  const top = 18;
+  const h = 200;
+  const yHi = Math.max(5, ...rows.map((r) => Math.max(r.actual || 0, r.replay || 0))) * 1.1;
+  const x = dvScale(0, rows.length, ML, W - MR);
+  const y = dvScale(0, yHi, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yHi, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  parts.push(`<text x="0" y="10">kWh</text>`);
+  const bw = Math.max(2, (x(1) - x(0)) * 0.7);
+  const line = [];
+  rows.forEach((r, i) => {
+    const cx = x(i + 0.5);
+    const yv = y(r.actual || 0);
+    const cls = r.warmup || !r.valid ? "dv-drift-fill dv-faint" : "dv-drift-fill";
+    parts.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${yv.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, y(0) - yv).toFixed(1)}" class="${cls}"><title>${r.d}: actual ${dvFmt(r.actual, 1)} kWh, twin ${dvFmt(r.replay, 1)} kWh, ${dvFmt(r.out, 0)}° out${r.warmup ? ", warm-up" : ""}</title></rect>`);
+    if (r.replay != null) line.push([cx, y(r.replay)]);
+    else if (line.length) {
+      parts.push(`<path d="${dvPath(line)}" class="dv-line dv-indoor"/>`);
+      line.length = 0;
+    }
+    const d = new Date(r.d + "T12:00:00");
+    if (d.getDate() === 1 || i === 0) parts.push(`<text x="${cx.toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${DV_MONTH[d.getMonth()]} ${d.getDate()}</text>`);
+  });
+  if (line.length) parts.push(`<path d="${dvPath(line)}" class="dv-line dv-indoor"/>`);
+  return (
+    dvLegend([
+      ["k-drift k-box", "Actual"],
+      ["k-indoor", "Twin, your setpoints"],
+      ["k-faint k-box", "Warm-up or partial day"],
+    ]) + `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Daily energy, actual against twin">${parts.join("")}</svg>`
+  );
+}
+
+function dvTwinTable(tw) {
+  const arms = tw.arms || [];
+  if (!arms.length) return dvEmpty(dvTwinReason(tw) || "No twin days yet.");
+  const actual = arms.find((a) => a.key === "actual");
+  const base = actual ? dvNum(actual.kwh_day) : null;
+  const rows = arms.map((a) => {
+    const k = dvNum(a.kwh_day);
+    const vs = a.key === "actual" || k == null || base == null ? "" : dvSigned(k - base, 1);
+    return `<tr${a.key === "actual" ? ' class="dv-strong"' : ""}><td title="${esc(a.label)}">${esc(a.short || a.label)}</td><td>${k == null ? "–" : k.toFixed(1)}</td><td>${vs}</td><td>${dvFmt(a.aux_h, 1)}</td><td>${dvFmt(a.indoor_mean, 1)}°</td><td>${a.off_setpoint_h == null ? "" : dvFmt(a.off_setpoint_h, 1)}</td></tr>`;
+  });
+  return `<div class="dv-scroll"><table class="dv-table dv-mono"><thead><tr><th></th><th>kWh/d</th><th>vs act</th><th>Aux h</th><th>In</th><th>Off h</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+}
+
+function dvPctBars(rows, W) {
+  if (!rows.length) return dvEmpty("No graded days yet.");
+  const ML = 36;
+  const MR = 6;
+  const top = 8;
+  const h = 150;
+  const span = Math.max(10, ...rows.map((r) => Math.abs(r.pct))) * 1.15;
+  const x = dvScale(0, rows.length, ML, W - MR);
+  const y = dvScale(-span, span, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(-span, span, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v > 0 ? "+" : ""}${v}%</text>`);
+  }
+  const bw = Math.max(2, Math.min(48, (x(1) - x(0)) * 0.6));
+  rows.forEach((r, i) => {
+    const cx = x(i + 0.5);
+    const y0 = y(0);
+    const yv = y(r.pct);
+    parts.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${Math.min(y0, yv).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, Math.abs(yv - y0)).toFixed(1)}" rx="2" class="${r.pct < 0 ? "dv-indoor-fill" : "dv-aux-fill"}"><title>${esc(r.label)}: ${dvSigned(r.pct, 0)}%, ${r.n} days</title></rect>`);
+    parts.push(`<text x="${cx.toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${esc(r.label)}</text>`);
+  });
+  return `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Twin error by outdoor temperature">${parts.join("")}</svg>`;
+}
+
+function dvDegreeChart(deg, W) {
+  const bins = (deg && deg.bins) || [];
+  const fit = deg && deg.fit;
+  if (!bins.length && !fit) return dvEmpty("Needs 10 days in season.");
+  const cooling = deg.season === "cool";
+  const xs = bins.map((b) => b.bin + 2.5);
+  const xLo = Math.floor((Math.min(...xs, cooling ? 65 : 20) - 5) / 10) * 10;
+  const xHi = Math.ceil((Math.max(...xs, cooling ? 90 : 55) + 5) / 10) * 10;
+  const reg = (t) => {
+    if (!fit) return null;
+    const b = fit.balance;
+    return cooling
+      ? fit.slope * (Math.max(0, t - (b - 1)) - Math.max(0, t - b))
+      : fit.slope * (Math.max(0, b + 1 - t) - Math.max(0, b - t));
+  };
+  const ts = [];
+  for (let t = xLo; t <= xHi; t += 0.5) ts.push(t);
+  const yHi = Math.max(1, ...bins.map((b) => b.kwh), ...ts.map((t) => reg(t) || 0)) * 1.15;
+  const ML = 34;
+  const MR = 8;
+  const top = 18;
+  const h = 150;
+  const x = dvScale(xLo, xHi, ML, W - MR);
+  const y = dvScale(0, yHi, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yHi, 4)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  for (const v of dvTicks(xLo, xHi, 6)) parts.push(`<text x="${x(v).toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${v}°</text>`);
+  parts.push(`<text x="0" y="10">kWh/day</text>`);
+  if (fit) parts.push(`<path d="${dvPath(ts.map((t) => [x(t), y(reg(t))]))}" class="dv-line dv-sp dv-thin"/>`);
+  for (const b of bins) {
+    parts.push(`<circle cx="${x(b.bin + 2.5).toFixed(1)}" cy="${y(b.kwh).toFixed(1)}" r="4.5" class="dv-dot ${cooling ? "dv-cool-fill" : "dv-heat-fill"}"><title>${b.bin} to ${b.bin + 5}°: ${b.kwh.toFixed(2)} kWh per degree, ${b.n} days</title></circle>`);
+  }
+  const k = dvNum(deg.k);
+  return (
+    dvLegend([
+      [cooling ? "k-cool k-dot" : "k-heat k-dot", "Twin, by outdoor bin"],
+      ["k-sp", "Regression"],
+    ]) +
+    `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Cost of one degree by outdoor temperature">${parts.join("")}</svg>` +
+    `<div class="dv-statline"><span>twin / regression ${k == null ? "–" : k.toFixed(2)}</span>${fit ? `<span>balance ${fit.balance.toFixed(0)}°</span><span>R² ${fit.r2.toFixed(2)}</span>` : ""}</div>`
+  );
+}
+
+function dvAuxDays(aux, W) {
+  const days = ((aux && aux.days) || []).slice(-30);
+  const win = (aux && aux.window) || {};
+  if (!days.length) return dvEmpty("No graded days yet.");
+  const ML = 30;
+  const MR = 6;
+  const top = 14;
+  const h = 130;
+  const yHi = Math.max(1, ...days.map((d) => d.recovery + d.cold + d.other)) * 1.1;
+  const x = dvScale(0, Math.max(days.length, 10), ML, W - MR);
+  const y = dvScale(0, yHi, top + h, top);
+  const parts = [];
+  for (const v of dvTicks(0, yHi, 3)) {
+    parts.push(`<line x1="${ML}" x2="${W - MR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="${v === 0 ? "dv-axis" : "dv-grid"}"/>`);
+    parts.push(`<text x="${ML - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${v}</text>`);
+  }
+  parts.push(`<text x="0" y="10">h</text>`);
+  const bw = Math.max(2, (x(1) - x(0)) * 0.7);
+  days.forEach((d, i) => {
+    const cx = x(i + 0.5);
+    let base = 0;
+    for (const [key, cls] of [["recovery", "dv-aux-fill"], ["cold", "dv-heat-fill"], ["other", "dv-drift-fill"]]) {
+      const v = d[key] || 0;
+      if (v <= 0) continue;
+      const y0 = y(base);
+      const y1 = y(base + v);
+      parts.push(`<rect x="${(cx - bw / 2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1, y0 - y1).toFixed(1)}" class="${cls}"><title>${d.d}: ${v.toFixed(1)} h ${key}</title></rect>`);
+      base += v;
+    }
+    const dt = new Date(d.d + "T12:00:00");
+    if (i === 0 || dt.getDate() === 1) parts.push(`<text x="${cx.toFixed(1)}" y="${top + h + 14}" text-anchor="middle">${DV_MONTH[dt.getMonth()]} ${dt.getDate()}</text>`);
+  });
+  const c = win.classes || {};
+  const kwh = win.kwh || {};
+  const label = aux.kwh_label === "assumed" ? " (assumed watts)" : "";
+  const share = dvNum(win.share);
+  return (
+    dvLegend([
+      ["k-aux k-box", "Recovery"],
+      ["k-heat k-box", "Cold"],
+      ["k-drift k-box", "Other"],
+    ]) +
+    `<svg class="dv-svg" width="${W}" height="${top + h + 22}" viewBox="0 0 ${W} ${top + h + 22}" role="img" aria-label="Aux heat hours by day and cause">${parts.join("")}</svg>` +
+    `<div class="dv-statline"><span>recovery ${dvFmt(c.recovery, 1)} h, ${dvFmt(kwh.recovery, 0)} kWh</span><span>cold ${dvFmt(c.cold, 1)} h, ${dvFmt(kwh.cold, 0)} kWh</span><span>other ${dvFmt(c.other, 1)} h</span><span>${share == null ? "" : Math.round(share * 100) + "% of heating energy" + label}</span></div>`
+  );
+}
+
+function dvYoy(rows) {
+  if (!rows || !rows.length) return dvEmpty("Needs a month with last year on record.");
+  const pct = (v) => (v == null ? "–" : `${dvSigned(v * 100, 0)}%`);
+  const body = rows
+    .slice()
+    .reverse()
+    .map((r) => {
+      const m = DV_MONTH[Number(r.month.slice(5, 7)) - 1] + " " + r.month.slice(2, 4);
+      return r.within_noise
+        ? `<tr><td>${m}</td><td colspan="3">within noise (±${Math.round(r.band * 100)}%)</td><td>${r.n}</td></tr>`
+        : `<tr><td>${m}</td><td>${pct(r.total)}</td><td>${pct(r.house)}</td><td>${pct(r.setpoints)}</td><td>${r.n}</td></tr>`;
+    });
+  return `<div class="dv-scroll"><table class="dv-table dv-mono"><thead><tr><th>Month</th><th>Total</th><th>House</th><th>Setpoints</th><th>Days</th></tr></thead><tbody>${body.join("")}</tbody></table></div>`;
+}
+
+function renderTwinTab(states, dash, L) {
+  if (!dash) return dvEmpty("Loading archive…");
+  const tw = dash.twin;
+  if (!tw) return dvEmpty("No twin data yet.");
+  const trusted = TWIN_TRUSTED.includes(tw.grade);
+  const err = (tw.by_outdoor || []).filter((r) => r.error != null).map((r) => ({ label: `${r.bin}°`, pct: r.error * 100, n: r.n }));
+  const daysMeta = `${(tw.daily || []).length} days`;
+  const accMeta = tw.gain == null ? "" : `${dvSigned((tw.gain - 1) * 100, 0)}%, daily ±${Math.round((tw.daily_error || 0) * 100)}%, ${esc(tw.grade.replace("_", " "))}`;
+  return `
+    ${dvTwinStrip(tw)}
+    <div class="dv-row dv-row-64">
+      ${dvCard("Actual vs twin, daily", daysMeta, dvTwinDaily(tw.daily, L.wide64))}
+      ${dvCard("Last 30 days", trusted ? "modeled" : esc(dvTwinReason(tw)), dvTwinTable(tw))}
+    </div>
+    <div class="dv-row dv-row-2">
+      ${dvCard("Twin error by outdoor temperature", accMeta, dvPctBars(err, L.half))}
+      ${dvCard("Cost of a degree", "modeled", dvDegreeChart(tw.degree, L.half))}
+    </div>
+    <div class="dv-row dv-row-2">
+      ${dvCard("Aux heat", "30 d", dvAuxDays(tw.aux, L.half))}
+      ${dvCard("Same weather, last year", "runtime", dvYoy(tw.yoy))}
+    </div>`;
+}
+
 class HeatPumpOptimizerPanel extends HTMLElement {
   constructor() {
     super();
@@ -3022,6 +3294,8 @@ class HeatPumpOptimizerPanel extends HTMLElement {
       dashBody = renderModelTab(s, this._dash, L);
     } else if (tab === "energy") {
       dashBody = renderEnergyTab(s, this._dash, L);
+    } else if (tab === "twin") {
+      dashBody = renderTwinTab(s, this._dash, L);
     }
     const planAt = Date.parse(findEntity(s, "schedule")?.attributes?.last_optimization || "");
     const chips = [
@@ -4603,6 +4877,7 @@ const PANEL_CSS = `
   .dv-dot { stroke: var(--card-bg); stroke-width: 1.5; }
   .dv-ring { stroke: var(--text-primary); stroke-width: 1.5; }
   .dv-faint { opacity: 0.35; }
+  .dv-hollow { fill: none; stroke: var(--text-secondary); stroke-width: 1; }
   .dv-run { fill: var(--s-heat); }
   .dv-planned { opacity: 0.3; }
   rect.dv-q0 { fill: color-mix(in srgb, var(--text-primary) 6%, transparent); }

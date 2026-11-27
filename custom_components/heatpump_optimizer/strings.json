@@ -139,11 +139,15 @@
           "climate_entity": "Climate entity (thermostat)",
           "weather_entities": "Weather entities (first = primary, rest = fallback)",
           "aux_heat_override_entity": "Aux heat override sensor (optional)",
-          "duct_temp_entity": "Supply duct temperature sensor (optional)"
+          "duct_temp_entity": "Supply duct temperature sensor (optional)",
+          "twin_reference_heat_f": "Twin reference heat setpoint (°F)",
+          "twin_reference_cool_f": "Twin reference cool setpoint (°F)"
         },
         "data_description": {
           "aux_heat_override_entity": "A binary sensor or input_boolean that turns on when auxiliary/emergency heat is running. Use this if your thermostat doesn't report aux heat status.",
-          "duct_temp_entity": "A temperature sensor in your supply ductwork. When configured, the integration detects auxiliary heat automatically from high supply air temperatures without any manual template setup. This is separate from the crawlspace sensor used for boundary zone modeling."
+          "duct_temp_entity": "A temperature sensor in your supply ductwork. When configured, the integration detects auxiliary heat automatically from high supply air temperatures without any manual template setup. This is separate from the crawlspace sensor used for boundary zone modeling.",
+          "twin_reference_heat_f": "The fixed heat setpoint the twin compares your house against. 72 matches what thermostat vendors usually show.",
+          "twin_reference_cool_f": "The fixed cool setpoint the twin compares your house against."
         }
       },
       "outdoor_sensors": {
@@ -589,6 +593,13 @@
     "ab_trial_result": {
       "name": "A/B Trial Result",
       "description": "Return the current standing of the A/B trial: mean kWh per degree-day with the optimizer on and off, the difference, whether it clears the noise, and the per-day detail behind it."
+    },
+    "import_thermostat_history": {
+      "name": "Import Thermostat History",
+      "description": "Import a Beestat 5-minute export (CSV) so the twin has last season to compare against. Days already recorded are kept.",
+      "fields": {
+        "path": { "name": "Path", "description": "Full path to the CSV file. The folder must be in allowlist_external_dirs." }
+      }
     }
   },
   "issues": {
@@ -673,7 +684,11 @@
       "aux_heat_threshold": { "name": "Aux Heat Threshold", "description": "The outdoor temperature below which your system tends to activate auxiliary/emergency heat. Learned automatically from observed events." },
       "aux_heat_kwh_today": { "name": "Aux Heat Energy Today", "description": "Energy consumed by auxiliary/emergency resistive heat strips today. This is expensive backup heat the optimizer tries to avoid." },
       "avoided_aux_heat_kwh_today": { "name": "Avoided Aux Heat Today", "description": "Energy that would have been consumed by auxiliary heat strips if not for the optimizer pre-heating your home earlier." },
-      "cross_sensor_spread": { "name": "Thermostat Sensor Spread", "description": "The temperature difference between your thermostat's built-in sensor and your independent sensors. Large spreads may indicate satellite sensor blending." }
+      "cross_sensor_spread": { "name": "Thermostat Sensor Spread", "description": "The temperature difference between your thermostat's built-in sensor and your independent sensors. Large spreads may indicate satellite sensor blending." },
+      "twin_accuracy": { "name": "Twin Accuracy", "description": "How far the twin's replay of your real setpoints runs from your real runtime, in percent. The grade says whether the twin's other figures can be trusted." },
+      "twin_reference_savings_30d": { "name": "Twin Savings vs Reference 30 Days", "description": "Modeled kWh your setpoints saved over 30 days against holding the reference setpoints. Empty while the twin's grade is poor or warming up." },
+      "twin_plan_effect_30d": { "name": "Twin Optimizer Effect 30 Days", "description": "Modeled kWh the optimizer's plan saves over 30 days compared with your own setpoints. Positive means it uses less." },
+      "cost_of_a_degree": { "name": "Cost of a Degree Today", "description": "Modeled kWh that keeping the house one degree warmer (cooler in summer) costs today." }
     },
     "binary_sensor": {
       "optimizer_active": { "name": "Optimizer Active", "description": "Whether the optimizer is actively controlling your thermostat right now." },

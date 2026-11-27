@@ -36,6 +36,17 @@ AUX_DROOP_F = 1.5
 # point; above it the compressor has capacity to spare.
 AUX_BALANCE_MARGIN_F = 5.0
 
+# Two opt-in model hooks (docs/internal/TWIN_STATS_SPEC.md 3.6). A model that
+# defines neither, such as PerformanceModel, simulates exactly as before.
+#
+# * ``model.begin_step(time)`` is called at the top of every step, before any
+#   rate is read, for models whose rates vary with the time of day (the twin
+#   house model's delayed sun).
+# * ``model.aux_rule`` as ``{"runtime_min": R, "lockout_f": L}`` replaces the
+#   droop rule with runtime staging: strips come on once the compressor has
+#   been heating without a break for R minutes, only at or below L outdoor,
+#   and only while the house is below target.
+
 
 class ThermalSimulator:
     """Simulates indoor temperature forward in time."""
@@ -81,8 +92,15 @@ class ThermalSimulator:
         active_mode = "off"
         results: list[SimulationPoint] = []
         current_time = start_time
+        begin_step = getattr(self.model, "begin_step", None)
+        aux_rule = getattr(self.model, "aux_rule", None)
+        if not isinstance(aux_rule, dict):
+            aux_rule = None
+        heat_run_minutes = 0.0  # compressor heating without a break, this call
 
         while current_time <= end_time:
+            if begin_step is not None:
+                begin_step(current_time)
             outdoor_temp = self._interpolate_forecast(current_time, forecast)
             entry = self._get_schedule_entry(current_time, schedule)
 
@@ -108,7 +126,12 @@ class ThermalSimulator:
                     rate = self.model.cooling_delta(outdoor_temp, indoor_temp)
                     cumulative_runtime += dt_minutes
                 elif step_mode == "heat":
-                    aux_running = self._aux_engaged(outdoor_temp, indoor_temp, target)
+                    if aux_rule is not None:
+                        aux_running = self._aux_runtime_engaged(
+                            aux_rule, outdoor_temp, indoor_temp, target, heat_run_minutes
+                        )
+                    else:
+                        aux_running = self._aux_engaged(outdoor_temp, indoor_temp, target)
                     # Same: Profile heating deltas already include drift.
                     rate = self.model.heating_delta(outdoor_temp, indoor_temp)
                     if aux_running:
@@ -117,9 +140,13 @@ class ThermalSimulator:
                             rate = aux_rate
                         cumulative_aux += dt_minutes
                     cumulative_runtime += dt_minutes
+                    heat_run_minutes += dt_minutes
                 else:
                     hvac_on = False
                     rate = self.model.passive_drift(outdoor_temp, indoor_temp, solar_condition=solar_cond)
+
+            if not (hvac_on and active_mode == "heat"):
+                heat_run_minutes = 0.0
 
             results.append(
                 SimulationPoint(
@@ -236,6 +263,25 @@ class ThermalSimulator:
         if outdoor_temp > bp + AUX_BALANCE_MARGIN_F:
             return False
         return indoor_temp < target_temp - AUX_DROOP_F
+
+    @staticmethod
+    def _aux_runtime_engaged(
+        rule: dict,
+        outdoor_temp: float,
+        indoor_temp: float,
+        target_temp: float,
+        heat_run_minutes: float,
+    ) -> bool:
+        """Runtime staging (``model.aux_rule``), as an Ecobee stages strips.
+
+        ``heat_run_minutes`` is how long the compressor had been heating
+        without a break before this step.
+        """
+        lockout = rule.get("lockout_f")
+        runtime = rule.get("runtime_min")
+        if lockout is None or runtime is None:
+            return False
+        return outdoor_temp <= lockout and heat_run_minutes >= runtime - 1e-9 and indoor_temp < target_temp
 
     def _interpolate_forecast(self, time: datetime, forecast: list[ForecastPoint]) -> float:
         """Get outdoor temp at a given time by interpolating the forecast."""
