@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+### Fixed
+
+- **Runaway indoor forecasts.** The plan's forecast could climb without limit (95°F with the heat set to 63 and 45°F outside), or fall without limit in hot weather. The profiler had fitted a separate drift line for cloudy hours that sloped the wrong way, and the drift's indoor-temperature correction reused that slope. That turned "a warmer house cools faster" into "a warmer house warms faster". A drift fit that does not rise with outdoor temperature is now rejected, and the indoor correction always uses the main drift line's slope, kept above zero. Present since solar-aware drift was added; it showed once the cloudy fit had enough data.
+
 ## 0.5.1
 
 ### Fixed

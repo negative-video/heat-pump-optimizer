@@ -37,6 +37,14 @@ DEFAULT_AUX_POWER_WATTS = 10000.0
 # was actually recorded at and never needs this.
 NOMINAL_INDOOR_F = 72.0
 
+# Floor on the drift slope used for the indoor correction (F/hr per F).
+# Physics fixes its sign: a warmer house loses heat faster, so drift must
+# fall as indoor temperature rises. A fitted slope at or below zero (a noisy
+# solar-condition fit once produced -0.13) would flip that and make every
+# forecast run away: in November 2026 the live plan predicted 95 F with the
+# heat set to 63 and 45 F outside.
+MIN_DRIFT_SLOPE = 0.005
+
 
 class PerformanceModel:
     """Models HVAC performance using temperature profile data."""
@@ -310,7 +318,7 @@ class PerformanceModel:
         """
         if indoor_temp is None:
             return 0.0
-        slope = (self._resist_trendline or {}).get("slope", 0.03)
+        slope = self._drift_slope()
         anchor = (
             self.indoor_anchor(mode, outdoor_temp)
             if outdoor_temp is not None
@@ -385,22 +393,35 @@ class PerformanceModel:
         between the actual indoor temp and the nominal ~72F assumed by the
         empirical lookup tables.
         """
-        # Select trendline: solar-specific if available, else aggregate
-        trendline = self._resist_trendline
-        if solar_condition and solar_condition in self._solar_resist_trendlines:
-            trendline = self._solar_resist_trendlines[solar_condition]
+        # Select trendline: solar-specific if available and physical, else
+        # aggregate. Drift must rise with outdoor temperature; a solar fit
+        # with a flat or falling slope is noise and is ignored.
+        solar = self._solar_resist_trendlines.get(solar_condition) if solar_condition else None
+        if solar is not None and not float(solar.get("slope", 0.0)) > 0:
+            solar = None
 
         # Use trendline directly (not bin lookup) for solar-specific predictions,
         # since solar bins may not have the same bin coverage as the aggregate.
-        if solar_condition and solar_condition in self._solar_resist_trendlines:
-            base = trendline["slope"] * outdoor_temp + trendline["intercept"]
+        if solar is not None:
+            base = solar["slope"] * outdoor_temp + solar["intercept"]
         else:
             base = self._lookup_delta(self._resist_deltas, self._resist_trendline, outdoor_temp)
 
         if indoor_temp is None:
             return base
-        slope = trendline["slope"] if trendline else 0.03
-        return base - slope * (indoor_temp - self.indoor_anchor("resist", outdoor_temp))
+        # The indoor correction always uses the aggregate drift slope, which
+        # rests on every observation, never a solar-condition fit.
+        return base - self._drift_slope() * (indoor_temp - self.indoor_anchor("resist", outdoor_temp))
+
+    def _drift_slope(self) -> float:
+        """Aggregate drift slope for indoor corrections, floored at a small
+        positive value so a correction can never amplify itself."""
+        slope = (self._resist_trendline or {}).get("slope", 0.03)
+        try:
+            slope = float(slope)
+        except (TypeError, ValueError):
+            slope = 0.03
+        return max(slope, MIN_DRIFT_SLOPE)
 
     # ── Gross HVAC forcing and energy ──────────────────────────────
 

@@ -556,7 +556,13 @@ class PerformanceProfiler:
         qualified = {t: acc for t, acc in bins.items() if acc.count >= MIN_SAMPLES_PER_BIN}
         if len(qualified) < MIN_BINS_FOR_TRENDLINE:
             return None
-        return self._fit_trendline(qualified)
+        trendline = self._fit_trendline(qualified)
+        # Drift must rise with outdoor temperature. A flat or falling fit is
+        # noise (bins from a narrow, mixed-season range), and using it made
+        # forecasts run away; fall back to the aggregate line instead.
+        if trendline["slope"] <= 0:
+            return None
+        return trendline
 
     # ── Trendline fitting ─────────────────────────────────────────────
 
