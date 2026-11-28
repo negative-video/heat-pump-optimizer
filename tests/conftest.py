@@ -122,6 +122,7 @@ def _register_stubs():
         "CONFIG": "config",
     })
     ha_const.CONF_NAME = "name"
+    ha_const.EVENT_HOMEASSISTANT_STOP = "homeassistant_stop"
     sys.modules.setdefault("homeassistant.const", ha_const)
 
     # -- homeassistant.util --

@@ -45,6 +45,11 @@ NOMINAL_INDOOR_F = 72.0
 # heat set to 63 and 45 F outside.
 MIN_DRIFT_SLOPE = 0.005
 
+# How far outside its fitted outdoor range a solar-condition drift line is
+# still used (F). Beyond it the aggregate line, fitted on every observation,
+# takes over: the solar fits can rest on a few days of a narrow range.
+SOLAR_TRENDLINE_MARGIN_F = 3.0
+
 
 class PerformanceModel:
     """Models HVAC performance using temperature profile data."""
@@ -393,12 +398,17 @@ class PerformanceModel:
         between the actual indoor temp and the nominal ~72F assumed by the
         empirical lookup tables.
         """
-        # Select trendline: solar-specific if available and physical, else
-        # aggregate. Drift must rise with outdoor temperature; a solar fit
-        # with a flat or falling slope is noise and is ignored.
+        # Select trendline: solar-specific if available, physical and fitted
+        # near this outdoor temperature, else aggregate. Drift must rise with
+        # outdoor temperature; a solar fit with a flat or falling slope is
+        # noise and is ignored.
         solar = self._solar_resist_trendlines.get(solar_condition) if solar_condition else None
         if solar is not None and not float(solar.get("slope", 0.0)) > 0:
             solar = None
+        if solar is not None and solar.get("temp_range"):
+            lo, hi = solar["temp_range"]
+            if not lo - SOLAR_TRENDLINE_MARGIN_F <= outdoor_temp <= hi + SOLAR_TRENDLINE_MARGIN_F:
+                solar = None
 
         # Use trendline directly (not bin lookup) for solar-specific predictions,
         # since solar bins may not have the same bin coverage as the aggregate.

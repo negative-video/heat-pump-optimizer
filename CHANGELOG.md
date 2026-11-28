@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3
+
+### Fixed
+
+- **HVAC Energy Today missed evening hours.** Hours were grouped by UTC date, so in US Eastern time everything after 7 pm counted toward the next day. The day now follows your local time zone.
+- **Restarts lost energy.** Home Assistant does not unload integrations when it stops, so the last hour or so of energy, twin data and forecast scores was dropped on every restart. State is now saved when Home Assistant stops.
+- **Twin used rated watts instead of your power sensor.** The recorder backfill never read the HVAC power sensor, so the twin converted runtime with rated watts (one figure for heat and cool). Backfilled days now carry metered watts per mode. Days already stored are filled once from the recorder. The Twin tab showed a fixed 3500/3500 W before any day was valid; it now shows the watts actually in use.
+- **Warm-night forecasts could run away.** A drift line fitted on a few days of one weather condition (for example a week of 42-52°F nights) was extrapolated far outside that range: with the heat off and 60°F outside, the forecast reached 74°F overnight. Condition-specific drift lines are now used only near the outdoor temperatures they were fitted on, and the year-round line covers the rest.
+
 ## 0.5.2
 
 ### Fixed

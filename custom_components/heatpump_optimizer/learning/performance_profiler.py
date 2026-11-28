@@ -562,7 +562,11 @@ class PerformanceProfiler:
         # forecasts run away; fall back to the aggregate line instead.
         if trendline["slope"] <= 0:
             return None
-        return trendline
+        # The outdoor range the fit rests on. A line fitted on a week of
+        # 42-52 F nights says nothing about a 75 F night; the model uses the
+        # aggregate line outside this range.
+        temps = sorted(qualified)
+        return {**trendline, "temp_range": [float(temps[0]), float(temps[-1])]}
 
     # ── Trendline fitting ─────────────────────────────────────────────
 

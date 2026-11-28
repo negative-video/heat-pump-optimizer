@@ -81,6 +81,13 @@ def _record_to_dict(record: HourlySavingsRecord) -> dict[str, Any]:
     return data
 
 
+def _local_day(hour: datetime, zone: tzinfo) -> str:
+    """Calendar day of an hour key in ``zone``; naive keys are UTC."""
+    if hour.tzinfo is None:
+        hour = hour.replace(tzinfo=UTC)
+    return hour.astimezone(zone).strftime("%Y-%m-%d")
+
+
 def _record_from_dict(raw: dict[str, Any]) -> HourlySavingsRecord | None:
     """Rebuild a persisted hourly record, ignoring fields we no longer have."""
     try:
@@ -532,11 +539,11 @@ class SavingsTracker:
         Args:
             tz: Timezone for determining "today". Defaults to UTC if not provided.
         """
-        if tz is not None:
-            today_str = datetime.now(tz).strftime("%Y-%m-%d")
-        else:
-            today_str = datetime.now(UTC).strftime("%Y-%m-%d")
-        today_hours = [r for r in self._hourly_records if r.hour.strftime("%Y-%m-%d") == today_str]
+        zone = tz if tz is not None else UTC
+        today_str = datetime.now(zone).strftime("%Y-%m-%d")
+        # Hour keys are UTC. Compare in the caller's zone, or the evening
+        # hours (after 19:00 Eastern) land on the next day.
+        today_hours = [r for r in self._hourly_records if _local_day(r.hour, zone) == today_str]
         return DailySavingsReport(date=today_str, hours=today_hours)
 
     # ── Headline: measured vs weather-normalized baseline ────────────

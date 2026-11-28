@@ -13,6 +13,7 @@ from pathlib import Path
 from homeassistant.components.frontend import async_register_built_in_panel, async_remove_panel
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.start import async_at_started
@@ -289,6 +290,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_request_refresh()
 
     async_at_started(hass, _on_ha_started)
+
+    async def _on_ha_stop(_event: object) -> None:
+        # Home Assistant does not unload config entries when it stops, so
+        # async_shutdown never ran on a restart and everything since the last
+        # hourly save (energy, twin watts, forecast scores) was lost.
+        try:
+            await coordinator._persist_state()
+        except Exception:  # noqa: BLE001 - never block shutdown
+            _LOGGER.warning("Could not save state on shutdown", exc_info=True)
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_ha_stop))
 
     entry.runtime_data = coordinator
     is_first_entry = not active_entries

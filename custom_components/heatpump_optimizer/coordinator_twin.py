@@ -200,6 +200,7 @@ class TwinMixin:
     async def async_backfill_twin(self) -> None:
         """Replay recorder history into the ledger when it has under 2 days."""
         if len(self.twin_ledger.records) >= TWIN_BACKFILL_IF_FEWER_DAYS:
+            await self._async_backfill_twin_watts()
             return
         series = await self._async_recorder_series(days=TWIN_BACKFILL_DAYS)
         if series is None:
@@ -221,7 +222,35 @@ class TwinMixin:
         tmp = await self.hass.async_add_executor_job(_run)
         before = len(self.twin_ledger.records)
         self._merge_twin_ledger(tmp, take_open=True)
+        # The replay read the power sensor, so these days are already metered
+        self.twin_ledger.metered_backfilled = series.get("power") is not None
         _LOGGER.info("Twin ledger backfilled with %d recorder days", len(self.twin_ledger.records) - before)
+
+    async def _async_backfill_twin_watts(self) -> None:
+        """Once, give stored days the metered watts the recorder kept.
+
+        Days backfilled before the replay read the power sensor were closed
+        with rated watts. Replays the recorder's power and runtime into a
+        scratch ledger and copies each day's metered sums across.
+        """
+        ledger = self.twin_ledger
+        if ledger.metered_backfilled or not getattr(self, "_power_entity_id", None):
+            return
+        series = await self._async_recorder_series(days=TWIN_BACKFILL_DAYS)
+        if series is None or series.get("power") is None:
+            return
+        tz = ledger.tz
+
+        def _run() -> dict[str, dict[str, float]]:
+            tmp = TwinLedger(tz)
+            replay_twin_history(tmp, series)
+            return dict(tmp._pending_watts)
+
+        sums = await self.hass.async_add_executor_job(_run)
+        filled = ledger.fill_metered(sums, base_model=self._get_active_model(), **self._twin_close_kwargs())
+        ledger.metered_backfilled = True
+        self._twin_summary_cache = None
+        _LOGGER.info("Twin metered watts filled for %d stored days", filled)
 
     def _merge_twin_ledger(self, tmp: TwinLedger, take_open: bool = False) -> None:
         """Adopt a ledger built in an executor job, keeping what the live one
@@ -238,6 +267,7 @@ class TwinMixin:
             tmp._open = live._open
             tmp._last_sample = live._last_sample
             tmp._heat_run_min = live._heat_run_min
+        tmp.metered_backfilled = tmp.metered_backfilled or live.metered_backfilled
         tmp.prune()
         self.twin_ledger = tmp
         self._twin_summary_cache = None

@@ -187,8 +187,8 @@ class DashboardMixin:
         forward onto the grid: ``indoor`` (the panel's weighted temperature
         when the recorder kept enough of it, else the thermostat's),
         ``thermostat_indoor``, ``outdoor``, ``action``, ``aux``,
-        ``heat_setpoint``, ``mode``, ``temperature``, ``target_low`` and
-        ``target_high``. None when the recorder is unavailable or has no
+        ``heat_setpoint``, ``mode``, ``temperature``, ``target_low``,
+        ``target_high`` and ``power`` (None without a power sensor). None when the recorder is unavailable or has no
         thermostat history.
         """
         try:
@@ -219,6 +219,9 @@ class DashboardMixin:
             weighted_id = None
         if weighted_id:
             entity_ids.append(weighted_id)
+        power_id = getattr(self, "_power_entity_id", None)
+        if power_id:
+            entity_ids.append(power_id)
 
         end = datetime.now(UTC).replace(second=0, microsecond=0)
         start = end - timedelta(days=days)
@@ -315,6 +318,18 @@ class DashboardMixin:
                 if (when := _stamp(state)) is not None
             ]
 
+        # HVAC power, so the twin's backfilled days carry metered watts
+        power: list[tuple[datetime, float | None]] = []
+        if power_id:
+            for state in states.get(power_id, []):
+                when = _stamp(state)
+                if when is None:
+                    continue
+                watts = _number(state.state)
+                if watts is not None and str((state.attributes or {}).get("unit_of_measurement", "")) == "kW":
+                    watts *= 1000.0
+                power.append((when, watts))
+
         steps = int((end - start).total_seconds() // (step_minutes * 60))
         grid = [start + timedelta(minutes=step_minutes * i) for i in range(steps)]
         return {
@@ -329,6 +344,7 @@ class DashboardMixin:
             "temperature": _fill_forward(_temps("temperature"), grid),
             "target_low": _fill_forward(_temps("target_temp_low"), grid),
             "target_high": _fill_forward(_temps("target_temp_high"), grid),
+            "power": _fill_forward(power, grid) if power else None,
         }
 
     async def async_backfill_dashboard_archive(self) -> None:

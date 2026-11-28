@@ -426,6 +426,9 @@ class TwinLedger:
         self._today_cache: tuple[str, dict] | None = None
         # Metered compressor watt sums of days finished but not yet closed.
         self._pending_watts: dict[str, dict[str, float]] = {}
+        # Set once stored days have had their metered watts filled from the
+        # recorder (days kept before the backfill read the power sensor).
+        self.metered_backfilled = False
 
     def set_location(self, lat: float, lon: float) -> None:
         self.fit.lat = float(lat)
@@ -646,6 +649,62 @@ class TwinLedger:
                 rec["actual"]["mae"] = [round(mae_sum, 3), mae_n]
         rec["simulated"] = "replay" in rec["arms"]
         return rec
+
+    def fill_metered(
+        self,
+        watt_sums_by_day: dict[str, dict[str, float]],
+        *,
+        base_model: Any = None,
+        rated_heat: float = 3500.0,
+        rated_cool: float = 3500.0,
+        aux_kw: float | None = None,
+        **_ignored: Any,
+    ) -> int:
+        """Give stored days the metered watt sums they were closed without.
+
+        Days closed before the recorder backfill read the power sensor carry
+        zero metered sums, so the twin kept converting runtime with rated
+        watts. Fills only days with no metered compressor hours, then
+        re-resolves every day's watt constants in date order, as close_day
+        would have. Returns how many days were filled.
+        """
+        filled = 0
+        for d, sums in watt_sums_by_day.items():
+            rec = self.records.get(d)
+            if rec is None or not sums:
+                continue
+            metered = rec.get("metered") or {}
+            # A day closed without a power reading still carries zeroed sums
+            if (metered.get("heat_h") or 0.0) + (metered.get("cool_h") or 0.0) > 0.0:
+                continue
+            if sums.get("heat_h", 0.0) + sums.get("cool_h", 0.0) <= 0.0:
+                continue
+            rec["metered"] = {k: round(v, 3) for k, v in sums.items()}
+            filled += 1
+        if filled:
+            model_aux = getattr(base_model, "aux_power_watts", 10000.0) if base_model is not None else 10000.0
+            for d in sorted(self.records):
+                sums = self._measured_watt_sums(d)
+                watts = resolve_watts(
+                    rated_heat=rated_heat,
+                    rated_cool=rated_cool,
+                    measured_heat_kwh=sums["heat_wh"] / 1000.0,
+                    measured_heat_h=sums["heat_h"],
+                    measured_cool_kwh=sums["cool_wh"] / 1000.0,
+                    measured_cool_h=sums["cool_h"],
+                    aux_kw_configured=aux_kw,
+                    model_aux_watts=model_aux,
+                )
+                self.records[d]["watts"] = {
+                    "heat": round(watts.heat, 1),
+                    "cool": round(watts.cool, 1),
+                    "aux": round(watts.aux, 1),
+                    "heat_source": watts.heat_source,
+                    "cool_source": watts.cool_source,
+                    "aux_source": watts.aux_source,
+                }
+            self._today_cache = None
+        return filled
 
     def add_imported(
         self,
@@ -1001,7 +1060,15 @@ class TwinLedger:
         arms = self.arm_stats(acc, k)
         band = _band(acc["gain"], k)
         win = self.window()
-        watts = _watts_of(win[-1]) if win else Watts(3500.0, 3500.0, 10000.0)
+        # The newest valid day's constants; before any day is valid, the
+        # newest stored day's, which were resolved the same way. A fixed
+        # 3500/3500 placeholder here read as the twin's actual watts.
+        if win:
+            watts = _watts_of(win[-1])
+        elif self.records:
+            watts = _watts_of(self.records[max(self.records)])
+        else:
+            watts = Watts(3500.0, 3500.0, 10000.0)
 
         def cost(kwh: float | None) -> float | None:
             return None if kwh is None or rate is None else round(kwh * rate, 2)
@@ -1185,6 +1252,7 @@ class TwinLedger:
             "open": self._open.to_dict() if self._open is not None else None,
             "last_sample": self._last_sample.isoformat() if self._last_sample else None,
             "heat_run_min": self._heat_run_min,
+            "metered_backfilled": self.metered_backfilled,
         }
 
     @classmethod
@@ -1208,6 +1276,7 @@ class TwinLedger:
             except ValueError:
                 out._last_sample = None
         out._heat_run_min = float(data.get("heat_run_min", 0.0))
+        out.metered_backfilled = bool(data.get("metered_backfilled", False))
         return out
 
 
@@ -1292,12 +1361,14 @@ def replay_twin_history(ledger: TwinLedger, series: dict[str, Any]) -> list:
     """
     finished = []
     grid = series["grid"]
+    power = series.get("power") or [None] * len(grid)
     for i, instant in enumerate(grid):
         indoor = series["thermostat_indoor"][i]
         action = series["action"][i]
         if indoor is None and action is None:
             continue
         mode = series["mode"][i]
+        watts = power[i]
         res = ledger.record_cycle(
             instant,
             indoor_temp=indoor,
@@ -1308,6 +1379,8 @@ def replay_twin_history(ledger: TwinLedger, series: dict[str, Any]) -> list:
             target_high=series["target_high"][i],
             hvac_action=action,
             aux_active=bool(series["aux"][i]),
+            power_watts=watts,
+            power_measured=watts is not None,
         )
         if res is not None:
             day, next_top = res
